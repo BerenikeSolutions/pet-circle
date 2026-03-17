@@ -44,6 +44,7 @@ htmlcov/
 # Real .env files with secrets are gitignored.
 backend/.env
 backend/envs/.env.local
+backend/envs/.env.development
 backend/envs/.env.production
 frontend/.env.local
 # frontend/.env.development, .env.staging, .env.production are committed (no secrets).
