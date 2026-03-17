@@ -1,7 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import type { DashboardData } from '@/lib/api';
+import type { DashboardData, ConditionItem } from '@/lib/api';
+import { addCondition, deleteCondition } from '@/lib/api';
 import StatusBadge from '@/components/ui/StatusBadge';
 import CollapsibleCard from '@/components/ui/CollapsibleCard';
 import ReminderBar from '@/components/ui/ReminderBar';
@@ -18,12 +19,16 @@ interface ConditionsTabProps {
 export default function ConditionsTab({ data, token, onCartClick }: ConditionsTabProps) {
   const [addSheet, setAddSheet] = useState(false);
   const [conditionForm, setConditionForm] = useState({ name: '', diagnosis: '', since: '', notes: '' });
+  const [saving, setSaving] = useState(false);
   const [pdfState, setPdfState] = useState<'idle' | 'generating' | 'done'>('idle');
 
+  const conditions = data.conditions || [];
   const diagnostics = data.diagnostic_results || [];
   const documents = data.documents || [];
+  const hasConditions = conditions.length > 0;
   const hasDiagnostics = diagnostics.length > 0;
 
+  // Group diagnostics by test_type for display alongside conditions.
   const paramsByType = diagnostics.reduce((acc, d) => {
     const key = d.test_type || 'Other';
     if (!acc[key]) acc[key] = [];
@@ -38,13 +43,35 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
       }, '' as string)
     : null;
 
-  const mockTimeline = [
-    { date: '10 Sep 2023', event: 'Hip X-Ray — Mild dysplasia confirmed', icon: '🩻' },
-    { date: '10 Sep 2023', event: 'Started Meloxicam 1mg daily', icon: '💊' },
-    { date: '12 Oct 2023', event: 'Follow-up — Mobility improved', icon: '🩺' },
-    { date: '15 Jan 2024', event: 'Added Omega-3 supplement', icon: '🐟' },
-    { date: '01 Mar 2024', event: 'Blood work — Liver enzymes normal', icon: '🔬' },
-  ];
+  const handleAddCondition = async () => {
+    if (!conditionForm.name.trim()) return;
+    setSaving(true);
+    try {
+      await addCondition(token, {
+        name: conditionForm.name.trim(),
+        diagnosis: conditionForm.diagnosis.trim() || undefined,
+        diagnosed_at: conditionForm.since.trim() || undefined,
+        notes: conditionForm.notes.trim() || undefined,
+      });
+      setConditionForm({ name: '', diagnosis: '', since: '', notes: '' });
+      setAddSheet(false);
+      window.location.reload();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Failed to add condition');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeleteCondition = async (conditionId: string) => {
+    if (!confirm('Deactivate this condition?')) return;
+    try {
+      await deleteCondition(token, conditionId);
+      window.location.reload();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Failed to remove condition');
+    }
+  };
 
   const handleGeneratePdf = () => {
     setPdfState('generating');
@@ -54,17 +81,24 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
   return (
     <div className="space-y-4">
       {/* Condition Cards */}
-      {hasDiagnostics ? (
+      {hasConditions ? (
+        conditions.map((condition) => (
+          <ConditionCard
+            key={condition.id}
+            condition={condition}
+            onDelete={() => handleDeleteCondition(condition.id)}
+          />
+        ))
+      ) : hasDiagnostics ? (
+        /* Fallback: show diagnostics grouped by type when no conditions exist */
         Object.entries(paramsByType).map(([type, params]) => (
           <div key={type} className="bg-white rounded-2xl shadow-sm border border-blue-100 p-4 space-y-3">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-sm flex items-center gap-2">
-                <span>🏥</span> {type}
+                <span>🏥</span> {type.charAt(0).toUpperCase() + type.slice(1)} Results
               </h3>
               <StatusBadge status="managed" />
             </div>
-
-            {/* Parameters */}
             <div className="space-y-2">
               {params.map((p, i) => {
                 const isNormal = p.status_flag === 'normal';
@@ -89,24 +123,6 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
                 );
               })}
             </div>
-
-            {/* Medications section (mocked if diagnostics present) */}
-            <div className="border-t border-gray-100 pt-3">
-              <p className="text-[10px] font-bold text-gray-400 uppercase mb-2">Medications</p>
-              <div className="space-y-2">
-                <MedRow name="Meloxicam 1mg" note="Once daily · Anti-inflammatory" status="ok" />
-                <MedRow name="Omega-3 Supplement" note="1 capsule daily · Joint support" status="ok" />
-              </div>
-            </div>
-
-            {/* Monitoring */}
-            <div className="border-t border-gray-100 pt-3">
-              <p className="text-[10px] font-bold text-gray-400 uppercase mb-2">Monitoring</p>
-              <div className="space-y-2">
-                <MonitorRow name="Follow-up Vet Visit" freq="Every 6 months" />
-                <MonitorRow name="Blood Work" freq="Yearly" />
-              </div>
-            </div>
           </div>
         ))
       ) : (
@@ -117,6 +133,43 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
             When your vet identifies a condition, it will appear here with medication tracking, monitoring schedules, and management chronology.
           </p>
         </div>
+      )}
+
+      {/* Diagnostic Results (shown alongside conditions when both exist) */}
+      {hasConditions && hasDiagnostics && (
+        <CollapsibleCard icon="🔬" title="Diagnostic Results" subtitle="Lab values and reports">
+          <div className="p-4 space-y-3">
+            {Object.entries(paramsByType).map(([type, params]) => (
+              <div key={type}>
+                <p className="text-[10px] font-bold text-gray-400 uppercase mb-2">{type}</p>
+                <div className="space-y-1">
+                  {params.map((p, i) => {
+                    const isNormal = p.status_flag === 'normal';
+                    return (
+                      <div key={i} className="flex items-center justify-between py-1 border-b border-gray-50 last:border-0">
+                        <div>
+                          <p className="text-sm text-gray-800">{p.parameter_name}</p>
+                          <p className="text-[11px] text-gray-500">
+                            {p.value_numeric ?? p.value_text} {p.unit} · Ref: {p.reference_range || '—'}
+                          </p>
+                        </div>
+                        <span
+                          className="text-[10px] font-bold px-2 py-0.5 rounded-full"
+                          style={{
+                            color: isNormal ? '#34C759' : '#FF3B30',
+                            backgroundColor: isNormal ? '#F0FFF4' : '#FFF0F0',
+                          }}
+                        >
+                          {p.status_flag || 'Unknown'}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        </CollapsibleCard>
       )}
 
       {/* Add Condition */}
@@ -135,25 +188,34 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
         )}
       </div>
 
-      {/* Management Chronology */}
-      <CollapsibleCard icon="📅" title="Management Chronology" subtitle="Timeline of events">
-        <div className="p-4">
-          <div className="relative pl-6">
-            <div className="absolute left-2 top-0 bottom-0 w-0.5 bg-gray-200" />
-            {mockTimeline.map((ev, i) => (
-              <div key={i} className="relative mb-4 last:mb-0">
-                <div className="absolute -left-4 w-4 h-4 bg-white border-2 border-brand rounded-full flex items-center justify-center text-[8px]">
-                  {ev.icon}
-                </div>
-                <div className="ml-2">
-                  <p className="text-[10px] text-gray-400 font-medium">{ev.date}</p>
-                  <p className="text-xs text-gray-800">{ev.event}</p>
-                </div>
-              </div>
-            ))}
+      {/* Management Chronology — built from real condition data */}
+      {hasConditions && (
+        <CollapsibleCard icon="📅" title="Management Chronology" subtitle="Timeline of events">
+          <div className="p-4">
+            <div className="relative pl-6">
+              <div className="absolute left-2 top-0 bottom-0 w-0.5 bg-gray-200" />
+              {conditions
+                .filter(c => c.diagnosed_at)
+                .sort((a, b) => (a.diagnosed_at || '').localeCompare(b.diagnosed_at || ''))
+                .map((c, i) => (
+                  <div key={c.id} className="relative mb-4 last:mb-0">
+                    <div className="absolute -left-4 w-4 h-4 bg-white border-2 border-brand rounded-full flex items-center justify-center text-[8px]">
+                      🩺
+                    </div>
+                    <div className="ml-2">
+                      <p className="text-[10px] text-gray-400 font-medium">
+                        {c.diagnosed_at ? formatApiDate(c.diagnosed_at) : ''}
+                      </p>
+                      <p className="text-xs text-gray-800">
+                        {c.name}{c.diagnosis ? ` — ${c.diagnosis}` : ''}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+            </div>
           </div>
-        </div>
-      </CollapsibleCard>
+        </CollapsibleCard>
+      )}
 
       {/* Health PDF Card */}
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
@@ -210,14 +272,90 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
             </div>
           ))}
           <button
-            onClick={() => setAddSheet(false)}
-            className="w-full py-3 rounded-xl text-white text-sm font-semibold"
+            onClick={handleAddCondition}
+            disabled={saving || !conditionForm.name.trim()}
+            className="w-full py-3 rounded-xl text-white text-sm font-semibold disabled:opacity-50"
             style={{ background: 'var(--brand-gradient)' }}
           >
-            Add Condition
+            {saving ? 'Adding...' : 'Add Condition'}
           </button>
         </div>
       </BottomSheet>
+    </div>
+  );
+}
+
+function ConditionCard({ condition, onDelete }: { condition: ConditionItem; onDelete: () => void }) {
+  const statusMap: Record<string, string> = {
+    chronic: 'managed',
+    episodic: 'upcoming',
+    resolved: 'done',
+  };
+
+  return (
+    <div className="bg-white rounded-2xl shadow-sm border border-blue-100 p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="font-semibold text-sm flex items-center gap-2">
+          <span>🏥</span> {condition.name}
+        </h3>
+        <div className="flex items-center gap-2">
+          <StatusBadge status={statusMap[condition.condition_type] || 'managed'} label={condition.condition_type} />
+          <button
+            onClick={onDelete}
+            className="text-gray-400 hover:text-red-500 text-xs"
+            title="Remove condition"
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+
+      {condition.diagnosis && (
+        <p className="text-xs text-gray-600">{condition.diagnosis}</p>
+      )}
+
+      {condition.diagnosed_at && (
+        <p className="text-[11px] text-gray-400">Diagnosed: {formatApiDate(condition.diagnosed_at)}</p>
+      )}
+
+      {/* Medications */}
+      {condition.medications.length > 0 && (
+        <div className="border-t border-gray-100 pt-3">
+          <p className="text-[10px] font-bold text-gray-400 uppercase mb-2">Medications</p>
+          <div className="space-y-2">
+            {condition.medications.map((med) => (
+              <MedRow
+                key={med.id}
+                name={`${med.name}${med.dose ? ` ${med.dose}` : ''}`}
+                note={[med.frequency, med.route].filter(Boolean).join(' · ')}
+                status={med.status === 'active' ? 'ok' : 'discontinued'}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Monitoring */}
+      {condition.monitoring.length > 0 && (
+        <div className="border-t border-gray-100 pt-3">
+          <p className="text-[10px] font-bold text-gray-400 uppercase mb-2">Monitoring</p>
+          <div className="space-y-2">
+            {condition.monitoring.map((mon) => (
+              <MonitorRow
+                key={mon.id}
+                name={mon.name}
+                freq={mon.frequency || 'As needed'}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {condition.notes && (
+        <div className="border-t border-gray-100 pt-2">
+          <p className="text-[11px] text-gray-500">{condition.notes}</p>
+        </div>
+      )}
     </div>
   );
 }
@@ -234,7 +372,7 @@ function MedRow({ name, note, status }: { name: string; note: string; status: st
           <p className="text-sm font-medium text-gray-900">{name}</p>
           <p className="text-[11px] text-gray-500">{note}</p>
         </div>
-        <StatusBadge status={status === 'ok' ? 'done' : 'urgent'} label={status === 'ok' ? 'Active' : 'Refill'} />
+        <StatusBadge status={status === 'ok' ? 'done' : 'urgent'} label={status === 'ok' ? 'Active' : 'Stopped'} />
       </div>
       <ReminderBar enabled={reminderOn} onToggle={setReminderOn} freq={freq} unit={unit} onFreqChange={(f, u) => { setFreq(f); setUnit(u); }} />
     </div>

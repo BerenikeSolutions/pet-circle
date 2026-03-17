@@ -20,6 +20,16 @@ from app.models.diagnostic_test_result import DiagnosticTestResult
 from app.models.order import Order
 from app.models.order_recommendation import OrderRecommendation
 from app.models.pet_preference import PetPreference
+from app.models.condition import Condition
+from app.models.condition_medication import ConditionMedication
+from app.models.condition_monitoring import ConditionMonitoring
+from app.models.contact import Contact
+from app.models.weight_history import WeightHistory
+from app.models.diet_item import DietItem
+from app.models.hygiene_preference import HygienePreference
+from app.models.product_catalog import ProductCatalog
+from app.models.nudge import Nudge
+from app.models.cart_item import CartItem
 
 __all__ = [
     "User",
@@ -36,4 +46,14 @@ __all__ = [
     "Order",
     "OrderRecommendation",
     "PetPreference",
+    "Condition",
+    "ConditionMedication",
+    "ConditionMonitoring",
+    "Contact",
+    "WeightHistory",
+    "DietItem",
+    "HygienePreference",
+    "ProductCatalog",
+    "Nudge",
+    "CartItem",
 ]

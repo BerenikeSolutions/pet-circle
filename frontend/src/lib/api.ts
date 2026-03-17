@@ -56,7 +56,7 @@ export interface DocumentItem {
 }
 
 export interface DiagnosticResultItem {
-  test_type: "blood" | "urine";
+  test_type: "blood" | "urine" | "fecal" | "xray";
   parameter_name: string;
   value_numeric: number | null;
   value_text: string | null;
@@ -65,6 +65,49 @@ export interface DiagnosticResultItem {
   status_flag: string | null;
   observed_at: string | null;
   document_id: string | null;
+  created_at: string | null;
+}
+
+export interface ConditionMedicationItem {
+  id: string;
+  name: string;
+  dose: string | null;
+  frequency: string | null;
+  route: string | null;
+  status: string;
+  started_at: string | null;
+  notes: string | null;
+}
+
+export interface ConditionMonitoringItem {
+  id: string;
+  name: string;
+  frequency: string | null;
+}
+
+export interface ConditionItem {
+  id: string;
+  name: string;
+  diagnosis: string | null;
+  condition_type: string;
+  diagnosed_at: string | null;
+  notes: string | null;
+  source: string;
+  is_active: boolean;
+  medications: ConditionMedicationItem[];
+  monitoring: ConditionMonitoringItem[];
+  created_at: string | null;
+}
+
+export interface ContactItem {
+  id: string;
+  role: string;
+  name: string;
+  clinic_name: string | null;
+  phone: string | null;
+  email: string | null;
+  address: string | null;
+  source: string;
   created_at: string | null;
 }
 
@@ -131,6 +174,8 @@ export interface DashboardData {
   reminders: ReminderItem[];
   documents: DocumentItem[];
   diagnostic_results: DiagnosticResultItem[];
+  conditions: ConditionItem[];
+  contacts: ContactItem[];
   health_score: HealthScore;
 }
 
@@ -421,6 +466,159 @@ export async function fetchHealthTrends(token: string): Promise<HealthTrendsData
     if (e.name === "AbortError") {
       throw new Error("Request timed out. Please try again.");
     }
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// --- Condition CRUD ---
+
+export async function addCondition(
+  token: string,
+  body: {
+    name: string;
+    diagnosis?: string;
+    condition_type?: string;
+    diagnosed_at?: string;
+    notes?: string;
+    medications?: { name: string; dose?: string; frequency?: string; route?: string }[];
+    monitoring?: { name: string; frequency?: string }[];
+  }
+): Promise<{ status: string; condition_id: string }> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/conditions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export async function deleteCondition(
+  token: string,
+  conditionId: string
+): Promise<{ status: string; condition_id: string }> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/conditions/${conditionId}`, {
+      method: "DELETE",
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// --- Contact CRUD ---
+
+export async function addContact(
+  token: string,
+  body: {
+    role?: string;
+    name: string;
+    clinic_name?: string;
+    phone?: string;
+    email?: string;
+    address?: string;
+  }
+): Promise<{ status: string; contact_id: string }> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/contacts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export async function updateContact(
+  token: string,
+  contactId: string,
+  body: {
+    role?: string;
+    name?: string;
+    clinic_name?: string;
+    phone?: string;
+    email?: string;
+    address?: string;
+  }
+): Promise<{ status: string; contact_id: string }> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/contacts/${contactId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export async function deleteContact(
+  token: string,
+  contactId: string
+): Promise<{ status: string; contact_id: string }> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/contacts/${contactId}`, {
+      method: "DELETE",
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
     throw e;
   } finally {
     clearTimeout(timeoutId);

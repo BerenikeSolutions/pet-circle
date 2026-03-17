@@ -93,3 +93,9 @@ class Pet(Base):
 
     # One pet can have many orders.
     orders = relationship("Order", back_populates="pet")
+
+    # One pet can have many conditions.
+    conditions = relationship("Condition", back_populates="pet")
+
+    # One pet can have many contacts (vets, groomers, etc.).
+    contacts = relationship("Contact", back_populates="pet")

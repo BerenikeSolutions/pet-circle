@@ -99,8 +99,8 @@ OPENAI_EXTRACTION_TEMPERATURE: float = 0.0
 
 # Max tokens for extraction response.
 # Blood/CBC reports with 30+ diagnostic parameters need ~3000-4000 tokens.
-# 1500 caused JSON truncation ("Unterminated string" errors) on larger reports.
-OPENAI_EXTRACTION_MAX_TOKENS: int = 4096
+# With conditions/contacts/fecal/xray extraction, output can reach ~5000 tokens.
+OPENAI_EXTRACTION_MAX_TOKENS: int = 6144
 
 # Query-specific OpenAI settings — separated from extraction to allow
 # independent tuning (e.g., slightly higher temperature for natural responses).

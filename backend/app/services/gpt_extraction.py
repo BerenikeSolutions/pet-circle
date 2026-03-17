@@ -41,6 +41,10 @@ from app.models.document import Document
 from app.models.pet import Pet
 from app.models.preventive_master import PreventiveMaster
 from app.models.diagnostic_test_result import DiagnosticTestResult
+from app.models.condition import Condition
+from app.models.condition_medication import ConditionMedication
+from app.models.condition_monitoring import ConditionMonitoring
+from app.models.contact import Contact
 from app.core.constants import (
     OPENAI_EXTRACTION_MODEL,
     OPENAI_EXTRACTION_TEMPERATURE,
@@ -95,6 +99,8 @@ def _salvage_partial_extraction_json(raw_json: str) -> dict | None:
         "diagnostic_summary": None,
         "diagnostic_values": [],
         "vaccination_details": [],
+        "conditions": [],
+        "contacts": [],
         "items": [],
     }
 
@@ -453,15 +459,38 @@ EXTRACTION_SYSTEM_PROMPT = (
     "Other for anything else)\n"
     '  - "diagnostic_summary": string or null (for Diagnostic documents only — '
     "provide a 1-2 sentence plain-language summary of key findings; null otherwise)\n"
-    '  - "diagnostic_values": array (for Diagnostic blood/urine reports), each with:\n'
-    '    - "test_type": "blood" or "urine"\n'
-    '    - "parameter_name": string (e.g., Hemoglobin, WBC, Creatinine, Urine pH)\n'
+    '  - "diagnostic_values": array (for Diagnostic reports), each with:\n'
+    '    - "test_type": "blood" | "urine" | "fecal" | "xray"\n'
+    '    - "parameter_name": string (e.g., Hemoglobin, WBC, Creatinine, Urine pH; '
+    "for xray: anatomical region like 'Hip Joint'; "
+    "for fecal: parasite name like 'Roundworm')\n"
     '    - "value_numeric": number or null\n'
-    '    - "value_text": string or null (use when numeric is not available)\n'
+    '    - "value_text": string or null (use when numeric is not available; '
+    "for xray: the finding description; for fecal: result text)\n"
     '    - "unit": string or null\n'
     '    - "reference_range": string or null\n'
     '    - "status_flag": "low" | "normal" | "high" | "abnormal" | null\n'
     '    - "observed_at": date string (same accepted formats) or null\n'
+    '  - "conditions": array of objects (diagnosed conditions found in the document; [] if none), each with:\n'
+    '    - "condition_name": string (e.g., "Hip Dysplasia", "Diabetes", "Skin Allergy")\n'
+    '    - "condition_type": "chronic" | "episodic" | "resolved"\n'
+    '    - "diagnosis": string or null (brief diagnosis description)\n'
+    '    - "diagnosed_at": date string or null\n'
+    '    - "medications": array of objects ([] if none), each with:\n'
+    '      - "name": string (medication name)\n'
+    '      - "dose": string or null\n'
+    '      - "frequency": string or null (e.g., "Once daily", "Twice daily")\n'
+    '      - "route": string or null (e.g., "oral", "topical", "injection")\n'
+    '    - "monitoring": array of objects ([] if none), each with:\n'
+    '      - "name": string (e.g., "Blood Work", "Follow-up Vet Visit")\n'
+    '      - "frequency": string or null (e.g., "Every 6 months", "Yearly")\n'
+    '  - "contacts": array of objects (vet/clinic/specialist contacts found in the document; [] if none), each with:\n'
+    '    - "role": "veterinarian" | "groomer" | "trainer" | "specialist" | "other"\n'
+    '    - "name": string (person name)\n'
+    '    - "clinic_name": string or null\n'
+    '    - "phone": string or null\n'
+    '    - "email": string or null\n'
+    '    - "address": string or null\n'
     '  - "pet_name": string or null (the name of the pet mentioned in the document, '
     "if explicitly stated; null if no pet name is found)\n"
     '  - "doctor_name": string or null (veterinarian/doctor name if explicitly mentioned)\n'
@@ -497,10 +526,15 @@ EXTRACTION_SYSTEM_PROMPT = (
     "- NEVER use vaccine sticker metadata dates (manufacturing/expiry/lot label dates) as last_done_date.\n"
     "- In vaccination documents, do not add Annual Checkup to items unless a separate checkup event is explicitly documented outside the vaccine table.\n"
     "- Capture next_due_date for each vaccine row whenever it is visible.\n"
+    "- For X-ray reports: use test_type 'xray', anatomical region as parameter_name, finding as value_text.\n"
+    "- For fecal reports: use test_type 'fecal', parasite name as parameter_name, result as value_text, status_flag normal/abnormal.\n"
+    "- For conditions: extract any diagnosed disease/condition with its medications and monitoring schedule.\n"
+    "- For contacts: extract vet/specialist contact details when explicitly present in the document.\n"
     "- If any field is missing in the document, use null for that field.\n"
     "- If the document is not pet/veterinary related, set document_type to 'not_pet_related' and items to [].\n"
     '- If no preventive items are found, return {"document_name": "...", "document_type": "pet_medical", '
-    '"document_category": "...", "diagnostic_summary": null, "pet_name": null, "items": []}\n'
+    '"document_category": "...", "diagnostic_summary": null, "pet_name": null, "items": [], '
+    '"conditions": [], "contacts": []}\n'
     "- Return valid JSON only — no markdown, no explanation, no extra text."
 )
 
@@ -643,6 +677,8 @@ def _validate_extraction_json(raw_json: str) -> tuple[list[dict], str | None, st
         "doctor_name": None,
         "clinic_name": None,
         "vaccination_details": [],
+        "conditions": [],
+        "contacts": [],
     }
     if isinstance(parsed, dict):
         document_name = parsed.get("document_name")
@@ -659,6 +695,12 @@ def _validate_extraction_json(raw_json: str) -> tuple[list[dict], str | None, st
         raw_vaccination_details = parsed.get("vaccination_details")
         if isinstance(raw_vaccination_details, list):
             metadata["vaccination_details"] = raw_vaccination_details
+        raw_conditions = parsed.get("conditions")
+        if isinstance(raw_conditions, list):
+            metadata["conditions"] = raw_conditions
+        raw_contacts = parsed.get("contacts")
+        if isinstance(raw_contacts, list):
+            metadata["contacts"] = raw_contacts
 
     # Handle both direct array and wrapper object formats.
     # GPT with json_object mode returns an object, not an array.
@@ -1108,7 +1150,7 @@ async def extract_and_process_document(
                 continue
 
             test_type = str(raw.get("test_type") or "").strip().lower()
-            if test_type not in ("blood", "urine"):
+            if test_type not in ("blood", "urine", "fecal", "xray"):
                 continue
 
             parameter_name = str(raw.get("parameter_name") or "").strip()
@@ -1155,6 +1197,171 @@ async def extract_and_process_document(
                 status_flag=status_flag,
                 observed_at=observed_at,
             ))
+
+        # --- Store extracted conditions ---
+        extracted_conditions = metadata.get("conditions") or []
+        for raw_condition in extracted_conditions:
+            if not isinstance(raw_condition, dict):
+                continue
+            condition_name = str(raw_condition.get("condition_name") or "").strip()
+            if not condition_name:
+                continue
+            try:
+                condition_type = str(raw_condition.get("condition_type") or "chronic").strip().lower()
+                if condition_type not in ("chronic", "episodic", "resolved"):
+                    condition_type = "chronic"
+
+                diagnosed_at = None
+                if raw_condition.get("diagnosed_at"):
+                    try:
+                        diagnosed_at = parse_date(str(raw_condition["diagnosed_at"]))
+                    except ValueError:
+                        diagnosed_at = None
+
+                # Upsert by (pet_id, name) — update if exists, create if not.
+                existing_condition = (
+                    db.query(Condition)
+                    .filter(Condition.pet_id == pet.id, Condition.name == condition_name)
+                    .first()
+                )
+                if existing_condition:
+                    existing_condition.condition_type = condition_type
+                    if raw_condition.get("diagnosis"):
+                        existing_condition.diagnosis = str(raw_condition["diagnosis"])[:500]
+                    if diagnosed_at:
+                        existing_condition.diagnosed_at = diagnosed_at
+                    existing_condition.document_id = document.id
+                    condition_obj = existing_condition
+                else:
+                    condition_obj = Condition(
+                        pet_id=pet.id,
+                        document_id=document.id,
+                        name=condition_name[:200],
+                        diagnosis=(str(raw_condition.get("diagnosis"))[:500] if raw_condition.get("diagnosis") else None),
+                        condition_type=condition_type,
+                        diagnosed_at=diagnosed_at,
+                        source="extraction",
+                    )
+                    db.add(condition_obj)
+                    db.flush()
+
+                # Add medications (deduplicate by condition_id + name).
+                raw_meds = raw_condition.get("medications") or []
+                for med in raw_meds:
+                    if not isinstance(med, dict):
+                        continue
+                    med_name = str(med.get("name") or "").strip()
+                    if not med_name:
+                        continue
+                    existing_med = (
+                        db.query(ConditionMedication)
+                        .filter(ConditionMedication.condition_id == condition_obj.id, ConditionMedication.name == med_name)
+                        .first()
+                    )
+                    if not existing_med:
+                        db.add(ConditionMedication(
+                            condition_id=condition_obj.id,
+                            name=med_name[:200],
+                            dose=(str(med.get("dose"))[:100] if med.get("dose") else None),
+                            frequency=(str(med.get("frequency"))[:100] if med.get("frequency") else None),
+                            route=(str(med.get("route"))[:50] if med.get("route") else None),
+                        ))
+
+                # Add monitoring checks (deduplicate by condition_id + name).
+                raw_monitors = raw_condition.get("monitoring") or []
+                for mon in raw_monitors:
+                    if not isinstance(mon, dict):
+                        continue
+                    mon_name = str(mon.get("name") or "").strip()
+                    if not mon_name:
+                        continue
+                    existing_mon = (
+                        db.query(ConditionMonitoring)
+                        .filter(ConditionMonitoring.condition_id == condition_obj.id, ConditionMonitoring.name == mon_name)
+                        .first()
+                    )
+                    if not existing_mon:
+                        db.add(ConditionMonitoring(
+                            condition_id=condition_obj.id,
+                            name=mon_name[:200],
+                            frequency=(str(mon.get("frequency"))[:100] if mon.get("frequency") else None),
+                        ))
+
+            except Exception as e:
+                logger.warning(
+                    "Error storing extracted condition '%s': %s. document_id=%s",
+                    condition_name, str(e), str(document_id),
+                )
+
+        # --- Store extracted contacts ---
+        extracted_contacts = metadata.get("contacts") or []
+        for raw_contact in extracted_contacts:
+            if not isinstance(raw_contact, dict):
+                continue
+            contact_name = str(raw_contact.get("name") or "").strip()
+            if not contact_name:
+                continue
+            try:
+                role = str(raw_contact.get("role") or "veterinarian").strip().lower()
+                if role not in ("veterinarian", "groomer", "trainer", "specialist", "other"):
+                    role = "veterinarian"
+
+                # Upsert by (pet_id, name, role).
+                existing_contact = (
+                    db.query(Contact)
+                    .filter(Contact.pet_id == pet.id, Contact.name == contact_name, Contact.role == role)
+                    .first()
+                )
+                if existing_contact:
+                    if raw_contact.get("clinic_name"):
+                        existing_contact.clinic_name = str(raw_contact["clinic_name"])[:200]
+                    if raw_contact.get("phone"):
+                        existing_contact.phone = str(raw_contact["phone"])[:30]
+                    if raw_contact.get("email"):
+                        existing_contact.email = str(raw_contact["email"])[:200]
+                    if raw_contact.get("address"):
+                        existing_contact.address = str(raw_contact["address"])[:500]
+                    existing_contact.document_id = document.id
+                else:
+                    db.add(Contact(
+                        pet_id=pet.id,
+                        document_id=document.id,
+                        role=role,
+                        name=contact_name[:200],
+                        clinic_name=(str(raw_contact.get("clinic_name"))[:200] if raw_contact.get("clinic_name") else None),
+                        phone=(str(raw_contact.get("phone"))[:30] if raw_contact.get("phone") else None),
+                        email=(str(raw_contact.get("email"))[:200] if raw_contact.get("email") else None),
+                        address=(str(raw_contact.get("address"))[:500] if raw_contact.get("address") else None),
+                        source="extraction",
+                    ))
+            except Exception as e:
+                logger.warning(
+                    "Error storing extracted contact '%s': %s. document_id=%s",
+                    contact_name, str(e), str(document_id),
+                )
+
+        # Auto-create contact from document-level doctor_name/clinic_name.
+        if selected_doctor_name and _is_plausible_doctor_name(selected_doctor_name, pet_name=pet.name):
+            try:
+                existing_doc_contact = (
+                    db.query(Contact)
+                    .filter(Contact.pet_id == pet.id, Contact.name == selected_doctor_name, Contact.role == "veterinarian")
+                    .first()
+                )
+                if not existing_doc_contact:
+                    db.add(Contact(
+                        pet_id=pet.id,
+                        document_id=document.id,
+                        role="veterinarian",
+                        name=selected_doctor_name[:200],
+                        clinic_name=(str(metadata["clinic_name"])[:200] if metadata["clinic_name"] else None),
+                        source="extraction",
+                    ))
+            except Exception as e:
+                logger.warning(
+                    "Error auto-creating contact from doctor_name '%s': %s",
+                    selected_doctor_name, str(e),
+                )
 
         # --- Non-pet document check ---
         # If GPT determined this is not a pet/veterinary document,

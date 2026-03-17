@@ -43,6 +43,10 @@ from app.models.preventive_master import PreventiveMaster
 from app.models.reminder import Reminder
 from app.models.document import Document
 from app.models.diagnostic_test_result import DiagnosticTestResult
+from app.models.condition import Condition
+from app.models.condition_medication import ConditionMedication
+from app.models.condition_monitoring import ConditionMonitoring
+from app.models.contact import Contact
 from app.services.gpt_extraction import _infer_document_category, _resolve_document_category
 from app.services.document_upload import download_from_supabase
 from app.services.preventive_calculator import (
@@ -308,6 +312,73 @@ def get_dashboard_data(db: Session, token: str) -> dict:
             "created_at": str(row.created_at) if row.created_at else None,
         })
 
+    # --- Load conditions with medications and monitoring ---
+    condition_rows = (
+        db.query(Condition)
+        .filter(Condition.pet_id == pet_id, Condition.is_active == True)
+        .order_by(Condition.created_at.desc())
+        .all()
+    )
+
+    conditions_data = []
+    for cond in condition_rows:
+        medications = []
+        for med in cond.medications:
+            medications.append({
+                "id": str(med.id),
+                "name": med.name,
+                "dose": med.dose,
+                "frequency": med.frequency,
+                "route": med.route,
+                "status": med.status,
+                "started_at": str(med.started_at) if med.started_at else None,
+                "notes": med.notes,
+            })
+
+        monitoring = []
+        for mon in cond.monitoring:
+            monitoring.append({
+                "id": str(mon.id),
+                "name": mon.name,
+                "frequency": mon.frequency,
+            })
+
+        conditions_data.append({
+            "id": str(cond.id),
+            "name": cond.name,
+            "diagnosis": cond.diagnosis,
+            "condition_type": cond.condition_type,
+            "diagnosed_at": str(cond.diagnosed_at) if cond.diagnosed_at else None,
+            "notes": cond.notes,
+            "source": cond.source,
+            "is_active": cond.is_active,
+            "medications": medications,
+            "monitoring": monitoring,
+            "created_at": str(cond.created_at) if cond.created_at else None,
+        })
+
+    # --- Load contacts ---
+    contact_rows = (
+        db.query(Contact)
+        .filter(Contact.pet_id == pet_id)
+        .order_by(Contact.created_at.desc())
+        .all()
+    )
+
+    contacts_data = []
+    for contact in contact_rows:
+        contacts_data.append({
+            "id": str(contact.id),
+            "role": contact.role,
+            "name": contact.name,
+            "clinic_name": contact.clinic_name,
+            "phone": contact.phone,
+            "email": contact.email,
+            "address": contact.address,
+            "source": contact.source,
+            "created_at": str(contact.created_at) if contact.created_at else None,
+        })
+
     # --- Build response (no internal IDs exposed) ---
     # photo_url: serve via dashboard endpoint if pet has a photo, else None.
     photo_url = f"/dashboard/{token}/pet-photo" if pet.photo_path else None
@@ -331,6 +402,8 @@ def get_dashboard_data(db: Session, token: str) -> dict:
         "reminders": reminder_data,
         "documents": document_data,
         "diagnostic_results": diagnostic_results,
+        "conditions": conditions_data,
+        "contacts": contacts_data,
         "health_score": health_score,
     }
 

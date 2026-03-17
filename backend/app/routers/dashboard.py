@@ -23,6 +23,8 @@ Rules:
 """
 
 import logging
+from typing import Optional, List
+from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import Response as FastAPIResponse
 from pydantic import BaseModel, Field
@@ -37,8 +39,23 @@ from app.services.dashboard_service import (
     retry_document_extraction,
     get_document_file_for_token,
     get_pet_photo_for_token,
+    validate_dashboard_token,
 )
+from app.models.condition import Condition
+from app.models.condition_medication import ConditionMedication
+from app.models.condition_monitoring import ConditionMonitoring
+from app.models.contact import Contact
+from app.models.diet_item import DietItem
+from app.models.hygiene_preference import HygienePreference
+from app.models.nudge import Nudge
+from app.models.cart_item import CartItem
 from app.utils.date_utils import parse_date
+from app.services.weight_service import get_weight_history, add_weight_entry
+from app.services.diet_service import get_diet_items, add_diet_item, update_diet_item, delete_diet_item
+from app.services.hygiene_service import get_hygiene_preferences, upsert_hygiene_preference, update_hygiene_date
+from app.services.nutrition_service import analyze_nutrition
+from app.services.nudge_engine import generate_nudges
+from app.services.cart_service import get_cart, toggle_cart_item, update_quantity, initialize_cart, place_order
 
 
 logger = logging.getLogger(__name__)
@@ -385,3 +402,688 @@ def dashboard_health_trends(
     except Exception as e:
         logger.error("Health trends error: %s", str(e), exc_info=True)
         raise HTTPException(status_code=503, detail="Could not load trend data.")
+
+
+# --- Condition CRUD ---
+
+class ConditionMedicationInput(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    dose: Optional[str] = Field(None, max_length=100)
+    frequency: Optional[str] = Field(None, max_length=100)
+    route: Optional[str] = Field(None, max_length=50)
+
+class ConditionMonitoringInput(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    frequency: Optional[str] = Field(None, max_length=100)
+
+class AddConditionRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    diagnosis: Optional[str] = Field(None, max_length=500)
+    condition_type: str = Field("chronic", pattern=r"^(chronic|episodic|resolved)$")
+    diagnosed_at: Optional[str] = None
+    notes: Optional[str] = Field(None, max_length=1000)
+    medications: List[ConditionMedicationInput] = []
+    monitoring: List[ConditionMonitoringInput] = []
+
+
+@router.post("/{token}/conditions")
+def dashboard_add_condition(
+    token: str,
+    body: AddConditionRequest,
+    db: Session = Depends(get_db),
+):
+    """Add a condition manually via dashboard."""
+    try:
+        dashboard_token = validate_dashboard_token(db, token)
+        pet_id = dashboard_token.pet_id
+
+        diagnosed_at = None
+        if body.diagnosed_at:
+            try:
+                diagnosed_at = parse_date(body.diagnosed_at)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid date format for diagnosed_at.")
+
+        # Check for duplicate condition name.
+        existing = (
+            db.query(Condition)
+            .filter(Condition.pet_id == pet_id, Condition.name == body.name)
+            .first()
+        )
+        if existing:
+            if not existing.is_active:
+                existing.is_active = True
+                existing.condition_type = body.condition_type
+                existing.diagnosis = body.diagnosis
+                existing.diagnosed_at = diagnosed_at
+                existing.notes = body.notes
+                existing.source = "manual"
+                db.commit()
+                return {"status": "reactivated", "condition_id": str(existing.id)}
+            raise HTTPException(status_code=409, detail=f"Condition '{body.name}' already exists.")
+
+        condition = Condition(
+            pet_id=pet_id,
+            name=body.name,
+            diagnosis=body.diagnosis,
+            condition_type=body.condition_type,
+            diagnosed_at=diagnosed_at,
+            notes=body.notes,
+            source="manual",
+        )
+        db.add(condition)
+        db.flush()
+
+        for med in body.medications:
+            db.add(ConditionMedication(
+                condition_id=condition.id,
+                name=med.name,
+                dose=med.dose,
+                frequency=med.frequency,
+                route=med.route,
+            ))
+
+        for mon in body.monitoring:
+            db.add(ConditionMonitoring(
+                condition_id=condition.id,
+                name=mon.name,
+                frequency=mon.frequency,
+            ))
+
+        db.commit()
+        return {"status": "created", "condition_id": str(condition.id)}
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Add condition error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not add condition.")
+
+
+@router.delete("/{token}/conditions/{condition_id}")
+def dashboard_delete_condition(
+    token: str,
+    condition_id: str,
+    db: Session = Depends(get_db),
+):
+    """Soft-deactivate a condition (set is_active=False)."""
+    try:
+        dashboard_token = validate_dashboard_token(db, token)
+        condition = (
+            db.query(Condition)
+            .filter(Condition.id == condition_id, Condition.pet_id == dashboard_token.pet_id)
+            .first()
+        )
+        if not condition:
+            raise HTTPException(status_code=404, detail="Condition not found.")
+
+        condition.is_active = False
+        db.commit()
+        return {"status": "deactivated", "condition_id": condition_id}
+
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Delete condition error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not delete condition.")
+
+
+# --- Contact CRUD ---
+
+class AddContactRequest(BaseModel):
+    role: str = Field("veterinarian", pattern=r"^(veterinarian|groomer|trainer|specialist|other)$")
+    name: str = Field(..., min_length=1, max_length=200)
+    clinic_name: Optional[str] = Field(None, max_length=200)
+    phone: Optional[str] = Field(None, max_length=30)
+    email: Optional[str] = Field(None, max_length=200)
+    address: Optional[str] = Field(None, max_length=500)
+
+class UpdateContactRequest(BaseModel):
+    role: Optional[str] = Field(None, pattern=r"^(veterinarian|groomer|trainer|specialist|other)$")
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    clinic_name: Optional[str] = Field(None, max_length=200)
+    phone: Optional[str] = Field(None, max_length=30)
+    email: Optional[str] = Field(None, max_length=200)
+    address: Optional[str] = Field(None, max_length=500)
+
+
+@router.post("/{token}/contacts")
+def dashboard_add_contact(
+    token: str,
+    body: AddContactRequest,
+    db: Session = Depends(get_db),
+):
+    """Add a contact manually via dashboard."""
+    try:
+        dashboard_token = validate_dashboard_token(db, token)
+        pet_id = dashboard_token.pet_id
+
+        existing = (
+            db.query(Contact)
+            .filter(Contact.pet_id == pet_id, Contact.name == body.name, Contact.role == body.role)
+            .first()
+        )
+        if existing:
+            raise HTTPException(status_code=409, detail=f"Contact '{body.name}' ({body.role}) already exists.")
+
+        contact = Contact(
+            pet_id=pet_id,
+            role=body.role,
+            name=body.name,
+            clinic_name=body.clinic_name,
+            phone=body.phone,
+            email=body.email,
+            address=body.address,
+            source="manual",
+        )
+        db.add(contact)
+        db.commit()
+        return {"status": "created", "contact_id": str(contact.id)}
+
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Add contact error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not add contact.")
+
+
+@router.put("/{token}/contacts/{contact_id}")
+def dashboard_update_contact(
+    token: str,
+    contact_id: str,
+    body: UpdateContactRequest,
+    db: Session = Depends(get_db),
+):
+    """Update a contact via dashboard."""
+    try:
+        dashboard_token = validate_dashboard_token(db, token)
+        contact = (
+            db.query(Contact)
+            .filter(Contact.id == contact_id, Contact.pet_id == dashboard_token.pet_id)
+            .first()
+        )
+        if not contact:
+            raise HTTPException(status_code=404, detail="Contact not found.")
+
+        if body.role is not None:
+            contact.role = body.role
+        if body.name is not None:
+            contact.name = body.name
+        if body.clinic_name is not None:
+            contact.clinic_name = body.clinic_name
+        if body.phone is not None:
+            contact.phone = body.phone
+        if body.email is not None:
+            contact.email = body.email
+        if body.address is not None:
+            contact.address = body.address
+
+        db.commit()
+        return {"status": "updated", "contact_id": contact_id}
+
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Update contact error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not update contact.")
+
+
+@router.delete("/{token}/contacts/{contact_id}")
+def dashboard_delete_contact(
+    token: str,
+    contact_id: str,
+    db: Session = Depends(get_db),
+):
+    """Delete a contact via dashboard."""
+    try:
+        dashboard_token = validate_dashboard_token(db, token)
+        contact = (
+            db.query(Contact)
+            .filter(Contact.id == contact_id, Contact.pet_id == dashboard_token.pet_id)
+            .first()
+        )
+        if not contact:
+            raise HTTPException(status_code=404, detail="Contact not found.")
+
+        db.delete(contact)
+        db.commit()
+        return {"status": "deleted", "contact_id": contact_id}
+
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Delete contact error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not delete contact.")
+
+
+# --- Weight History ---
+
+class WeightEntryRequest(BaseModel):
+    weight: float = Field(..., gt=0, le=999.99)
+    recorded_at: str = Field(..., min_length=1)
+    note: Optional[str] = Field(None, max_length=255)
+
+
+@router.get("/{token}/weight-history")
+async def dashboard_weight_history(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """Get weight history entries and ideal range for a pet."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        from app.models.pet import Pet
+        pet = db.query(Pet).filter(Pet.id == dt.pet_id).first()
+        return await get_weight_history(db, dt.pet_id, pet)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Weight history error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not load weight history.")
+
+
+@router.post("/{token}/weight-history")
+async def dashboard_add_weight(
+    token: str,
+    body: WeightEntryRequest,
+    db: Session = Depends(get_db),
+):
+    """Add a weight measurement entry."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await add_weight_entry(db, dt.pet_id, body.weight, body.recorded_at, body.note)
+    except ValueError as e:
+        if "date" in str(e).lower():
+            raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Add weight error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not add weight entry.")
+
+
+# --- Preventive Frequency ---
+
+class PreventiveFrequencyRequest(BaseModel):
+    item_name: str = Field(..., min_length=1)
+    recurrence_days: int = Field(..., gt=0, le=1095)
+
+
+@router.patch("/{token}/preventive-frequency")
+def dashboard_update_frequency(
+    token: str,
+    body: PreventiveFrequencyRequest,
+    db: Session = Depends(get_db),
+):
+    """Update custom recurrence for a preventive item (e.g., vaccine frequency)."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        from app.models.preventive_record import PreventiveRecord
+        record = (
+            db.query(PreventiveRecord)
+            .filter(PreventiveRecord.pet_id == dt.pet_id, PreventiveRecord.item_name == body.item_name)
+            .first()
+        )
+        if not record:
+            raise HTTPException(status_code=404, detail="Preventive record not found.")
+
+        record.custom_recurrence_days = body.recurrence_days
+        # Recalculate next_due_date if last_done_date exists
+        if record.last_done_date:
+            from datetime import timedelta, date as date_type
+            record.next_due_date = record.last_done_date + timedelta(days=body.recurrence_days)
+            today = date_type.today()
+            if record.next_due_date < today:
+                record.status = "overdue"
+            elif (record.next_due_date - today).days <= 30:
+                record.status = "upcoming"
+            else:
+                record.status = "done"
+        db.commit()
+        return {"status": "updated", "item_name": body.item_name, "recurrence_days": body.recurrence_days}
+
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Frequency update error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not update frequency.")
+
+
+# --- Diet Items CRUD ---
+
+class DietItemRequest(BaseModel):
+    type: str = Field("packaged", pattern=r"^(packaged|homemade|supplement)$")
+    label: str = Field(..., min_length=1, max_length=200)
+    detail: Optional[str] = Field(None, max_length=200)
+    icon: Optional[str] = Field(None, max_length=10)
+
+class DietItemUpdateRequest(BaseModel):
+    label: str = Field(..., min_length=1, max_length=200)
+    detail: Optional[str] = Field(None, max_length=200)
+
+
+@router.get("/{token}/diet-items")
+async def dashboard_diet_items(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """Get diet items for a pet."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await get_diet_items(db, dt.pet_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Diet items error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not load diet items.")
+
+
+@router.post("/{token}/diet-items")
+async def dashboard_add_diet_item(
+    token: str,
+    body: DietItemRequest,
+    db: Session = Depends(get_db),
+):
+    """Add a diet item."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await add_diet_item(db, dt.pet_id, body.type, body.label, body.detail, body.icon)
+    except ValueError as e:
+        if "already exists" in str(e).lower():
+            raise HTTPException(status_code=409, detail=str(e))
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Add diet item error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not add diet item.")
+
+
+@router.put("/{token}/diet-items/{item_id}")
+async def dashboard_update_diet_item(
+    token: str,
+    item_id: str,
+    body: DietItemUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    """Update a diet item."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await update_diet_item(db, item_id, dt.pet_id, body.label, body.detail)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Diet item not found.")
+    except Exception as e:
+        logger.error("Update diet item error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not update diet item.")
+
+
+@router.delete("/{token}/diet-items/{item_id}")
+async def dashboard_delete_diet_item(
+    token: str,
+    item_id: str,
+    db: Session = Depends(get_db),
+):
+    """Delete a diet item."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        await delete_diet_item(db, item_id, dt.pet_id)
+        return {"status": "deleted"}
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Diet item not found.")
+    except Exception as e:
+        logger.error("Delete diet item error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not delete diet item.")
+
+
+# --- Hygiene Preferences ---
+
+class HygienePreferenceRequest(BaseModel):
+    freq: int = Field(..., gt=0, le=365)
+    unit: str = Field("month", pattern=r"^(day|week|month|year)$")
+    reminder: bool = False
+    last_done: Optional[str] = None
+
+class HygieneDateRequest(BaseModel):
+    last_done: str = Field(..., min_length=1)
+
+
+@router.get("/{token}/hygiene-preferences")
+async def dashboard_hygiene_preferences(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """Get hygiene preferences for a pet."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await get_hygiene_preferences(db, dt.pet_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Hygiene preferences error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not load hygiene preferences.")
+
+
+@router.put("/{token}/hygiene-preferences/{item_id}")
+async def dashboard_update_hygiene(
+    token: str,
+    item_id: str,
+    body: HygienePreferenceRequest,
+    db: Session = Depends(get_db),
+):
+    """Update or create a hygiene preference."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await upsert_hygiene_preference(db, dt.pet_id, item_id, body.freq, body.unit, body.reminder, body.last_done)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Update hygiene error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not update hygiene preference.")
+
+
+@router.patch("/{token}/hygiene-preferences/{item_id}/date")
+async def dashboard_update_hygiene_date(
+    token: str,
+    item_id: str,
+    body: HygieneDateRequest,
+    db: Session = Depends(get_db),
+):
+    """Update last done date for a hygiene item."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await update_hygiene_date(db, dt.pet_id, item_id, body.last_done)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("Update hygiene date error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not update hygiene date.")
+
+
+# --- Nutrition Analysis ---
+
+@router.get("/{token}/nutrition-analysis")
+async def dashboard_nutrition_analysis(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """Get nutrition analysis for a pet based on their diet items."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await analyze_nutrition(db, dt.pet_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Nutrition analysis error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not generate nutrition analysis.")
+
+
+# --- Condition Timeline ---
+
+@router.get("/{token}/condition-timeline")
+async def dashboard_condition_timeline(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """Get chronological condition management timeline."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        from app.services.condition_service import get_condition_timeline
+        return await get_condition_timeline(db, dt.pet_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Condition timeline error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not load condition timeline.")
+
+
+# --- Nudges ---
+
+@router.get("/{token}/nudges")
+async def dashboard_nudges(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """Get actionable health nudges for a pet."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await generate_nudges(db, dt.pet_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Nudges error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not generate nudges.")
+
+
+@router.patch("/{token}/nudges/{nudge_id}/dismiss")
+def dashboard_dismiss_nudge(
+    token: str,
+    nudge_id: str,
+    db: Session = Depends(get_db),
+):
+    """Dismiss a nudge."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        nudge = (
+            db.query(Nudge)
+            .filter(Nudge.id == nudge_id, Nudge.pet_id == dt.pet_id)
+            .first()
+        )
+        if not nudge:
+            raise HTTPException(status_code=404, detail="Nudge not found.")
+        nudge.dismissed = True
+        db.commit()
+        return {"status": "dismissed"}
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Dismiss nudge error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not dismiss nudge.")
+
+
+# --- Cart & Orders ---
+
+@router.get("/{token}/cart")
+async def dashboard_cart(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """Get cart items for a pet."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await get_cart(db, dt.pet_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Cart error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not load cart.")
+
+
+@router.post("/{token}/cart/toggle/{product_id}")
+async def dashboard_toggle_cart(
+    token: str,
+    product_id: str,
+    db: Session = Depends(get_db),
+):
+    """Toggle an item in/out of cart."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await toggle_cart_item(db, dt.pet_id, product_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Cart item not found.")
+    except Exception as e:
+        logger.error("Toggle cart error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not toggle cart item.")
+
+
+class QuantityRequest(BaseModel):
+    quantity: int = Field(..., ge=1, le=99)
+
+
+@router.patch("/{token}/cart/{product_id}/quantity")
+async def dashboard_update_quantity(
+    token: str,
+    product_id: str,
+    body: QuantityRequest,
+    db: Session = Depends(get_db),
+):
+    """Update cart item quantity."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await update_quantity(db, dt.pet_id, product_id, body.quantity)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Cart item not found.")
+    except Exception as e:
+        logger.error("Update quantity error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not update quantity.")
+
+
+class CouponRequest(BaseModel):
+    code: str = Field(..., min_length=3, max_length=20)
+
+
+@router.post("/{token}/cart/apply-coupon")
+async def dashboard_apply_coupon(
+    token: str,
+    body: CouponRequest,
+    db: Session = Depends(get_db),
+):
+    """Apply coupon code to cart (any 3+ char code gives 10% off)."""
+    try:
+        validate_dashboard_token(db, token)
+        return {"valid": True, "discount_percent": 10, "code": body.code}
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+
+
+class PlaceOrderRequest(BaseModel):
+    payment_method: str = Field(..., pattern=r"^(upi|card|netbanking|cod)$")
+    address: Optional[dict] = None
+    coupon: Optional[str] = None
+
+
+@router.post("/{token}/place-order")
+async def dashboard_place_order(
+    token: str,
+    body: PlaceOrderRequest,
+    db: Session = Depends(get_db),
+):
+    """Place an order from cart items."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await place_order(db, dt.pet_id, dt.user_id, body.payment_method, body.address, body.coupon)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Place order error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not place order.")
