@@ -111,6 +111,24 @@ OPENAI_QUERY_MAX_TOKENS: int = 1500
 # OpenAI retry backoff intervals in seconds.
 OPENAI_RETRY_BACKOFFS: list[float] = [1.0, 2.0]
 
+# --- Weight Lookup (AI-powered ideal weight range) ---
+OPENAI_WEIGHT_LOOKUP_MODEL: str = OPENAI_QUERY_MODEL  # gpt-4.1-mini
+OPENAI_WEIGHT_LOOKUP_TEMPERATURE: float = 0.0
+OPENAI_WEIGHT_LOOKUP_MAX_TOKENS: int = 200
+WEIGHT_CACHE_STALENESS_DAYS: int = 365
+
+# --- Nutrition AI Lookup (breed-specific targets) ---
+OPENAI_NUTRITION_LOOKUP_MAX_TOKENS: int = 500
+NUTRITION_CACHE_STALENESS_DAYS: int = 365
+
+# --- Food Nutrition Estimation (unknown foods) ---
+OPENAI_FOOD_ESTIMATION_MAX_TOKENS: int = 400
+FOOD_CACHE_STALENESS_DAYS: int = 365
+
+# --- Personalized Nutrition Recommendations ---
+OPENAI_NUTRITION_REC_MAX_TOKENS: int = 400
+OPENAI_NUTRITION_REC_TEMPERATURE: float = 0.3
+
 # WhatsApp retries — single retry only.
 WHATSAPP_MAX_RETRIES: int = 1
 

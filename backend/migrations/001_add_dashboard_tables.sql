@@ -117,3 +117,17 @@ CREATE INDEX IF NOT EXISTS idx_cart_items_pet_id ON cart_items(pet_id);
 
 -- Add custom_recurrence_days to preventive_records for vaccine frequency persistence
 ALTER TABLE preventive_records ADD COLUMN IF NOT EXISTS custom_recurrence_days INTEGER DEFAULT NULL;
+
+-- Ideal weight cache: AI-generated breed-specific weight ranges
+-- Keyed by (species, breed, gender, age_category) — shared across all pets of same combo
+CREATE TABLE IF NOT EXISTS ideal_weight_cache (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    species VARCHAR(10) NOT NULL,
+    breed_normalized VARCHAR(100) NOT NULL,
+    gender VARCHAR(10) NOT NULL,
+    age_category VARCHAR(20) NOT NULL,
+    min_weight DECIMAL(5,2) NOT NULL,
+    max_weight DECIMAL(5,2) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_ideal_weight_lookup UNIQUE (species, breed_normalized, gender, age_category)
+);

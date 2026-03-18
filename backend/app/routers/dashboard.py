@@ -52,10 +52,20 @@ from app.models.cart_item import CartItem
 from app.utils.date_utils import parse_date
 from app.services.weight_service import get_weight_history, add_weight_entry
 from app.services.diet_service import get_diet_items, add_diet_item, update_diet_item, delete_diet_item
-from app.services.hygiene_service import get_hygiene_preferences, upsert_hygiene_preference, update_hygiene_date
+from app.services.hygiene_service import get_hygiene_preferences, upsert_hygiene_preference, update_hygiene_date, add_hygiene_item, delete_hygiene_item
 from app.services.nutrition_service import analyze_nutrition
 from app.services.nudge_engine import generate_nudges
 from app.services.cart_service import get_cart, toggle_cart_item, update_quantity, initialize_cart, place_order
+from app.services.condition_service import (
+    get_condition_timeline,
+    update_condition,
+    add_condition_medication,
+    update_condition_medication,
+    delete_condition_medication,
+    add_condition_monitoring,
+    update_condition_monitoring,
+    delete_condition_monitoring,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -532,6 +542,146 @@ def dashboard_delete_condition(
         raise HTTPException(status_code=503, detail="Could not delete condition.")
 
 
+class UpdateConditionRequest(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    diagnosis: Optional[str] = Field(None, max_length=500)
+    condition_type: Optional[str] = Field(None, pattern=r"^(chronic|episodic|resolved)$")
+    diagnosed_at: Optional[str] = None
+    notes: Optional[str] = Field(None, max_length=1000)
+
+
+@router.put("/{token}/conditions/{condition_id}")
+def dashboard_update_condition(
+    token: str,
+    condition_id: str,
+    body: UpdateConditionRequest,
+    db: Session = Depends(get_db),
+):
+    """Update an existing condition."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        updates = body.dict(exclude_unset=True)
+        if "diagnosed_at" in updates and updates["diagnosed_at"]:
+            try:
+                updates["diagnosed_at"] = parse_date(updates["diagnosed_at"])
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid date format.")
+        return update_condition(db, dt.pet_id, condition_id, updates)
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("Update condition error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not update condition.")
+
+
+@router.post("/{token}/conditions/{condition_id}/medications")
+def dashboard_add_medication(
+    token: str,
+    condition_id: str,
+    body: ConditionMedicationInput,
+    db: Session = Depends(get_db),
+):
+    """Add a medication to an existing condition."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return add_condition_medication(db, dt.pet_id, condition_id, body.dict())
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("Add medication error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not add medication.")
+
+
+@router.put("/{token}/medications/{medication_id}")
+def dashboard_update_medication(
+    token: str,
+    medication_id: str,
+    body: ConditionMedicationInput,
+    db: Session = Depends(get_db),
+):
+    """Update an existing medication."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return update_condition_medication(db, dt.pet_id, medication_id, body.dict(exclude_unset=True))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("Update medication error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not update medication.")
+
+
+@router.delete("/{token}/medications/{medication_id}")
+def dashboard_delete_medication(
+    token: str,
+    medication_id: str,
+    db: Session = Depends(get_db),
+):
+    """Delete a medication."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return delete_condition_medication(db, dt.pet_id, medication_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("Delete medication error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not delete medication.")
+
+
+@router.post("/{token}/conditions/{condition_id}/monitoring")
+def dashboard_add_monitoring(
+    token: str,
+    condition_id: str,
+    body: ConditionMonitoringInput,
+    db: Session = Depends(get_db),
+):
+    """Add a monitoring item to an existing condition."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return add_condition_monitoring(db, dt.pet_id, condition_id, body.dict())
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("Add monitoring error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not add monitoring item.")
+
+
+@router.put("/{token}/monitoring/{monitoring_id}")
+def dashboard_update_monitoring(
+    token: str,
+    monitoring_id: str,
+    body: ConditionMonitoringInput,
+    db: Session = Depends(get_db),
+):
+    """Update a monitoring item."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return update_condition_monitoring(db, dt.pet_id, monitoring_id, body.dict(exclude_unset=True))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("Update monitoring error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not update monitoring item.")
+
+
+@router.delete("/{token}/monitoring/{monitoring_id}")
+def dashboard_delete_monitoring(
+    token: str,
+    monitoring_id: str,
+    db: Session = Depends(get_db),
+):
+    """Delete a monitoring item."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return delete_condition_monitoring(db, dt.pet_id, monitoring_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("Delete monitoring error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not delete monitoring item.")
+
+
 # --- Contact CRUD ---
 
 class AddContactRequest(BaseModel):
@@ -728,15 +878,24 @@ def dashboard_update_frequency(
     try:
         dt = validate_dashboard_token(db, token)
         from app.models.preventive_record import PreventiveRecord
-        record = (
-            db.query(PreventiveRecord)
-            .filter(PreventiveRecord.pet_id == dt.pet_id, PreventiveRecord.item_name == body.item_name)
+        from app.models.preventive_master import PreventiveMaster
+
+        result = (
+            db.query(PreventiveRecord, PreventiveMaster)
+            .join(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
+            .filter(
+                PreventiveRecord.pet_id == dt.pet_id,
+                PreventiveMaster.item_name == body.item_name,
+                PreventiveRecord.status != "cancelled",
+            )
             .first()
         )
-        if not record:
+        if not result:
             raise HTTPException(status_code=404, detail="Preventive record not found.")
 
+        record, master = result
         record.custom_recurrence_days = body.recurrence_days
+
         # Recalculate next_due_date if last_done_date exists
         if record.last_done_date:
             from datetime import timedelta, date as date_type
@@ -747,9 +906,16 @@ def dashboard_update_frequency(
             elif (record.next_due_date - today).days <= 30:
                 record.status = "upcoming"
             else:
-                record.status = "done"
+                record.status = "up_to_date"
         db.commit()
-        return {"status": "updated", "item_name": body.item_name, "recurrence_days": body.recurrence_days}
+
+        return {
+            "status": "updated",
+            "item_name": body.item_name,
+            "recurrence_days": body.recurrence_days,
+            "next_due_date": str(record.next_due_date) if record.next_due_date else None,
+            "record_status": record.status,
+        }
 
     except HTTPException:
         raise
@@ -852,6 +1018,13 @@ class HygienePreferenceRequest(BaseModel):
     reminder: bool = False
     last_done: Optional[str] = None
 
+class HygieneAddRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    icon: str = Field("🧹", max_length=10)
+    category: str = Field("daily", pattern=r"^(daily|periodic)$")
+    freq: int = Field(1, gt=0, le=365)
+    unit: str = Field("month", pattern=r"^(day|week|month|year)$")
+
 class HygieneDateRequest(BaseModel):
     last_done: str = Field(..., min_length=1)
 
@@ -890,6 +1063,23 @@ async def dashboard_update_hygiene(
         raise HTTPException(status_code=503, detail="Could not update hygiene preference.")
 
 
+@router.post("/{token}/hygiene-preferences")
+async def dashboard_add_hygiene_item(
+    token: str,
+    body: HygieneAddRequest,
+    db: Session = Depends(get_db),
+):
+    """Add a custom hygiene item for a pet."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await add_hygiene_item(db, dt.pet_id, body.name, body.icon, body.category, body.freq, body.unit)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        logger.error("Add hygiene item error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not add hygiene item.")
+
+
 @router.patch("/{token}/hygiene-preferences/{item_id}/date")
 async def dashboard_update_hygiene_date(
     token: str,
@@ -906,6 +1096,23 @@ async def dashboard_update_hygiene_date(
     except Exception as e:
         logger.error("Update hygiene date error: %s", str(e), exc_info=True)
         raise HTTPException(status_code=503, detail="Could not update hygiene date.")
+
+
+@router.delete("/{token}/hygiene-preferences/{item_id}")
+async def dashboard_delete_hygiene_item(
+    token: str,
+    item_id: str,
+    db: Session = Depends(get_db),
+):
+    """Delete a custom hygiene item. Default items cannot be deleted."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await delete_hygiene_item(db, dt.pet_id, item_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Delete hygiene item error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not delete hygiene item.")
 
 
 # --- Nutrition Analysis ---
@@ -936,7 +1143,6 @@ async def dashboard_condition_timeline(
     """Get chronological condition management timeline."""
     try:
         dt = validate_dashboard_token(db, token)
-        from app.services.condition_service import get_condition_timeline
         return await get_condition_timeline(db, dt.pet_id)
     except ValueError:
         raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")

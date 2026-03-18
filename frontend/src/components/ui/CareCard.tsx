@@ -16,13 +16,22 @@ interface CareCardProps {
   recurrenceDays?: number | null;
   onDateSave: (dateStr: string) => Promise<void>;
   onOrderClick?: (itemId?: string) => void;
+  onFreqChange?: (freq: number, unit: string) => void;
 }
 
-export default function CareCard({ icon, title, product, lastDone, nextDue, status, recurrenceDays, onDateSave, onOrderClick }: CareCardProps) {
+export default function CareCard({ icon, title, product, lastDone, nextDue, status, recurrenceDays, onDateSave, onOrderClick, onFreqChange }: CareCardProps) {
   const [editOpen, setEditOpen] = useState(false);
   const [reminderEnabled, setReminderEnabled] = useState(true);
-  const [freq, setFreq] = useState(3);
-  const [unit, setUnit] = useState('month');
+
+  // Derive initial freq/unit from recurrenceDays
+  const initFreq = recurrenceDays ? (
+    recurrenceDays >= 365 && recurrenceDays % 365 === 0 ? { f: recurrenceDays / 365, u: 'year' } :
+    recurrenceDays >= 30 && recurrenceDays % 30 === 0 ? { f: recurrenceDays / 30, u: 'month' } :
+    recurrenceDays >= 7 && recurrenceDays % 7 === 0 ? { f: recurrenceDays / 7, u: 'week' } :
+    { f: recurrenceDays, u: 'day' }
+  ) : { f: 3, u: 'month' };
+  const [freq, setFreq] = useState(initFreq.f);
+  const [unit, setUnit] = useState(initFreq.u);
 
   return (
     <>
@@ -57,7 +66,7 @@ export default function CareCard({ icon, title, product, lastDone, nextDue, stat
             onToggle={setReminderEnabled}
             freq={freq}
             unit={unit}
-            onFreqChange={(f, u) => { setFreq(f); setUnit(u); }}
+            onFreqChange={(f, u) => { setFreq(f); setUnit(u); onFreqChange?.(f, u); }}
           />
         </div>
 

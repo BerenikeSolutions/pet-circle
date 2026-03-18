@@ -1,8 +1,11 @@
 'use client';
 
-import { useState } from 'react';
-import type { DashboardData } from '@/lib/api';
-import { updatePreventiveDate, updateWeight } from '@/lib/api';
+import { useState, useEffect, useCallback } from 'react';
+import type { DashboardData, WeightEntry, WeightHistoryResponse } from '@/lib/api';
+import {
+  updatePreventiveDate, updateWeight, updatePreventiveFrequency,
+  getWeightHistory, addWeightEntry,
+} from '@/lib/api';
 import StatusBadge from '@/components/ui/StatusBadge';
 import CareCard from '@/components/ui/CareCard';
 import ReminderBar from '@/components/ui/ReminderBar';
@@ -10,9 +13,8 @@ import DateEditSheet from '@/components/ui/DateEditSheet';
 import Ring from '@/components/ui/Ring';
 import {
   filterByKeywords, getStatusForRecord, formatApiDate,
-  buildMockWeightHistory,
   VACCINE_KW, DEWORMING_KW, FLEA_TICK_KW, CHECKUP_KW,
-  VAX_FREQ_OPTS, VAX_FREQ_LABELS,
+  freqToDays, daysToFreq,
 } from '@/lib/dashboard-utils';
 
 interface HealthTabProps {
@@ -29,6 +31,11 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
   const [weightSaving, setWeightSaving] = useState(false);
   const [weightMsg, setWeightMsg] = useState('');
 
+  // Real weight history from API
+  const [weightHistory, setWeightHistory] = useState<WeightEntry[]>([]);
+  const [idealRange, setIdealRange] = useState<{ min: number; max: number } | null>(null);
+  const [weightLoading, setWeightLoading] = useState(true);
+
   const records = data.preventive_records || [];
   const vaccines = filterByKeywords(records, VACCINE_KW);
   const deworming = filterByKeywords(records, DEWORMING_KW);
@@ -42,12 +49,44 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
   const completedCheckups = checkups.filter(c => c.status === 'up_to_date' || c.status === 'done').length;
 
   const pet = data.pet;
-  const weightHistory = buildMockWeightHistory(pet.weight, pet.dob);
-  const maxWeight = Math.max(...weightHistory.map(w => w.weight), 1);
+
+  // Load real weight history
+  const loadWeightHistory = useCallback(async () => {
+    try {
+      const resp: WeightHistoryResponse = await getWeightHistory(token);
+      setWeightHistory(resp.entries);
+      setIdealRange(resp.ideal_range);
+    } catch {
+      // Fallback: empty list
+    } finally {
+      setWeightLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    loadWeightHistory();
+  }, [loadWeightHistory]);
+
+  // Weight history sorted oldest-first for sparkline
+  const sortedHistory = [...weightHistory].sort((a, b) =>
+    (a.recorded_at || '').localeCompare(b.recorded_at || '')
+  );
+  const sparklineData = sortedHistory.slice(-6);
+  const maxWeight = Math.max(...sparklineData.map(w => w.weight), 1);
 
   const handleDateSave = async (itemName: string, dateStr: string) => {
     await updatePreventiveDate(token, itemName, dateStr);
     onUpdated();
+  };
+
+  const handleFreqChange = async (itemName: string, freq: number, unit: string) => {
+    const days = freqToDays(freq, unit);
+    try {
+      await updatePreventiveFrequency(token, itemName, days);
+      onUpdated();
+    } catch {
+      // Silently fail — local state already updated in UI
+    }
   };
 
   const handleWeightSave = async () => {
@@ -55,9 +94,12 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
     if (!w || w < 0.01 || w > 999.99) { setWeightMsg('Enter valid weight (0.01–999.99)'); return; }
     setWeightSaving(true);
     try {
+      const today = new Date().toISOString().split('T')[0];
+      await addWeightEntry(token, w, today);
       await updateWeight(token, w);
       setWeightMsg('Saved!');
       setWeightInput('');
+      loadWeightHistory();
       onUpdated();
     } catch {
       setWeightMsg('Failed to save');
@@ -68,9 +110,10 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
 
   const VaxRow = ({ vax, isOptional }: { vax: typeof records[0]; isOptional: boolean }) => {
     const status = getStatusForRecord(vax);
+    const initialFreq = daysToFreq(vax.custom_recurrence_days ?? vax.recurrence_days);
     const [reminderOn, setReminderOn] = useState(true);
-    const [freq, setFreq] = useState(12);
-    const [freqUnit, setFreqUnit] = useState('month');
+    const [freq, setFreq] = useState(initialFreq.freq);
+    const [freqUnit, setFreqUnit] = useState(initialFreq.unit);
 
     return (
       <div className="py-3 border-b border-gray-50 last:border-0">
@@ -96,7 +139,11 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
               onToggle={setReminderOn}
               freq={freq}
               unit={freqUnit}
-              onFreqChange={(f, u) => { setFreq(f); setFreqUnit(u); }}
+              onFreqChange={(f, u) => {
+                setFreq(f);
+                setFreqUnit(u);
+                handleFreqChange(vax.item_name, f, u);
+              }}
             />
           </div>
         )}
@@ -150,6 +197,7 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
           recurrenceDays={d.recurrence_days}
           onDateSave={(dateStr) => handleDateSave(d.item_name, dateStr)}
           onOrderClick={() => onCartClick('c2')}
+          onFreqChange={(f, u) => handleFreqChange(d.item_name, f, u)}
         />
       )) : (
         <CareCard
@@ -172,6 +220,7 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
           recurrenceDays={f.recurrence_days}
           onDateSave={(dateStr) => handleDateSave(f.item_name, dateStr)}
           onOrderClick={() => onCartClick('c5')}
+          onFreqChange={(freq, unit) => handleFreqChange(f.item_name, freq, unit)}
         />
       )) : (
         <CareCard
@@ -232,21 +281,24 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
           <span>⚖️</span> Weight Log
         </h3>
         <div className="flex items-center gap-3 mb-3">
-          <Ring percentage={pet.weight ? Math.min((pet.weight / 40) * 100, 100) : 0} size={60} strokeWidth={6} color="#D44800">
+          <Ring percentage={pet.weight ? Math.min((pet.weight / (idealRange?.max || 40)) * 100, 100) : 0} size={60} strokeWidth={6} color="#D44800">
             <span className="text-xs font-bold">{pet.weight || '—'}</span>
           </Ring>
           <div>
             <p className="text-lg font-bold text-gray-900">{pet.weight ? `${pet.weight} kg` : 'Not set'}</p>
-            <p className="text-[11px] text-gray-500">Current weight</p>
+            <p className="text-[11px] text-gray-500">
+              Current weight
+              {idealRange && <span className="ml-1 text-gray-400">· Ideal: {idealRange.min}–{idealRange.max} kg</span>}
+            </p>
             {pet.weight_flagged && <p className="text-[10px] text-amber-600 font-medium">⚠ Weight seems unusual</p>}
           </div>
         </div>
 
         {/* Sparkline */}
-        {weightHistory.length > 1 && (
+        {sparklineData.length > 1 && (
           <div className="mb-3">
-            <svg viewBox={`0 0 ${weightHistory.length * 50} 60`} className="w-full h-12">
-              {weightHistory.map((w, i) => {
+            <svg viewBox={`0 0 ${sparklineData.length * 50} 60`} className="w-full h-12">
+              {sparklineData.map((w, i) => {
                 const h = (w.weight / maxWeight) * 50;
                 return (
                   <rect
@@ -256,7 +308,7 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
                     width={30}
                     height={h}
                     rx={4}
-                    fill={i === weightHistory.length - 1 ? '#D44800' : '#FFD5C2'}
+                    fill={i === sparklineData.length - 1 ? '#D44800' : '#FFD5C2'}
                   />
                 );
               })}
@@ -265,14 +317,21 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
         )}
 
         {/* Log table */}
-        <div className="space-y-1 mb-3">
-          {weightHistory.slice().reverse().slice(0, 5).map((w, i) => (
-            <div key={i} className="flex justify-between text-xs py-1">
-              <span className="text-gray-500">{w.date}</span>
-              <span className="font-medium text-gray-800">{w.weight} kg</span>
-            </div>
-          ))}
-        </div>
+        {weightLoading ? (
+          <p className="text-xs text-gray-400 py-2 text-center">Loading history...</p>
+        ) : (
+          <div className="space-y-1 mb-3">
+            {weightHistory.slice(0, 5).map((w) => (
+              <div key={w.id} className="flex justify-between text-xs py-1">
+                <span className="text-gray-500">{w.recorded_at ? formatApiDate(w.recorded_at) : '—'}</span>
+                <span className="font-medium text-gray-800">{w.weight} kg</span>
+              </div>
+            ))}
+            {weightHistory.length === 0 && (
+              <p className="text-xs text-gray-400 py-2 text-center">No weight entries yet</p>
+            )}
+          </div>
+        )}
 
         {/* Log weight */}
         <div className="flex gap-2">

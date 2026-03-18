@@ -30,6 +30,9 @@ from app.models.hygiene_preference import HygienePreference
 from app.models.product_catalog import ProductCatalog
 from app.models.nudge import Nudge
 from app.models.cart_item import CartItem
+from app.models.ideal_weight_cache import IdealWeightCache
+from app.models.nutrition_target_cache import NutritionTargetCache
+from app.models.food_nutrition_cache import FoodNutritionCache
 
 __all__ = [
     "User",
@@ -56,4 +59,7 @@ __all__ = [
     "ProductCatalog",
     "Nudge",
     "CartItem",
+    "IdealWeightCache",
+    "NutritionTargetCache",
+    "FoodNutritionCache",
 ]

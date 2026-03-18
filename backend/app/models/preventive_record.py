@@ -14,7 +14,7 @@ Constraints:
 
 import uuid
 from datetime import datetime, date
-from sqlalchemy import Column, String, Date, DateTime, ForeignKey, UniqueConstraint, Index
+from sqlalchemy import Column, String, Integer, Date, DateTime, ForeignKey, UniqueConstraint, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -60,6 +60,11 @@ class PreventiveRecord(Base):
     # 'overdue' — past next_due_date
     # 'cancelled' — user explicitly cancelled this preventive item
     status = Column(String(20), nullable=False)
+
+    # Per-pet custom recurrence override (days). When set, used instead of
+    # preventive_master.recurrence_days for next_due_date calculation.
+    # Nullable — None means use the master default.
+    custom_recurrence_days = Column(Integer, nullable=True)
 
     # Timestamps managed by PostgreSQL DEFAULT NOW().
     created_at = Column(DateTime, default=datetime.utcnow)

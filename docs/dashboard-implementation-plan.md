@@ -189,7 +189,8 @@ Add to `frontend/src/lib/api.ts`:
 
 ---
 
-## Phase 3: Nutrition Tab (Full-Stack)
+## 
+
 
 **Goal**: Match JSX `renderNutritionTab()` (lines 1358-1621) exactly.
 
@@ -207,7 +208,8 @@ Add to `frontend/src/lib/api.ts`:
 **File**: `backend/app/services/nutrition_service.py` (NEW)
 - `analyze_nutrition(db, pet_id)` → calories, macros, vitamins, minerals, others, improvements, overall_label, recommendation
 
-**Logic**: Match diet items to product_catalog → sum nutrients → compare to breed targets → identify gaps (especially glucosamine for hip dysplasia)
+**Logic**: Match diet items to product_catalog → sum nutrients → compare to breed targets → identify gaps 
+
 
 **Endpoint**: `GET /{token}/nutrition-analysis`
 

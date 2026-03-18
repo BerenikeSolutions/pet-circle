@@ -192,6 +192,8 @@ def get_dashboard_data(db: Session, token: str) -> dict:
     complementary_total = 0
 
     for record, master in selected_records:
+        # Use custom recurrence if set, otherwise fall back to master default
+        effective_recurrence = record.custom_recurrence_days if record.custom_recurrence_days else master.recurrence_days
         preventive_records.append({
             "item_name": master.item_name,
             "category": master.category,
@@ -199,7 +201,8 @@ def get_dashboard_data(db: Session, token: str) -> dict:
             "last_done_date": str(record.last_done_date) if record.last_done_date else None,
             "next_due_date": str(record.next_due_date) if record.next_due_date else None,
             "status": record.status,
-            "recurrence_days": master.recurrence_days,
+            "recurrence_days": effective_recurrence,
+            "custom_recurrence_days": record.custom_recurrence_days,
         })
 
         # Health score: count essential/complementary records inline.

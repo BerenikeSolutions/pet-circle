@@ -93,6 +93,25 @@ export function deriveStatus(lastDone: string | null, nextDue: string | null): s
   return 'done';
 }
 
+/** Convert freq + unit to approximate days for the API. */
+export function freqToDays(freq: number, unit: string): number {
+  switch (unit) {
+    case 'day': return freq;
+    case 'week': return freq * 7;
+    case 'month': return freq * 30;
+    case 'year': return freq * 365;
+    default: return freq * 30;
+  }
+}
+
+/** Convert days to best-fit freq + unit. */
+export function daysToFreq(days: number): { freq: number; unit: string } {
+  if (days >= 365 && days % 365 === 0) return { freq: days / 365, unit: 'year' };
+  if (days >= 30 && days % 30 === 0) return { freq: days / 30, unit: 'month' };
+  if (days >= 7 && days % 7 === 0) return { freq: days / 7, unit: 'week' };
+  return { freq: days, unit: 'day' };
+}
+
 export function freqLabel(freq: number, unit: string): string {
   if (freq === 1 && unit === 'day') return 'Daily';
   if (freq === 1 && unit === 'week') return 'Weekly';
