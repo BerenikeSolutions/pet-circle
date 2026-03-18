@@ -8,11 +8,14 @@ import DashboardHeader from "./DashboardHeader";
 import DashboardTabBar from "./DashboardTabBar";
 import CartView from "./CartView";
 import RemindersView from "./RemindersView";
+import NudgesView from "./NudgesView";
 import OverviewTab from "./tabs/OverviewTab";
 import HealthTab from "./tabs/HealthTab";
 import HygieneTab from "./tabs/HygieneTab";
 import NutritionTab from "./tabs/NutritionTab";
 import ConditionsTab from "./tabs/ConditionsTab";
+import type { NudgeItem } from "@/lib/api";
+import { getNudges } from "@/lib/api";
 import { APP_TAGLINE } from "@/lib/branding";
 import { countOverdue } from "@/lib/dashboard-utils";
 
@@ -27,6 +30,8 @@ function DashboardInner({ token }: { token: string }) {
   const [activeTab, setActiveTab] = useState("overview");
   const [pinnedCartItem, setPinnedCartItem] = useState<string | null>(null);
   const [showReminders, setShowReminders] = useState(false);
+  const [showNudges, setShowNudges] = useState(false);
+  const [nudges, setNudges] = useState<NudgeItem[]>([]);
 
   const load = useCallback(async () => {
     try {
@@ -59,6 +64,7 @@ function DashboardInner({ token }: { token: string }) {
 
   useEffect(() => {
     load();
+    getNudges(token).then(setNudges).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
@@ -121,6 +127,20 @@ function DashboardInner({ token }: { token: string }) {
 
   if (showReminders) {
     return <RemindersView data={data} onBack={() => setShowReminders(false)} />;
+  }
+
+  if (showNudges) {
+    return (
+      <NudgesView
+        data={data}
+        nudges={nudges}
+        token={token}
+        onBack={() => setShowNudges(false)}
+        onCartClick={(itemId?: string) => { setShowNudges(false); setPinnedCartItem(itemId ?? ''); }}
+        onRemindersClick={() => { setShowNudges(false); setShowReminders(true); }}
+        onNudgesChange={setNudges}
+      />
+    );
   }
 
   return (
@@ -205,6 +225,20 @@ function DashboardInner({ token }: { token: string }) {
           <ConditionsTab data={data} token={token} onCartClick={(itemId?: string) => setPinnedCartItem(itemId ?? '')} />
         )}
       </div>
+
+      {/* FAB — Nudges */}
+      {nudges.length > 0 && (
+        <button
+          onClick={() => setShowNudges(true)}
+          className="fixed bottom-6 right-6 z-40 w-14 h-14 rounded-full shadow-lg flex items-center justify-center text-white text-xl"
+          style={{ background: 'var(--brand-gradient)' }}
+        >
+          ⚡
+          <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center">
+            {nudges.length}
+          </span>
+        </button>
+      )}
 
       {/* Footer */}
       <footer className="py-4 text-center text-xs text-gray-400">

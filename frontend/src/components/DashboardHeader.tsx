@@ -32,6 +32,15 @@ export default function DashboardHeader({ pet, owner, overdueCount, onCartClick 
 
   return (
     <div className="relative overflow-hidden" style={{ background: 'var(--brand-gradient)' }}>
+      {/* Decorative circle */}
+      <div
+        className="absolute rounded-full pointer-events-none"
+        style={{
+          width: 200, height: 200,
+          top: -40, right: -40,
+          backgroundColor: 'rgba(255,255,255,0.04)',
+        }}
+      />
       <div className="max-w-[430px] mx-auto px-5 pt-8 pb-5">
         {/* Avatar + Info */}
         <div className="flex items-center gap-4 mb-4">
@@ -70,15 +79,22 @@ export default function DashboardHeader({ pet, owner, overdueCount, onCartClick 
         {overdueCount > 0 && (
           <button
             onClick={() => onCartClick()}
-            className="w-full flex items-center justify-between bg-white/15 backdrop-blur rounded-xl px-4 py-3 text-white"
+            className="w-full flex items-center justify-between rounded-xl px-4 py-3 text-white"
+            style={{ border: '1px solid rgba(255,255,255,0.25)', background: 'transparent' }}
           >
-            <div className="flex items-center gap-2">
-              <span className="bg-red-500 text-white text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center">
-                {overdueCount}
-              </span>
-              <span className="text-sm font-medium">Actions Due</span>
+            <div className="flex items-center gap-2.5">
+              <div className="relative">
+                <span className="w-8 h-8 bg-white rounded-full flex items-center justify-center text-base">⚡</span>
+                <span className="absolute -top-1.5 -right-1.5 bg-red-500 text-white text-[10px] font-bold min-w-[18px] h-[18px] rounded-full flex items-center justify-center px-1">
+                  {overdueCount}
+                </span>
+              </div>
+              <div>
+                <span className="text-sm font-medium block">Actions Due</span>
+                <span className="text-[10px] text-white/60">Medicines · Vet visits · Supplements · Grooming</span>
+              </div>
             </div>
-            <span className="text-sm font-semibold">Order →</span>
+            <span className="text-sm font-semibold shrink-0">Order →</span>
           </button>
         )}
       </div>

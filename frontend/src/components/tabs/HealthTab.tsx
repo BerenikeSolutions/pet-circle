@@ -9,12 +9,14 @@ import {
 import StatusBadge from '@/components/ui/StatusBadge';
 import CareCard from '@/components/ui/CareCard';
 import ReminderBar from '@/components/ui/ReminderBar';
+import Toggle from '@/components/ui/Toggle';
+import VaxFreqModal from '@/components/ui/VaxFreqModal';
 import DateEditSheet from '@/components/ui/DateEditSheet';
 import Ring from '@/components/ui/Ring';
 import {
   filterByKeywords, getStatusForRecord, formatApiDate,
   VACCINE_KW, DEWORMING_KW, FLEA_TICK_KW, CHECKUP_KW,
-  freqToDays, daysToFreq,
+  freqToDays, daysToFreq, VAX_FREQ_LABELS,
 } from '@/lib/dashboard-utils';
 
 interface HealthTabProps {
@@ -114,6 +116,12 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
     const [reminderOn, setReminderOn] = useState(true);
     const [freq, setFreq] = useState(initialFreq.freq);
     const [freqUnit, setFreqUnit] = useState(initialFreq.unit);
+    const [showVaxFreq, setShowVaxFreq] = useState(false);
+
+    // For optional vaccines, derive current months from days
+    const currentDays = vax.custom_recurrence_days ?? vax.recurrence_days;
+    const currentMonths = Math.round(currentDays / 30) || 12;
+    const vaxFreqLabel = VAX_FREQ_LABELS[currentMonths] || `Every ${currentMonths} months`;
 
     return (
       <div className="py-3 border-b border-gray-50 last:border-0">
@@ -133,16 +141,23 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
           </div>
         </div>
         {isOptional && (
-          <div className="mt-1 pl-4">
-            <ReminderBar
-              enabled={reminderOn}
-              onToggle={setReminderOn}
-              freq={freq}
-              unit={freqUnit}
-              onFreqChange={(f, u) => {
-                setFreq(f);
-                setFreqUnit(u);
-                handleFreqChange(vax.item_name, f, u);
+          <div className="mt-1 pl-4 flex items-center justify-between py-2">
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-500">Reminder</span>
+              <button
+                onClick={() => setShowVaxFreq(true)}
+                className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200"
+              >
+                {vaxFreqLabel}
+              </button>
+            </div>
+            <Toggle checked={reminderOn} onChange={setReminderOn} />
+            <VaxFreqModal
+              open={showVaxFreq}
+              onClose={() => setShowVaxFreq(false)}
+              currentMonths={currentMonths}
+              onSave={(months) => {
+                handleFreqChange(vax.item_name, months, 'month');
               }}
             />
           </div>
@@ -278,57 +293,131 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
       {/* Weight Log */}
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
         <h3 className="font-semibold text-sm flex items-center gap-2 mb-3">
-          <span>⚖️</span> Weight Log
+          <span className="w-8 h-8 rounded-full flex items-center justify-center text-base" style={{ backgroundColor: '#F0F6FF' }}>⚖️</span>
+          <div>
+            <span>Weight Log</span>
+            {idealRange && (
+              <p className="text-[10px] text-gray-400 font-normal">Ideal range for {pet.breed}: {idealRange.min}–{idealRange.max} kg</p>
+            )}
+          </div>
         </h3>
+
+        {/* Current weight + trend */}
         <div className="flex items-center gap-3 mb-3">
           <Ring percentage={pet.weight ? Math.min((pet.weight / (idealRange?.max || 40)) * 100, 100) : 0} size={60} strokeWidth={6} color="#D44800">
             <span className="text-xs font-bold">{pet.weight || '—'}</span>
           </Ring>
           <div>
-            <p className="text-lg font-bold text-gray-900">{pet.weight ? `${pet.weight} kg` : 'Not set'}</p>
-            <p className="text-[11px] text-gray-500">
-              Current weight
-              {idealRange && <span className="ml-1 text-gray-400">· Ideal: {idealRange.min}–{idealRange.max} kg</span>}
-            </p>
-            {pet.weight_flagged && <p className="text-[10px] text-amber-600 font-medium">⚠ Weight seems unusual</p>}
+            <div className="flex items-baseline gap-2">
+              <p className="text-2xl font-bold text-gray-900">{pet.weight ? `${pet.weight} kg` : 'Not set'}</p>
+              {(() => {
+                if (weightHistory.length < 2 || !pet.weight) return null;
+                const prev = weightHistory[1]?.weight;
+                if (!prev) return null;
+                const diff = Math.round((pet.weight - prev) * 10) / 10;
+                if (diff === 0) return <span className="text-xs text-blue-500 font-medium">→ stable</span>;
+                const isUp = diff > 0;
+                return (
+                  <span className={`text-xs font-medium ${isUp ? 'text-amber-500' : 'text-green-500'}`}>
+                    {isUp ? '↑' : '↓'} {Math.abs(diff)} kg since last
+                  </span>
+                );
+              })()}
+            </div>
+            <p className="text-[11px] text-gray-500">Current weight</p>
           </div>
         </div>
 
-        {/* Sparkline */}
+        {/* In-range status banner */}
+        {pet.weight && idealRange && (
+          <div
+            className="rounded-xl px-3 py-2 mb-3 text-xs font-medium"
+            style={
+              pet.weight >= idealRange.min && pet.weight <= idealRange.max
+                ? { backgroundColor: '#F0FFF4', color: '#15803d' }
+                : { backgroundColor: '#FFF6ED', color: '#92400e' }
+            }
+          >
+            {pet.weight >= idealRange.min && pet.weight <= idealRange.max
+              ? `✅ Weight is within healthy range for ${pet.breed}`
+              : pet.weight > idealRange.max
+                ? `⚠️ Weight slightly above ideal — monitor closely`
+                : `⚠️ Weight slightly below ideal — monitor closely`}
+          </div>
+        )}
+
+        {/* Sparkline with labels */}
         {sparklineData.length > 1 && (
           <div className="mb-3">
-            <svg viewBox={`0 0 ${sparklineData.length * 50} 60`} className="w-full h-12">
+            <svg viewBox={`0 0 ${sparklineData.length * 50} 80`} className="w-full h-16">
               {sparklineData.map((w, i) => {
                 const h = (w.weight / maxWeight) * 50;
+                const year = w.recorded_at ? new Date(w.recorded_at).getFullYear().toString().slice(-2) : '';
                 return (
-                  <rect
-                    key={i}
-                    x={i * 50 + 10}
-                    y={55 - h}
-                    width={30}
-                    height={h}
-                    rx={4}
-                    fill={i === sparklineData.length - 1 ? '#D44800' : '#FFD5C2'}
-                  />
+                  <g key={i}>
+                    {/* Weight label above bar */}
+                    <text
+                      x={i * 50 + 25}
+                      y={55 - h - 4}
+                      textAnchor="middle"
+                      fontSize="8"
+                      fill="#666"
+                      fontWeight="500"
+                    >
+                      {w.weight}
+                    </text>
+                    <rect
+                      x={i * 50 + 10}
+                      y={55 - h}
+                      width={30}
+                      height={h}
+                      rx={4}
+                      fill={i === sparklineData.length - 1 ? '#007AFF' : '#FFD5C2'}
+                    />
+                    {/* Year label below bar */}
+                    {year && (
+                      <text
+                        x={i * 50 + 25}
+                        y={70}
+                        textAnchor="middle"
+                        fontSize="8"
+                        fill="#999"
+                      >
+                        {`'${year}`}
+                      </text>
+                    )}
+                  </g>
                 );
               })}
             </svg>
           </div>
         )}
 
-        {/* Log table */}
+        {/* Log table with notes + Latest badge */}
         {weightLoading ? (
           <p className="text-xs text-gray-400 py-2 text-center">Loading history...</p>
         ) : (
-          <div className="space-y-1 mb-3">
-            {weightHistory.slice(0, 5).map((w) => (
-              <div key={w.id} className="flex justify-between text-xs py-1">
-                <span className="text-gray-500">{w.recorded_at ? formatApiDate(w.recorded_at) : '—'}</span>
-                <span className="font-medium text-gray-800">{w.weight} kg</span>
+          <div className="space-y-0 mb-3 border border-gray-100 rounded-xl overflow-hidden">
+            {weightHistory.slice(0, 5).map((w, idx) => (
+              <div
+                key={w.id}
+                className="flex items-center justify-between text-xs px-3 py-2 border-b border-gray-50 last:border-0"
+                style={idx === 0 ? { backgroundColor: '#F0F6FF' } : {}}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-500">{w.recorded_at ? formatApiDate(w.recorded_at) : '—'}</span>
+                  {idx === 0 && (
+                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-600">Latest</span>
+                  )}
+                </div>
+                <div className="flex items-center gap-3">
+                  {w.note && <span className="text-[10px] text-gray-400 truncate max-w-[120px]">{w.note}</span>}
+                  <span className="font-medium text-gray-800 shrink-0">{w.weight} kg</span>
+                </div>
               </div>
             ))}
             {weightHistory.length === 0 && (
-              <p className="text-xs text-gray-400 py-2 text-center">No weight entries yet</p>
+              <p className="text-xs text-gray-400 py-3 text-center">No weight entries yet</p>
             )}
           </div>
         )}
