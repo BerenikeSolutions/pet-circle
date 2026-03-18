@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import type { DashboardData, BackendDietItem, NutritionAnalysis } from '@/lib/api';
 import { getDietItems, addDietItem, updateDietItem, deleteDietItem, getNutritionAnalysis } from '@/lib/api';
 import AddRow from '@/components/ui/AddRow';
@@ -57,6 +57,8 @@ export default function NutritionTab({ data, token, onCartClick, onUpdated }: Nu
     detail: '',
     type: 'packaged' as DietType,
   });
+  // Reorder reminder toggles (keyed by supplement name)
+  const [reorderToggles, setReorderToggles] = useState<Record<string, boolean>>({});
 
   const loadData = useCallback(async () => {
     try {
@@ -121,6 +123,25 @@ export default function NutritionTab({ data, token, onCartClick, onUpdated }: Nu
   const foods = diet.filter(d => d.type === 'packaged' || d.type === 'homemade');
   const supplements = diet.filter(d => d.type === 'supplement');
   const nd = nutrition;
+
+  // Collect orderable supplements from nutrition analysis (vitamins, minerals, others with supplement suggestions)
+  const reorderItems = useMemo(() => {
+    if (!nd) return [];
+    const items: Array<{ name: string; supplement: string; price: string; priority: string }> = [];
+    for (const arr of [nd.vitamins, nd.minerals, nd.others]) {
+      for (const n of arr) {
+        if (n.supplement && n.price) {
+          items.push({
+            name: n.name,
+            supplement: n.supplement,
+            price: n.price,
+            priority: ('priority' in n ? n.priority : 'medium') as string,
+          });
+        }
+      }
+    }
+    return items;
+  }, [nd]);
 
   // Loading skeleton
   if (loading) {
@@ -237,6 +258,63 @@ export default function NutritionTab({ data, token, onCartClick, onUpdated }: Nu
           setEditSheet(true);
         }} />
       </div>
+
+      {/* Order Reminders */}
+      {reorderItems.length > 0 && (
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
+          <h3 className="font-semibold text-sm flex items-center gap-2 mb-3">
+            <span>🔔</span> Order Reminders
+          </h3>
+          <p className="text-[11px] text-gray-500 mb-3">
+            Toggle on to get WhatsApp reminders when it&apos;s time to reorder.
+          </p>
+          <div className="space-y-0">
+            {reorderItems.map((item) => {
+              const pc = priorityColor(item.priority);
+              const isOn = reorderToggles[item.name] ?? false;
+              return (
+                <div
+                  key={item.name}
+                  className="flex items-center justify-between py-2.5 border-b border-gray-50 last:border-0"
+                >
+                  <div className="flex-1 min-w-0 mr-3">
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-medium text-gray-900 truncate">{item.supplement}</p>
+                      <span
+                        className="text-[9px] font-bold px-1.5 py-0.5 rounded-full shrink-0"
+                        style={{ color: pc.color, backgroundColor: pc.bg }}
+                      >
+                        {item.name}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-gray-500">{item.price} &middot; Monthly refill</p>
+                  </div>
+                  <button
+                    onClick={() =>
+                      setReorderToggles(prev => ({ ...prev, [item.name]: !prev[item.name] }))
+                    }
+                    className="w-11 h-6 rounded-full relative transition-colors shrink-0"
+                    style={{ backgroundColor: isOn ? '#34C759' : '#E5E5EA' }}
+                    aria-label={`Toggle reorder reminder for ${item.supplement}`}
+                  >
+                    <span
+                      className="absolute top-0.5 w-5 h-5 bg-white rounded-full shadow-sm transition-transform"
+                      style={{ left: isOn ? '22px' : '2px' }}
+                    />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+          <button
+            onClick={() => onCartClick()}
+            className="w-full mt-3 py-2 rounded-xl text-sm font-semibold border-2 border-dashed"
+            style={{ borderColor: '#D44800', color: '#D44800' }}
+          >
+            🛒 Order All Supplements
+          </button>
+        </div>
+      )}
 
       {/* Nutrition Note */}
       {nd && (

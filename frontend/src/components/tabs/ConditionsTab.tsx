@@ -1,12 +1,22 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import type { DashboardData, ConditionItem, TimelineEvent } from '@/lib/api';
+import type {
+  DashboardData,
+  ConditionItem,
+  ConditionMedicationItem,
+  ConditionMonitoringItem,
+  TimelineEvent,
+  ConditionRecommendation,
+  LastVetVisit,
+} from '@/lib/api';
 import {
   addCondition,
   deleteCondition,
   updateCondition,
   getConditionTimeline,
+  getConditionRecommendations,
+  getLastVetVisit,
   addConditionMedication,
   deleteConditionMedication,
   addConditionMonitoring,
@@ -17,7 +27,7 @@ import CollapsibleCard from '@/components/ui/CollapsibleCard';
 import ReminderBar from '@/components/ui/ReminderBar';
 import AddRow from '@/components/ui/AddRow';
 import BottomSheet from '@/components/ui/BottomSheet';
-import { formatApiDate } from '@/lib/dashboard-utils';
+import { formatApiDate, STATUS_CONFIG } from '@/lib/dashboard-utils';
 
 interface ConditionsTabProps {
   data: DashboardData;
@@ -25,14 +35,83 @@ interface ConditionsTabProps {
   onCartClick: (itemId?: string) => void;
 }
 
+/** Compute refill status from a date string */
+function getRefillStatus(refillDueDate: string | null): string {
+  if (!refillDueDate) return 'ok';
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const due = new Date(refillDueDate);
+  if (isNaN(due.getTime())) return 'ok';
+  const diff = Math.ceil((due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+  if (diff <= 0) return 'urgent';
+  if (diff <= 14) return 'upcoming';
+  return 'ok';
+}
+
+/** Compute monitoring status from next_due_date */
+function getMonitoringStatus(nextDueDate: string | null): string {
+  if (!nextDueDate) return 'upcoming';
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const due = new Date(nextDueDate);
+  if (isNaN(due.getTime())) return 'upcoming';
+  const diff = Math.ceil((due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+  if (diff < 0) return 'overdue';
+  if (diff <= 30) return 'upcoming';
+  return 'done';
+}
+
+/** Format a date relative to today */
+function getDateRelative(dateStr: string | null): string | null {
+  if (!dateStr) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return null;
+  const diff = Math.ceil((today.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
+  if (diff > 180) return '6+ months ago';
+  if (diff > 30) return `${Math.floor(diff / 30)} months ago`;
+  if (diff > 0) return `${diff} days ago`;
+  return 'Today';
+}
+
+const TAG_COLORS: Record<string, string> = {
+  Diagnosis: '#007AFF',
+  'Vet Visit': '#34C759',
+  Treatment: '#FF9500',
+  Grooming: '#8E44AD',
+  Overdue: '#FF3B30',
+  Upcoming: '#FF9500',
+};
+
+const PRIORITY_COLORS: Record<string, string> = {
+  urgent: '#FF3B30',
+  high: '#FF9500',
+  medium: '#007AFF',
+};
+
+const PRIORITY_BG: Record<string, string> = {
+  urgent: '#FFF0F0',
+  high: '#FFF6ED',
+  medium: '#F0F6FF',
+};
+
+const PRIORITY_LABEL: Record<string, string> = {
+  urgent: 'URGENT',
+  high: 'RECOMMENDED',
+  medium: 'SUGGESTED',
+};
+
 export default function ConditionsTab({ data, token, onCartClick }: ConditionsTabProps) {
   const [addSheet, setAddSheet] = useState(false);
   const [conditionForm, setConditionForm] = useState({
-    name: '', diagnosis: '', since: '', notes: '', condition_type: 'chronic',
+    name: '', diagnosis: '', since: '', notes: '', condition_type: 'chronic', icon: '', managed_by: '',
   });
   const [saving, setSaving] = useState(false);
   const [pdfState, setPdfState] = useState<'idle' | 'generating' | 'done'>('idle');
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
+  const [recommendations, setRecommendations] = useState<ConditionRecommendation[]>([]);
+  const [vetVisit, setVetVisit] = useState<LastVetVisit | null>(null);
   const [addMedSheet, setAddMedSheet] = useState<string | null>(null);
   const [medForm, setMedForm] = useState({ name: '', dose: '', frequency: '', route: '' });
   const [addMonSheet, setAddMonSheet] = useState<string | null>(null);
@@ -40,8 +119,7 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
 
   const conditions = data.conditions || [];
   const diagnostics = data.diagnostic_results || [];
-  const documents = data.documents || [];
-  const contacts = data.contacts || [];
+  const petName = data.pet?.name || 'Pet';
   const hasConditions = conditions.length > 0;
   const hasDiagnostics = diagnostics.length > 0;
 
@@ -53,30 +131,25 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
     return acc;
   }, {} as Record<string, typeof diagnostics>);
 
-  // Last vet visit from documents
-  const lastVetDate = documents.length > 0
-    ? documents.reduce((latest, doc) => {
-        if (!doc.uploaded_at) return latest;
-        return !latest || doc.uploaded_at > latest ? doc.uploaded_at : latest;
-      }, '' as string)
-    : null;
-
-  // Vet contact
-  const vetContact = contacts.find(c => c.role === 'veterinarian');
-
-  // Fetch timeline
-  const loadTimeline = useCallback(async () => {
+  // Load timeline, recommendations, and vet visit from API
+  const loadSupplementary = useCallback(async () => {
     try {
-      const res = await getConditionTimeline(token);
-      setTimeline(res.events || []);
+      const [timelineRes, recsRes, vetRes] = await Promise.allSettled([
+        getConditionTimeline(token),
+        getConditionRecommendations(token),
+        getLastVetVisit(token),
+      ]);
+      if (timelineRes.status === 'fulfilled') setTimeline(timelineRes.value.events || []);
+      if (recsRes.status === 'fulfilled') setRecommendations(recsRes.value.recommendations || []);
+      if (vetRes.status === 'fulfilled') setVetVisit(vetRes.value);
     } catch {
-      // Timeline is supplementary, don't block
+      // Supplementary data — don't block
     }
   }, [token]);
 
   useEffect(() => {
-    loadTimeline();
-  }, [loadTimeline]);
+    loadSupplementary();
+  }, [loadSupplementary]);
 
   const handleAddCondition = async () => {
     if (!conditionForm.name.trim()) return;
@@ -88,8 +161,10 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
         condition_type: conditionForm.condition_type,
         diagnosed_at: conditionForm.since.trim() || undefined,
         notes: conditionForm.notes.trim() || undefined,
+        icon: conditionForm.icon.trim() || undefined,
+        managed_by: conditionForm.managed_by.trim() || undefined,
       });
-      setConditionForm({ name: '', diagnosis: '', since: '', notes: '', condition_type: 'chronic' });
+      setConditionForm({ name: '', diagnosis: '', since: '', notes: '', condition_type: 'chronic', icon: '', managed_by: '' });
       setAddSheet(false);
       window.location.reload();
     } catch (e) {
@@ -169,34 +244,18 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
 
   const handleGeneratePdf = () => {
     setPdfState('generating');
-    setTimeout(() => setPdfState('done'), 2500);
+    setTimeout(() => setPdfState('done'), 2200);
   };
 
-  // Recommendations based on conditions
-  const recommendations = conditions.flatMap(c => {
-    const recs: { icon: string; text: string; conditionName: string }[] = [];
-    if (c.condition_type === 'chronic') {
-      recs.push({ icon: '📋', text: `Regular monitoring for ${c.name}`, conditionName: c.name });
-      if (c.medications.length > 0) {
-        recs.push({ icon: '💊', text: `Continue ${c.medications[0].name} as prescribed`, conditionName: c.name });
-      }
-    }
-    if (c.monitoring.length > 0) {
-      c.monitoring.forEach(m => {
-        recs.push({ icon: '🔬', text: `${m.name} — ${m.frequency || 'as needed'}`, conditionName: c.name });
-      });
-    }
-    return recs;
-  });
-
   return (
-    <div className="space-y-4">
+    <div className="space-y-3" style={{ animation: 'slideUp 0.4s ease' }}>
       {/* Condition Cards */}
       {hasConditions ? (
         conditions.map((condition) => (
           <ConditionCard
             key={condition.id}
             condition={condition}
+            recommendations={recommendations}
             onDelete={() => handleDeleteCondition(condition.id)}
             onAddMed={() => setAddMedSheet(condition.id)}
             onDeleteMed={handleDeleteMed}
@@ -207,7 +266,7 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
         ))
       ) : hasDiagnostics ? (
         Object.entries(paramsByType).map(([type, params]) => (
-          <div key={type} className="bg-white rounded-2xl shadow-sm border border-blue-100 p-4 space-y-3">
+          <div key={type} className="bg-white rounded-2xl shadow-sm p-4 space-y-3" style={{ border: '1.5px solid #007AFF' }}>
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-sm flex items-center gap-2">
                 <span>🏥</span> {type.charAt(0).toUpperCase() + type.slice(1)} Results
@@ -287,166 +346,49 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
         </CollapsibleCard>
       )}
 
-      {/* Add Condition */}
-      <AddRow label="Add Condition" onClick={() => setAddSheet(true)} />
-
-      {/* Recommendations */}
-      {recommendations.length > 0 && (
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
-          <h3 className="font-semibold text-sm flex items-center gap-2 mb-3">
-            <span>💡</span> Recommendations
-          </h3>
-          <div className="space-y-2">
-            {recommendations.map((rec, i) => (
-              <div key={i} className="flex items-start gap-2 py-1.5 border-b border-gray-50 last:border-0">
-                <span className="text-sm mt-0.5">{rec.icon}</span>
-                <div>
-                  <p className="text-sm text-gray-800">{rec.text}</p>
-                  <p className="text-[10px] text-gray-400">{rec.conditionName}</p>
-                </div>
-              </div>
-            ))}
-          </div>
+      {/* Add Another Condition — styled button matching JSX */}
+      <button
+        onClick={() => setAddSheet(true)}
+        className="w-full text-left"
+        style={{
+          background: 'white',
+          border: '1.5px dashed #C7C7CC',
+          borderRadius: 14,
+          padding: 16,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 12,
+          cursor: 'pointer',
+        }}
+      >
+        <div style={{
+          width: 40, height: 40, borderRadius: 12,
+          background: '#F2F2F7', display: 'flex', alignItems: 'center',
+          justifyContent: 'center', fontSize: 20,
+        }}>
+          ➕
         </div>
-      )}
+        <div>
+          <div style={{ fontWeight: 600, fontSize: 14, color: '#333' }}>Add Another Condition</div>
+          <div style={{ fontSize: 12, color: '#8E8E93' }}>Diabetes, allergies, skin conditions & more</div>
+        </div>
+      </button>
 
       {/* Last Vet Visit */}
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
-        <h3 className="font-semibold text-sm flex items-center gap-2 mb-2">
-          <span>🩺</span> Last Vet Visit
-        </h3>
-        {lastVetDate ? (
-          <div className="space-y-1">
-            <p className="text-sm text-gray-800">{formatApiDate(lastVetDate)}</p>
-            {vetContact && (
-              <div className="mt-2 p-3 bg-gray-50 rounded-xl space-y-1">
-                <p className="text-sm font-medium text-gray-900">{vetContact.name}</p>
-                {vetContact.clinic_name && (
-                  <p className="text-xs text-gray-500">{vetContact.clinic_name}</p>
-                )}
-                {vetContact.phone && (
-                  <p className="text-xs text-gray-500">{vetContact.phone}</p>
-                )}
-              </div>
-            )}
-            <p className="text-[11px] text-gray-400 mt-1">Based on most recent document upload</p>
-          </div>
-        ) : (
-          <p className="text-sm text-gray-500">No records available</p>
-        )}
-      </div>
+      <LastVetVisitCard vetVisit={vetVisit} />
 
-      {/* Management Chronology — from timeline API */}
+      {/* Management Chronology */}
       {(timeline.length > 0 || hasConditions) && (
-        <CollapsibleCard icon="📅" title="Management History" subtitle="Chronological timeline">
-          <div className="p-4">
-            <div className="relative pl-6">
-              <div className="absolute left-2 top-0 bottom-0 w-0.5 bg-gray-200" />
-              {timeline.length > 0 ? (
-                timeline.map((event, i) => (
-                  <div key={i} className="relative mb-4 last:mb-0">
-                    <div className="absolute -left-4 w-4 h-4 bg-white border-2 border-brand rounded-full flex items-center justify-center text-[8px]">
-                      {event.icon}
-                    </div>
-                    <div className="ml-2">
-                      <p className="text-[10px] text-gray-400 font-medium">
-                        {formatApiDate(event.date)}
-                      </p>
-                      <p className="text-xs text-gray-800">{event.title}</p>
-                      {event.detail && (
-                        <p className="text-[11px] text-gray-500">{event.detail}</p>
-                      )}
-                      <span
-                        className="inline-block mt-1 text-[9px] font-bold px-1.5 py-0.5 rounded-full"
-                        style={{
-                          color: event.tag === 'chronic' ? '#FF9500' : event.tag === 'active' ? '#34C759' : '#8E8E93',
-                          backgroundColor: event.tag === 'chronic' ? '#FFF8F0' : event.tag === 'active' ? '#F0FFF4' : '#F5F5F5',
-                        }}
-                      >
-                        {event.tag}
-                      </span>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                // Fallback to condition-based timeline
-                conditions
-                  .filter(c => c.diagnosed_at)
-                  .sort((a, b) => (a.diagnosed_at || '').localeCompare(b.diagnosed_at || ''))
-                  .map((c) => (
-                    <div key={c.id} className="relative mb-4 last:mb-0">
-                      <div className="absolute -left-4 w-4 h-4 bg-white border-2 border-brand rounded-full flex items-center justify-center text-[8px]">
-                        🩺
-                      </div>
-                      <div className="ml-2">
-                        <p className="text-[10px] text-gray-400 font-medium">
-                          {c.diagnosed_at ? formatApiDate(c.diagnosed_at) : ''}
-                        </p>
-                        <p className="text-xs text-gray-800">
-                          {c.name}{c.diagnosis ? ` — ${c.diagnosis}` : ''}
-                        </p>
-                      </div>
-                    </div>
-                  ))
-              )}
-            </div>
-          </div>
-        </CollapsibleCard>
+        <ConditionsChronology timeline={timeline} conditions={conditions} />
       )}
 
-      {/* Complete Health PDF Card */}
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
-        <h3 className="font-semibold text-sm flex items-center gap-2 mb-3">
-          <span>📄</span> Complete Health Analysis PDF
-        </h3>
-        {pdfState === 'idle' && (
-          <>
-            <div className="grid grid-cols-3 gap-2 mb-4">
-              {[
-                { icon: '💉', label: 'Vaccines' },
-                { icon: '🪱', label: 'Deworming' },
-                { icon: '🏥', label: 'Conditions' },
-                { icon: '🥗', label: 'Nutrition' },
-                { icon: '🧴', label: 'Grooming' },
-                { icon: '📊', label: 'Diagnostics' },
-              ].map((item) => (
-                <div key={item.label} className="flex flex-col items-center py-2 px-1 bg-gray-50 rounded-xl">
-                  <span className="text-lg mb-1">{item.icon}</span>
-                  <span className="text-[10px] text-gray-600 font-medium">{item.label}</span>
-                </div>
-              ))}
-            </div>
-            <p className="text-xs text-gray-500 mb-3">
-              Download a comprehensive PDF with all health records, conditions, diagnostics, and care history.
-            </p>
-            <button
-              onClick={handleGeneratePdf}
-              className="w-full py-2.5 rounded-xl text-white text-sm font-semibold"
-              style={{ background: 'var(--brand-gradient)' }}
-            >
-              Generate PDF
-            </button>
-          </>
-        )}
-        {pdfState === 'generating' && (
-          <div className="text-center py-4">
-            <div className="inline-block w-8 h-8 border-3 border-brand border-t-transparent rounded-full animate-spin" />
-            <p className="text-xs text-gray-500 mt-2">Generating PDF...</p>
-          </div>
-        )}
-        {pdfState === 'done' && (
-          <div className="text-center py-2">
-            <span className="text-2xl mb-1 block">✅</span>
-            <p className="text-sm font-semibold text-green-700">PDF Ready!</p>
-            <button
-              onClick={() => setPdfState('idle')}
-              className="mt-2 text-xs text-brand font-semibold"
-            >
-              Download Again
-            </button>
-          </div>
-        )}
-      </div>
+      {/* Complete Health Analysis PDF */}
+      <ConditionsPdfCard
+        petName={petName}
+        pdfState={pdfState}
+        onGenerate={handleGeneratePdf}
+        onReset={() => setPdfState('idle')}
+      />
 
       {/* Add Condition Sheet */}
       <BottomSheet open={addSheet} onClose={() => setAddSheet(false)} title="Add Condition">
@@ -501,6 +443,27 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
             />
           </div>
           <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Managing Vet</label>
+            <input
+              type="text"
+              value={conditionForm.managed_by}
+              onChange={(e) => setConditionForm({ ...conditionForm, managed_by: e.target.value })}
+              placeholder="e.g. Dr. Meera Nair, Bandra"
+              className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-brand"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">Icon</label>
+            <input
+              type="text"
+              value={conditionForm.icon}
+              onChange={(e) => setConditionForm({ ...conditionForm, icon: e.target.value })}
+              placeholder="e.g. 🦴"
+              className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-brand"
+              maxLength={4}
+            />
+          </div>
+          <div>
             <label className="text-xs font-semibold text-gray-500 mb-1 block">Notes</label>
             <textarea
               value={conditionForm.notes}
@@ -534,7 +497,7 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
               <label className="text-xs font-semibold text-gray-500 mb-1 block">{field.label}</label>
               <input
                 type="text"
-                value={(medForm as any)[field.key]}
+                value={(medForm as Record<string, string>)[field.key]}
                 onChange={(e) => setMedForm({ ...medForm, [field.key]: e.target.value })}
                 placeholder={field.placeholder}
                 className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-brand"
@@ -589,8 +552,13 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
   );
 }
 
+/* ───────────────────────────────────────────────────────────── */
+/*  Condition Card — matches JSX renderConditionsTab exactly    */
+/* ───────────────────────────────────────────────────────────── */
+
 function ConditionCard({
   condition,
+  recommendations,
   onDelete,
   onAddMed,
   onDeleteMed,
@@ -599,6 +567,7 @@ function ConditionCard({
   onCartClick,
 }: {
   condition: ConditionItem;
+  recommendations: ConditionRecommendation[];
   onDelete: () => void;
   onAddMed: () => void;
   onDeleteMed: (id: string) => void;
@@ -612,127 +581,199 @@ function ConditionCard({
     resolved: 'done',
   };
 
-  const hasActiveMeds = condition.medications.some(m => m.status === 'active');
+  const badgeLabelMap: Record<string, string> = {
+    chronic: 'MANAGED',
+    episodic: 'EPISODIC',
+    resolved: 'RESOLVED',
+  };
+
+  const hasUrgentMeds = condition.medications.some(
+    m => m.status === 'active' && getRefillStatus(m.refill_due_date) !== 'ok'
+  );
+
+  // Filter recommendations relevant to this condition
+  const condRecs = recommendations.filter(
+    r => r.title.toLowerCase().includes(condition.name.toLowerCase()) ||
+         r.reason.toLowerCase().includes(condition.name.toLowerCase())
+  );
 
   return (
-    <div className="bg-white rounded-2xl shadow-sm border border-blue-100 p-4 space-y-3">
-      <div className="flex items-center justify-between">
-        <h3 className="font-semibold text-sm flex items-center gap-2">
-          <span>🏥</span> {condition.name}
-        </h3>
-        <div className="flex items-center gap-2">
-          <StatusBadge status={statusMap[condition.condition_type] || 'managed'} label={condition.condition_type} />
-          <button
-            onClick={onDelete}
-            className="text-gray-400 hover:text-red-500 text-xs"
-            title="Remove condition"
-          >
-            ✕
-          </button>
+    <div
+      className="bg-white rounded-2xl p-4"
+      style={{
+        border: '1.5px solid #007AFF',
+        boxShadow: '0 2px 12px rgba(0,122,255,0.1)',
+      }}
+    >
+      {/* Header with icon box */}
+      <div className="flex items-center gap-2.5 mb-3">
+        <div
+          style={{
+            width: 44, height: 44, borderRadius: 12,
+            background: '#F0F6FF', display: 'flex',
+            alignItems: 'center', justifyContent: 'center', fontSize: 22,
+          }}
+        >
+          {condition.icon || '🏥'}
         </div>
-      </div>
-
-      {condition.diagnosis && (
-        <p className="text-xs text-gray-600">{condition.diagnosis}</p>
-      )}
-
-      {condition.diagnosed_at && (
-        <p className="text-[11px] text-gray-400">Diagnosed: {formatApiDate(condition.diagnosed_at)}</p>
-      )}
-
-      {/* Medications */}
-      <div className="border-t border-gray-100 pt-3">
-        <div className="flex items-center justify-between mb-2">
-          <p className="text-[10px] font-bold text-gray-400 uppercase">Medications</p>
-          <button
-            onClick={onAddMed}
-            className="text-[10px] font-semibold text-brand"
-          >
-            + Add
-          </button>
-        </div>
-        {condition.medications.length > 0 ? (
-          <div className="space-y-2">
-            {condition.medications.map((med) => (
-              <MedRow
-                key={med.id}
-                name={`${med.name}${med.dose ? ` ${med.dose}` : ''}`}
-                note={[med.frequency, med.route].filter(Boolean).join(' · ')}
-                status={med.status === 'active' ? 'ok' : 'discontinued'}
-                onDelete={() => onDeleteMed(med.id)}
-                onOrder={() => onCartClick()}
-              />
-            ))}
+        <div className="flex-1 min-w-0">
+          <div className="font-bold text-[15px]">{condition.name}</div>
+          <div className="text-xs text-[#8E8E93]">
+            {condition.diagnosed_at ? `Diagnosed ${formatApiDate(condition.diagnosed_at)}` : ''}
+            {condition.managed_by ? ` · ${condition.managed_by}` : ''}
           </div>
-        ) : (
-          <p className="text-xs text-gray-400">No medications added</p>
-        )}
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <StatusBadge
+            status={statusMap[condition.condition_type] || 'managed'}
+            label={badgeLabelMap[condition.condition_type] || condition.condition_type.toUpperCase()}
+          />
+          <button onClick={onDelete} className="text-gray-400 hover:text-red-500 text-xs" title="Remove">✕</button>
+        </div>
       </div>
 
-      {/* Refill status for active medications */}
-      {hasActiveMeds && (
-        <div className="border-t border-gray-100 pt-2">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-green-500" />
-              <span className="text-[11px] text-gray-600">Medications active</span>
+      {/* Current Medications */}
+      <div style={{ fontSize: 11, fontWeight: 700, color: '#8E8E93', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+        Current medications
+      </div>
+      {condition.medications.length > 0 ? (
+        condition.medications.map((med) => (
+          <MedRow
+            key={med.id}
+            med={med}
+            onDelete={() => onDeleteMed(med.id)}
+            onOrder={() => onCartClick()}
+          />
+        ))
+      ) : (
+        <p className="text-xs text-gray-400 mb-2">No medications added</p>
+      )}
+      <AddRow label="Add medication" onClick={onAddMed} />
+
+      {/* Order Medications button if any urgent/upcoming */}
+      {hasUrgentMeds && (
+        <button
+          onClick={() => onCartClick()}
+          style={{
+            width: '100%', marginTop: 10, background: '#D44800',
+            color: 'white', border: 'none', borderRadius: 10,
+            padding: '10px', fontSize: 13, fontWeight: 700, cursor: 'pointer',
+          }}
+        >
+          🔄 Order Medications
+        </button>
+      )}
+
+      {/* Monitoring Checkups */}
+      <div style={{ fontSize: 11, fontWeight: 700, color: '#8E8E93', textTransform: 'uppercase', letterSpacing: 0.5, margin: '14px 0 8px' }}>
+        Monitoring checkups
+      </div>
+      {condition.monitoring.length > 0 ? (
+        condition.monitoring.map((mon, j) => (
+          <MonitorRow
+            key={mon.id}
+            mon={mon}
+            isFirst={j === 0}
+            onDelete={() => onDeleteMon(mon.id)}
+          />
+        ))
+      ) : (
+        <p className="text-xs text-gray-400 mb-2">No monitoring items</p>
+      )}
+      <button
+        onClick={() => onCartClick()}
+        style={{
+          width: '100%', marginTop: 12, background: '#D44800',
+          color: 'white', border: 'none', borderRadius: 10,
+          padding: '10px', fontSize: 13, fontWeight: 700, cursor: 'pointer',
+        }}
+      >
+        📅 Book Tests
+      </button>
+
+      {/* PetCircle Recommendations */}
+      {condRecs.length > 0 && (
+        <div style={{ marginTop: 14 }}>
+          <div className="flex items-center gap-1.5 mb-2.5">
+            <div style={{
+              width: 20, height: 20, borderRadius: 6, background: '#D44800',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11,
+            }}>
+              🐾
             </div>
-            <button
-              onClick={() => onCartClick()}
-              className="text-[11px] font-semibold text-brand"
-            >
-              Refill Order
-            </button>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#D44800', textTransform: 'uppercase', letterSpacing: 0.6 }}>
+              PetCircle Recommendations
+            </div>
+          </div>
+          <div className="flex flex-col gap-2">
+            {condRecs.map((rec, k) => {
+              const pColor = PRIORITY_COLORS[rec.priority] || '#007AFF';
+              const pBg = PRIORITY_BG[rec.priority] || '#F0F6FF';
+              const pLabel = PRIORITY_LABEL[rec.priority] || 'INFO';
+              return (
+                <div
+                  key={k}
+                  style={{
+                    background: pBg,
+                    border: `1px solid ${pColor}22`,
+                    borderRadius: 10,
+                    padding: '10px 12px',
+                  }}
+                >
+                  <div className="flex items-start gap-2.5">
+                    <div style={{ fontSize: 18, flexShrink: 0, marginTop: 1 }}>{rec.icon}</div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
+                        <div style={{ fontWeight: 600, fontSize: 13, color: '#1A1A1A' }}>{rec.title}</div>
+                        <div style={{
+                          background: pColor + '22', color: pColor,
+                          borderRadius: 20, padding: '1px 7px', fontSize: 10, fontWeight: 700, flexShrink: 0,
+                        }}>
+                          {pLabel}
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 11, color: '#555', lineHeight: 1.45, marginBottom: rec.cart_id ? 8 : 0 }}>
+                        {rec.reason}
+                      </div>
+                      {rec.cart_id && (
+                        <button
+                          onClick={() => onCartClick(rec.cart_id!)}
+                          style={{
+                            background: pColor, color: 'white', border: 'none',
+                            borderRadius: 8, padding: '6px 12px', fontSize: 11, fontWeight: 700, cursor: 'pointer',
+                          }}
+                        >
+                          Order Now →
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
-
-      {/* Monitoring */}
-      <div className="border-t border-gray-100 pt-3">
-        <div className="flex items-center justify-between mb-2">
-          <p className="text-[10px] font-bold text-gray-400 uppercase">Monitoring</p>
-          <button
-            onClick={onAddMon}
-            className="text-[10px] font-semibold text-brand"
-          >
-            + Add
-          </button>
-        </div>
-        {condition.monitoring.length > 0 ? (
-          <div className="space-y-2">
-            {condition.monitoring.map((mon) => (
-              <MonitorRow
-                key={mon.id}
-                name={mon.name}
-                freq={mon.frequency || 'As needed'}
-                onDelete={() => onDeleteMon(mon.id)}
-              />
-            ))}
-          </div>
-        ) : (
-          <p className="text-xs text-gray-400">No monitoring items</p>
-        )}
-      </div>
 
       {condition.notes && (
-        <div className="border-t border-gray-100 pt-2">
-          <p className="text-[11px] text-gray-500">{condition.notes}</p>
+        <div style={{ marginTop: 12, background: '#F0F6FF', borderRadius: 10, padding: '10px 12px', fontSize: 12, color: '#007AFF', lineHeight: 1.5 }}>
+          📋 Vet Notes: {condition.notes}
         </div>
       )}
     </div>
   );
 }
 
+/* ───────────────────────────────────────────────────────────── */
+/*  Med Row — refill due date + status badge matching JSX       */
+/* ───────────────────────────────────────────────────────────── */
+
 function MedRow({
-  name,
-  note,
-  status,
+  med,
   onDelete,
   onOrder,
 }: {
-  name: string;
-  note: string;
-  status: string;
+  med: ConditionMedicationItem;
   onDelete: () => void;
   onOrder: () => void;
 }) {
@@ -740,54 +781,443 @@ function MedRow({
   const [freq, setFreq] = useState(1);
   const [unit, setUnit] = useState('month');
 
+  const refillStatus = getRefillStatus(med.refill_due_date);
+  const st = STATUS_CONFIG[refillStatus] || STATUS_CONFIG.upcoming;
+  const isUrgent = refillStatus === 'urgent';
+
   return (
-    <div className="py-2">
-      <div className="flex items-center justify-between">
-        <div className="flex-1">
-          <p className="text-sm font-medium text-gray-900">{name}</p>
-          <p className="text-[11px] text-gray-500">{note}</p>
+    <div style={{
+      background: isUrgent ? '#FFF0F0' : '#F7F4F0',
+      borderRadius: 10, padding: '10px 12px', marginBottom: 6,
+    }}>
+      <div className="flex items-center gap-2.5">
+        <div style={{ fontSize: 16 }}>💊</div>
+        <div className="flex-1 min-w-0">
+          <div style={{ fontWeight: 600, fontSize: 13 }}>{med.name}</div>
+          <div style={{ fontSize: 11, color: '#8E8E93' }}>{med.dose || med.frequency || ''}</div>
         </div>
-        <div className="flex items-center gap-2">
-          <StatusBadge status={status === 'ok' ? 'done' : 'urgent'} label={status === 'ok' ? 'Active' : 'Stopped'} />
-          <button onClick={onDelete} className="text-gray-300 hover:text-red-500 text-xs" title="Remove">✕</button>
+        <div style={{ textAlign: 'right' }}>
+          {med.refill_due_date && (
+            <div style={{ fontSize: 10, color: st.color, fontWeight: 700 }}>
+              Refill {formatApiDate(med.refill_due_date)}
+            </div>
+          )}
+          <StatusBadge status={refillStatus === 'ok' ? (med.status === 'active' ? 'done' : 'missing') : refillStatus} label={refillStatus === 'ok' ? (med.status === 'active' ? 'Active' : 'Stopped') : st.label} />
         </div>
+        <button onClick={onDelete} className="text-gray-300 hover:text-red-500 text-xs ml-1" title="Remove">✕</button>
       </div>
       <ReminderBar enabled={reminderOn} onToggle={setReminderOn} freq={freq} unit={unit} onFreqChange={(f, u) => { setFreq(f); setUnit(u); }} />
     </div>
   );
 }
 
+/* ───────────────────────────────────────────────────────────── */
+/*  Monitor Row — nextDue date + status badge matching JSX      */
+/* ───────────────────────────────────────────────────────────── */
+
 function MonitorRow({
-  name,
-  freq,
+  mon,
+  isFirst,
   onDelete,
 }: {
-  name: string;
-  freq: string;
+  mon: ConditionMonitoringItem;
+  isFirst: boolean;
   onDelete: () => void;
 }) {
   const [reminderOn, setReminderOn] = useState(true);
+  const [freq, setFreq] = useState(6);
+  const [unit, setUnit] = useState('month');
+
+  const monStatus = getMonitoringStatus(mon.next_due_date);
+  const st = STATUS_CONFIG[monStatus] || STATUS_CONFIG.upcoming;
 
   return (
-    <div className="flex items-center justify-between py-1.5">
-      <div>
-        <p className="text-sm text-gray-800">{name}</p>
-        <p className="text-[11px] text-gray-500">{freq}</p>
-      </div>
-      <div className="flex items-center gap-2">
-        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">{freq}</span>
-        <div
-          className="w-10 h-[22px] rounded-full cursor-pointer"
-          style={{ backgroundColor: reminderOn ? '#D44800' : '#E5E5EA' }}
-          onClick={() => setReminderOn(!reminderOn)}
-        >
-          <div
-            className="w-[18px] h-[18px] bg-white rounded-full shadow mt-[2px] transition-transform"
-            style={{ transform: reminderOn ? 'translateX(20px)' : 'translateX(2px)' }}
-          />
+    <div style={{
+      borderTop: isFirst ? 'none' : '1px solid #F0EDE8',
+      paddingTop: isFirst ? 0 : 8,
+      marginTop: isFirst ? 0 : 8,
+    }}>
+      <div className="flex items-center gap-2.5 py-2">
+        <div style={{ fontSize: 16 }}>🩺</div>
+        <div className="flex-1 text-[13px] font-medium">{mon.name}</div>
+        <div style={{ textAlign: 'right' }}>
+          {mon.next_due_date && (
+            <div style={{ fontSize: 11, color: '#8E8E93' }}>{formatApiDate(mon.next_due_date)}</div>
+          )}
+          <StatusBadge status={monStatus} label={st.label} />
         </div>
-        <button onClick={onDelete} className="text-gray-300 hover:text-red-500 text-xs" title="Remove">✕</button>
+        <button onClick={onDelete} className="text-gray-300 hover:text-red-500 text-xs ml-1" title="Remove">✕</button>
       </div>
+      <ReminderBar enabled={reminderOn} onToggle={setReminderOn} freq={freq} unit={unit} onFreqChange={(f, u) => { setFreq(f); setUnit(u); }} />
+    </div>
+  );
+}
+
+/* ───────────────────────────────────────────────────────────── */
+/*  Last Vet Visit — rich card matching JSX                     */
+/* ───────────────────────────────────────────────────────────── */
+
+function LastVetVisitCard({ vetVisit }: { vetVisit: LastVetVisit | null }) {
+  if (!vetVisit) return null;
+
+  const statusColors: Record<string, { color: string; bg: string; label: string }> = {
+    overdue: { color: '#FF3B30', bg: '#FFF0F0', label: 'Overdue' },
+    due_soon: { color: '#FF9500', bg: '#FFF6ED', label: 'Due Soon' },
+    on_track: { color: '#34C759', bg: '#F0FFF4', label: 'On Track' },
+  };
+
+  const st = vetVisit.status ? statusColors[vetVisit.status] : null;
+
+  return (
+    <div style={{
+      background: 'white', borderRadius: 16, padding: 16,
+      border: '1.5px solid #34C75933',
+      boxShadow: '0 1px 6px rgba(0,0,0,0.06)',
+    }}>
+      {/* Header */}
+      <div className="flex items-center gap-3 mb-3">
+        <div style={{
+          width: 44, height: 44, borderRadius: 12,
+          background: '#F0FFF4', display: 'flex',
+          alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0,
+        }}>
+          🩺
+        </div>
+        <div className="flex-1">
+          <div style={{ fontWeight: 700, fontSize: 15 }}>Last Vet Visit</div>
+          <div style={{ fontSize: 11, color: '#AEAEB2', marginTop: 1 }}>Managing vet · condition follow-up</div>
+        </div>
+        {st && (
+          <div style={{
+            background: st.bg, color: st.color,
+            borderRadius: 20, padding: '4px 11px',
+            fontSize: 11, fontWeight: 700,
+          }}>
+            {st.label}
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-col gap-2">
+        {/* Vet info */}
+        {vetVisit.vet_name && (
+          <div style={{
+            display: 'flex', gap: 12, padding: '10px 12px',
+            background: '#FAFAF9', borderRadius: 10, border: '1px solid #F0EDE8',
+          }}>
+            <div style={{
+              width: 38, height: 38, borderRadius: 10,
+              background: '#F0FFF4', display: 'flex',
+              alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0,
+            }}>
+              👩‍⚕️
+            </div>
+            <div className="flex-1 min-w-0">
+              <div style={{ fontWeight: 600, fontSize: 13, color: '#1A1A1A' }}>{vetVisit.vet_name}</div>
+              {vetVisit.clinic_name && (
+                <div style={{ fontSize: 11, color: '#8E8E93', marginTop: 1 }}>
+                  {vetVisit.clinic_name}{vetVisit.address ? ` · ${vetVisit.address}` : ''}
+                </div>
+              )}
+              {vetVisit.managing_condition && (
+                <div style={{ fontSize: 11, color: '#8E8E93', marginTop: 1 }}>
+                  {vetVisit.managing_condition} — managing since {vetVisit.managing_since ? formatApiDate(vetVisit.managing_since) : 'unknown'}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Date cards */}
+        {(vetVisit.last_visit_date || vetVisit.next_due_date) && (
+          <div className="flex gap-2">
+            {vetVisit.last_visit_date && (
+              <div className="flex-1" style={{ background: '#F7F4F0', borderRadius: 10, padding: '9px 12px' }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: '#8E8E93', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 3 }}>
+                  Last Visit
+                </div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: '#1A1A1A' }}>
+                  {formatApiDate(vetVisit.last_visit_date)}
+                </div>
+                {(() => {
+                  const rel = getDateRelative(vetVisit.last_visit_date);
+                  return rel ? (
+                    <div style={{ fontSize: 11, color: '#FF9500', fontWeight: 600, marginTop: 2 }}>
+                      {rel}
+                    </div>
+                  ) : null;
+                })()}
+              </div>
+            )}
+            {vetVisit.next_due_date && (
+              <div
+                className="flex-1"
+                style={{
+                  background: vetVisit.status === 'overdue' ? '#FFF0F0' : '#FFF6ED',
+                  borderRadius: 10,
+                  border: `1px solid ${vetVisit.status === 'overdue' ? '#FF3B3033' : '#FF950033'}`,
+                  padding: '9px 12px',
+                }}
+              >
+                <div style={{ fontSize: 10, fontWeight: 700, color: '#8E8E93', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 3 }}>
+                  Next Due
+                </div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: '#1A1A1A' }}>
+                  {formatApiDate(vetVisit.next_due_date)}
+                </div>
+                {vetVisit.status && (
+                  <div style={{
+                    fontSize: 11, fontWeight: 600, marginTop: 2,
+                    color: vetVisit.status === 'overdue' ? '#FF3B30' : vetVisit.status === 'due_soon' ? '#FF9500' : '#34C759',
+                  }}>
+                    {vetVisit.status === 'overdue' ? 'Overdue' : vetVisit.status === 'due_soon' ? 'Due Soon' : 'On Track'}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Vet Notes */}
+        {vetVisit.notes && (
+          <div style={{ background: '#F0F6FF', borderRadius: 10, padding: '10px 12px', fontSize: 12, color: '#007AFF', lineHeight: 1.5 }}>
+            📋 Vet Notes: {vetVisit.notes}
+          </div>
+        )}
+
+        {/* Empty state */}
+        {!vetVisit.vet_name && !vetVisit.last_visit_date && (
+          <p className="text-sm text-gray-500">No vet visit records available</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ───────────────────────────────────────────────────────────── */
+/*  Management History — vertical timeline matching JSX         */
+/* ───────────────────────────────────────────────────────────── */
+
+function ConditionsChronology({
+  timeline,
+  conditions,
+}: {
+  timeline: TimelineEvent[];
+  conditions: ConditionItem[];
+}) {
+  const [open, setOpen] = useState(false);
+
+  // Fallback timeline from conditions if API returns empty
+  const displayTimeline = timeline.length > 0
+    ? timeline
+    : conditions
+        .filter(c => c.diagnosed_at)
+        .sort((a, b) => (b.diagnosed_at || '').localeCompare(a.diagnosed_at || ''))
+        .map(c => ({
+          date: c.diagnosed_at!,
+          type: 'diagnostic',
+          icon: c.icon || '🩺',
+          title: `${c.name} diagnosed`,
+          detail: c.diagnosis || c.condition_type,
+          tag: 'Diagnosis',
+        }));
+
+  if (displayTimeline.length === 0) return null;
+
+  return (
+    <div style={{
+      background: 'white', borderRadius: 16, overflow: 'hidden',
+      border: '1.5px solid #8E8E9333',
+      boxShadow: '0 1px 6px rgba(0,0,0,0.06)',
+    }}>
+      <div
+        onClick={() => setOpen(o => !o)}
+        style={{
+          padding: '14px 16px', display: 'flex', alignItems: 'center',
+          gap: 12, cursor: 'pointer',
+        }}
+      >
+        <div style={{
+          width: 44, height: 44, borderRadius: 12,
+          background: '#F7F4F0', display: 'flex',
+          alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0,
+        }}>
+          📅
+        </div>
+        <div className="flex-1">
+          <div style={{ fontWeight: 700, fontSize: 15 }}>Management History</div>
+          <div style={{ fontSize: 11, color: '#AEAEB2', marginTop: 1 }}>
+            Vet visits · diagnostics · treatments · last 2 years
+          </div>
+        </div>
+        <div style={{
+          fontSize: 13, color: '#C7C7CC',
+          transform: open ? 'rotate(180deg)' : 'none',
+          transition: 'transform 0.2s',
+        }}>
+          ▾
+        </div>
+      </div>
+
+      {open && (
+        <div style={{ borderTop: '1px solid #F0EDE8', padding: '4px 16px 16px' }}>
+          {displayTimeline.map((ev, i) => {
+            const tagColor = TAG_COLORS[ev.tag] || '#8E8E93';
+            return (
+              <div key={i} style={{ display: 'flex', gap: 12, paddingTop: 14, position: 'relative' }}>
+                {/* Vertical line */}
+                {i < displayTimeline.length - 1 && (
+                  <div style={{
+                    position: 'absolute', left: 15, top: 30, bottom: -14,
+                    width: 2, background: '#F0EDE8',
+                  }} />
+                )}
+                {/* Circle */}
+                <div style={{
+                  width: 30, height: 30, borderRadius: '50%',
+                  background: tagColor + '18',
+                  border: `2px solid ${tagColor}44`,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 14, flexShrink: 0, zIndex: 1,
+                }}>
+                  {ev.icon}
+                </div>
+                {/* Content */}
+                <div className="flex-1">
+                  <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
+                    <div style={{ fontWeight: 600, fontSize: 13, color: '#1A1A1A' }}>{ev.title}</div>
+                    <div style={{
+                      background: tagColor + '18', color: tagColor,
+                      borderRadius: 20, padding: '1px 7px', fontSize: 10, fontWeight: 700,
+                    }}>
+                      {ev.tag}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 11, color: '#8E8E93', marginBottom: 2 }}>
+                    {formatApiDate(ev.date)}
+                  </div>
+                  {ev.detail && (
+                    <div style={{ fontSize: 12, color: '#555', lineHeight: 1.4 }}>{ev.detail}</div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ───────────────────────────────────────────────────────────── */
+/*  Complete Health Analysis PDF — 2-column grid, dark button   */
+/* ───────────────────────────────────────────────────────────── */
+
+function ConditionsPdfCard({
+  petName,
+  pdfState,
+  onGenerate,
+  onReset,
+}: {
+  petName: string;
+  pdfState: 'idle' | 'generating' | 'done';
+  onGenerate: () => void;
+  onReset: () => void;
+}) {
+  const pdfItems = [
+    { icon: '🩺', label: 'Vet visits & exams' },
+    { icon: '🔬', label: 'Diagnostics & imaging' },
+    { icon: '💊', label: 'Medications & dosage' },
+    { icon: '🦴', label: 'Conditions & diagnosis' },
+    { icon: '📅', label: 'Treatment chronology' },
+    { icon: '⚖️', label: 'Weight history' },
+  ];
+
+  return (
+    <div style={{
+      background: 'white', borderRadius: 16, padding: 16,
+      border: '1.5px solid #1A1A1A22',
+      boxShadow: '0 1px 6px rgba(0,0,0,0.06)',
+    }}>
+      {/* Header */}
+      <div className="flex items-center gap-3 mb-3">
+        <div style={{
+          width: 44, height: 44, borderRadius: 12,
+          background: '#F7F4F0', display: 'flex',
+          alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0,
+        }}>
+          📄
+        </div>
+        <div className="flex-1">
+          <div style={{ fontWeight: 700, fontSize: 15 }}>Complete Health Analysis</div>
+          <div style={{ fontSize: 11, color: '#AEAEB2', marginTop: 1 }}>
+            Download full PDF record for vet or insurance
+          </div>
+        </div>
+      </div>
+
+      {/* 2-column grid */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5, marginBottom: 14 }}>
+        {pdfItems.map((r) => (
+          <div
+            key={r.label}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              padding: '5px 8px', background: '#F7F4F0', borderRadius: 8,
+            }}
+          >
+            <span style={{ fontSize: 13 }}>{r.icon}</span>
+            <span style={{ fontSize: 11, color: '#555', fontWeight: 500 }}>{r.label}</span>
+          </div>
+        ))}
+      </div>
+
+      {pdfState === 'done' ? (
+        <div style={{
+          background: '#F0FFF4', border: '1px solid #34C75944',
+          borderRadius: 12, padding: '12px 14px',
+          display: 'flex', alignItems: 'center', gap: 10,
+        }}>
+          <span style={{ fontSize: 20 }}>✅</span>
+          <div className="flex-1">
+            <div style={{ fontWeight: 700, fontSize: 13, color: '#1A6B2A' }}>
+              {petName}_Complete_Health.pdf ready
+            </div>
+            <div style={{ fontSize: 11, color: '#34C759', marginTop: 2 }}>
+              Saved to your downloads
+            </div>
+          </div>
+          <button
+            onClick={onReset}
+            style={{ background: 'none', border: 'none', color: '#AEAEB2', fontSize: 11, cursor: 'pointer', padding: 0 }}
+          >
+            ↺
+          </button>
+        </div>
+      ) : (
+        <button
+          onClick={onGenerate}
+          disabled={pdfState === 'generating'}
+          style={{
+            width: '100%',
+            background: pdfState === 'generating' ? '#F2EDE8' : '#1A1A1A',
+            color: pdfState === 'generating' ? '#D44800' : 'white',
+            border: 'none', borderRadius: 12, padding: 12,
+            fontSize: 14, fontWeight: 700,
+            cursor: pdfState === 'generating' ? 'default' : 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            transition: 'all 0.2s',
+          }}
+        >
+          {pdfState === 'generating' ? (
+            <>
+              <span style={{ animation: 'pulse 1s infinite' }}>⏳</span> Generating…
+            </>
+          ) : (
+            <>📥 Download PDF</>
+          )}
+        </button>
+      )}
     </div>
   );
 }

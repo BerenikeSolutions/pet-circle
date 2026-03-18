@@ -89,6 +89,8 @@ export interface ConditionMedicationItem {
   route: string | null;
   status: string;
   started_at: string | null;
+  refill_due_date: string | null;
+  price: string | null;
   notes: string | null;
 }
 
@@ -96,6 +98,8 @@ export interface ConditionMonitoringItem {
   id: string;
   name: string;
   frequency: string | null;
+  next_due_date: string | null;
+  last_done_date: string | null;
 }
 
 export interface ConditionItem {
@@ -105,11 +109,33 @@ export interface ConditionItem {
   condition_type: string;
   diagnosed_at: string | null;
   notes: string | null;
+  icon: string | null;
+  managed_by: string | null;
   source: string;
   is_active: boolean;
   medications: ConditionMedicationItem[];
   monitoring: ConditionMonitoringItem[];
   created_at: string | null;
+}
+
+export interface ConditionRecommendation {
+  icon: string;
+  title: string;
+  reason: string;
+  priority: string;
+  cart_id: string | null;
+}
+
+export interface LastVetVisit {
+  vet_name: string | null;
+  clinic_name: string | null;
+  address: string | null;
+  managing_condition: string | null;
+  managing_since: string | null;
+  last_visit_date: string | null;
+  next_due_date: string | null;
+  notes: string | null;
+  status: string | null;
 }
 
 export interface ContactItem {
@@ -124,12 +150,26 @@ export interface ContactItem {
   created_at: string | null;
 }
 
+export interface HealthScoreBreakdown {
+  category: string;
+  key: string;
+  weight: number;
+  score: number;
+  done: number | null;
+  total: number | null;
+}
+
+export interface HealthScoreDragger {
+  category: string;
+  score: number;
+  weight: number;
+}
+
 export interface HealthScore {
   score: number;
-  essential_done: number;
-  essential_total: number;
-  complementary_done: number;
-  complementary_total: number;
+  label: string;
+  breakdown: HealthScoreBreakdown[];
+  draggers: HealthScoreDragger[];
 }
 
 export interface MonthlyCompletion {
@@ -296,6 +336,25 @@ export interface NutritionAnalysis {
   recommendation: string;
   analysis_context: string;
   gap_count: number;
+}
+
+export interface NudgeItem {
+  id: string;
+  category: string;
+  priority: string;
+  icon: string | null;
+  title: string;
+  message: string;
+  mandatory: boolean;
+  orderable: boolean;
+  price: string | null;
+  order_type: string | null;
+  cart_item_id: string | null;
+  dismissed: boolean;
+  acted_on: boolean;
+  source: string;
+  trigger_type: string;
+  created_at: string | null;
 }
 
 // --- Dashboard Cache (localStorage) ---
@@ -713,6 +772,30 @@ export async function getNutritionAnalysis(token: string): Promise<NutritionAnal
   }
 }
 
+// --- Nudge API ---
+
+export async function getNudges(token: string): Promise<NudgeItem[]> {
+  const res = await fetch(`${API_BASE}/dashboard/${token}/nudges`, {
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    throw new Error(data?.detail || `Request failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function dismissNudge(token: string, nudgeId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/dashboard/${token}/nudges/${nudgeId}/dismiss`, {
+    method: "PATCH",
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    throw new Error(data?.detail || `Request failed: ${res.status}`);
+  }
+}
+
 // --- Hygiene Preferences API ---
 
 export interface HygienePreference {
@@ -863,6 +946,8 @@ export async function addCondition(
     condition_type?: string;
     diagnosed_at?: string;
     notes?: string;
+    icon?: string;
+    managed_by?: string;
     medications?: { name: string; dose?: string; frequency?: string; route?: string }[];
     monitoring?: { name: string; frequency?: string }[];
   }
@@ -946,6 +1031,50 @@ export async function getConditionTimeline(
   }
 }
 
+export async function getConditionRecommendations(
+  token: string
+): Promise<{ recommendations: ConditionRecommendation[] }> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/condition-recommendations`, {
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export async function getLastVetVisit(
+  token: string
+): Promise<LastVetVisit> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/last-vet-visit`, {
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 export async function updateCondition(
   token: string,
   conditionId: string,
@@ -955,6 +1084,8 @@ export async function updateCondition(
     condition_type?: string;
     diagnosed_at?: string;
     notes?: string;
+    icon?: string;
+    managed_by?: string;
   }
 ): Promise<{ status: string; condition_id: string }> {
   const controller = new AbortController();
@@ -1159,6 +1290,234 @@ export async function deleteContact(
   try {
     const res = await fetch(`${API_BASE}/dashboard/${token}/contacts/${contactId}`, {
       method: "DELETE",
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// --- Cart & Orders API ---
+
+export interface CartItemData {
+  id: string;
+  product_id: string;
+  icon: string | null;
+  name: string;
+  sub: string | null;
+  price: number;
+  tag: string | null;
+  tag_color: string | null;
+  in_cart: boolean;
+  quantity: number;
+}
+
+export interface CartResponse {
+  items: CartItemData[];
+  summary: { count: number; subtotal: number };
+}
+
+export interface CartRecommendation {
+  product_id: string;
+  icon: string;
+  name: string;
+  sub: string;
+  price: number;
+  tag: string | null;
+  tag_color: string | null;
+  reason: string;
+  priority: string;
+  category: string;
+}
+
+export interface PlaceOrderResponse {
+  order_id: string;
+  items: Array<{ product_id: string; name: string; icon: string | null; price: number; quantity: number; total: number }>;
+  subtotal: number;
+  discount: number;
+  delivery: number;
+  total: number;
+  payment_method: string;
+  status: string;
+}
+
+export async function getCart(token: string): Promise<CartResponse> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/cart`, {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export async function toggleCartItem(token: string, productId: string): Promise<CartItemData> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/cart/toggle/${productId}`, {
+      method: "POST",
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export async function updateCartQuantity(
+  token: string, productId: string, quantity: number
+): Promise<CartItemData> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/cart/${productId}/quantity`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ quantity }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export async function addToCart(
+  token: string,
+  body: { product_id: string; name: string; price: number; icon?: string; sub?: string; tag?: string; tag_color?: string }
+): Promise<CartItemData> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/cart/add`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export async function removeFromCart(token: string, productId: string): Promise<{ status: string }> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/cart/${productId}`, {
+      method: "DELETE",
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export async function getCartRecommendations(token: string): Promise<CartRecommendation[]> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/cart/recommendations`, {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export async function applyCoupon(token: string, code: string): Promise<{ valid: boolean; discount_percent: number; code: string }> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/cart/apply-coupon`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export async function placeOrder(
+  token: string,
+  body: { payment_method: string; address?: { name: string; line: string; tag: string }; coupon?: string }
+): Promise<PlaceOrderResponse> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/place-order`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
     if (!res.ok) {

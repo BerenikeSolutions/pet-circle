@@ -55,9 +55,11 @@ from app.services.diet_service import get_diet_items, add_diet_item, update_diet
 from app.services.hygiene_service import get_hygiene_preferences, upsert_hygiene_preference, update_hygiene_date, add_hygiene_item, delete_hygiene_item
 from app.services.nutrition_service import analyze_nutrition
 from app.services.nudge_engine import generate_nudges
-from app.services.cart_service import get_cart, toggle_cart_item, update_quantity, initialize_cart, place_order
+from app.services.cart_service import get_cart, toggle_cart_item, update_quantity, initialize_cart, place_order, add_to_cart, remove_from_cart, get_recommendations
 from app.services.condition_service import (
     get_condition_timeline,
+    get_condition_recommendations,
+    get_last_vet_visit,
     update_condition,
     add_condition_medication,
     update_condition_medication,
@@ -421,10 +423,14 @@ class ConditionMedicationInput(BaseModel):
     dose: Optional[str] = Field(None, max_length=100)
     frequency: Optional[str] = Field(None, max_length=100)
     route: Optional[str] = Field(None, max_length=50)
+    refill_due_date: Optional[str] = None
+    price: Optional[str] = Field(None, max_length=20)
 
 class ConditionMonitoringInput(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     frequency: Optional[str] = Field(None, max_length=100)
+    next_due_date: Optional[str] = None
+    last_done_date: Optional[str] = None
 
 class AddConditionRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
@@ -432,6 +438,8 @@ class AddConditionRequest(BaseModel):
     condition_type: str = Field("chronic", pattern=r"^(chronic|episodic|resolved)$")
     diagnosed_at: Optional[str] = None
     notes: Optional[str] = Field(None, max_length=1000)
+    icon: Optional[str] = Field(None, max_length=10)
+    managed_by: Optional[str] = Field(None, max_length=200)
     medications: List[ConditionMedicationInput] = []
     monitoring: List[ConditionMonitoringInput] = []
 
@@ -467,6 +475,8 @@ def dashboard_add_condition(
                 existing.diagnosis = body.diagnosis
                 existing.diagnosed_at = diagnosed_at
                 existing.notes = body.notes
+                existing.icon = body.icon
+                existing.managed_by = body.managed_by
                 existing.source = "manual"
                 db.commit()
                 return {"status": "reactivated", "condition_id": str(existing.id)}
@@ -479,25 +489,49 @@ def dashboard_add_condition(
             condition_type=body.condition_type,
             diagnosed_at=diagnosed_at,
             notes=body.notes,
+            icon=body.icon,
+            managed_by=body.managed_by,
             source="manual",
         )
         db.add(condition)
         db.flush()
 
         for med in body.medications:
+            med_refill = None
+            if med.refill_due_date:
+                try:
+                    med_refill = parse_date(med.refill_due_date)
+                except ValueError:
+                    pass
             db.add(ConditionMedication(
                 condition_id=condition.id,
                 name=med.name,
                 dose=med.dose,
                 frequency=med.frequency,
                 route=med.route,
+                refill_due_date=med_refill,
+                price=med.price,
             ))
 
         for mon in body.monitoring:
+            mon_next = None
+            mon_last = None
+            if mon.next_due_date:
+                try:
+                    mon_next = parse_date(mon.next_due_date)
+                except ValueError:
+                    pass
+            if mon.last_done_date:
+                try:
+                    mon_last = parse_date(mon.last_done_date)
+                except ValueError:
+                    pass
             db.add(ConditionMonitoring(
                 condition_id=condition.id,
                 name=mon.name,
                 frequency=mon.frequency,
+                next_due_date=mon_next,
+                last_done_date=mon_last,
             ))
 
         db.commit()
@@ -548,6 +582,8 @@ class UpdateConditionRequest(BaseModel):
     condition_type: Optional[str] = Field(None, pattern=r"^(chronic|episodic|resolved)$")
     diagnosed_at: Optional[str] = None
     notes: Optional[str] = Field(None, max_length=1000)
+    icon: Optional[str] = Field(None, max_length=10)
+    managed_by: Optional[str] = Field(None, max_length=200)
 
 
 @router.put("/{token}/conditions/{condition_id}")
@@ -1151,17 +1187,53 @@ async def dashboard_condition_timeline(
         raise HTTPException(status_code=503, detail="Could not load condition timeline.")
 
 
+# --- Condition Recommendations ---
+
+@router.get("/{token}/condition-recommendations")
+async def dashboard_condition_recommendations(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """Get AI-generated health recommendations based on conditions."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await get_condition_recommendations(db, dt.pet_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Condition recommendations error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not generate recommendations.")
+
+
+# --- Last Vet Visit ---
+
+@router.get("/{token}/last-vet-visit")
+def dashboard_last_vet_visit(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """Get last vet visit info for condition management."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return get_last_vet_visit(db, dt.pet_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Last vet visit error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not load vet visit info.")
+
+
 # --- Nudges ---
 
 @router.get("/{token}/nudges")
-async def dashboard_nudges(
+def dashboard_nudges(
     token: str,
     db: Session = Depends(get_db),
 ):
     """Get actionable health nudges for a pet."""
     try:
         dt = validate_dashboard_token(db, token)
-        return await generate_nudges(db, dt.pet_id)
+        return generate_nudges(db, dt.pet_id)
     except ValueError:
         raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
     except Exception as e:
@@ -1293,3 +1365,83 @@ async def dashboard_place_order(
     except Exception as e:
         logger.error("Place order error: %s", str(e), exc_info=True)
         raise HTTPException(status_code=503, detail="Could not place order.")
+
+
+class AddToCartRequest(BaseModel):
+    product_id: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1, max_length=200)
+    price: int = Field(..., ge=0)
+    icon: Optional[str] = None
+    sub: Optional[str] = None
+    tag: Optional[str] = None
+    tag_color: Optional[str] = None
+
+
+@router.post("/{token}/cart/add")
+async def dashboard_add_to_cart(
+    token: str,
+    body: AddToCartRequest,
+    db: Session = Depends(get_db),
+):
+    """Add a product to the pet's cart."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await add_to_cart(
+            db, dt.pet_id, body.product_id, body.name, body.price,
+            body.icon, body.sub, body.tag, body.tag_color,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("Add to cart error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not add to cart.")
+
+
+@router.delete("/{token}/cart/{product_id}")
+async def dashboard_remove_from_cart(
+    token: str,
+    product_id: str,
+    db: Session = Depends(get_db),
+):
+    """Remove a product from the pet's cart entirely."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await remove_from_cart(db, dt.pet_id, product_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error("Remove from cart error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not remove from cart.")
+
+
+@router.get("/{token}/cart/recommendations")
+async def dashboard_cart_recommendations(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """Get product recommendations based on pet species, breed, and nutrition gaps."""
+    try:
+        dt = validate_dashboard_token(db, token)
+
+        # Get nutrition gaps for smarter recommendations
+        nutrition_gaps = None
+        try:
+            analysis = await analyze_nutrition(db, dt.pet_id)
+            # Build gaps dict from vitamins, minerals, others
+            gaps = {}
+            for section in ["vitamins", "minerals", "others"]:
+                for nutrient in analysis.get(section, []):
+                    name_key = nutrient["name"].lower().replace("-", "_").replace(" ", "_")
+                    if nutrient.get("priority") in ("urgent", "high", "medium"):
+                        gaps[name_key] = {"status": nutrient["status"]}
+            if gaps:
+                nutrition_gaps = gaps
+        except Exception as e:
+            logger.warning("Could not get nutrition analysis for recommendations: %s", e)
+
+        return await get_recommendations(db, dt.pet_id, nutrition_gaps)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Recommendations error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not load recommendations.")

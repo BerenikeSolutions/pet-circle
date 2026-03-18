@@ -7,6 +7,7 @@ import ErrorBoundary from "./ErrorBoundary";
 import DashboardHeader from "./DashboardHeader";
 import DashboardTabBar from "./DashboardTabBar";
 import CartView from "./CartView";
+import RemindersView from "./RemindersView";
 import OverviewTab from "./tabs/OverviewTab";
 import HealthTab from "./tabs/HealthTab";
 import HygieneTab from "./tabs/HygieneTab";
@@ -25,6 +26,7 @@ function DashboardInner({ token }: { token: string }) {
   const [retryCount, setRetryCount] = useState(0);
   const [activeTab, setActiveTab] = useState("overview");
   const [pinnedCartItem, setPinnedCartItem] = useState<string | null>(null);
+  const [showReminders, setShowReminders] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -114,7 +116,11 @@ function DashboardInner({ token }: { token: string }) {
 
   // Cart view
   if (pinnedCartItem !== null) {
-    return <CartView data={data} pinnedItemId={pinnedCartItem || undefined} onBack={() => setPinnedCartItem(null)} />;
+    return <CartView data={data} token={token} pinnedItemId={pinnedCartItem || undefined} onBack={() => setPinnedCartItem(null)} />;
+  }
+
+  if (showReminders) {
+    return <RemindersView data={data} onBack={() => setShowReminders(false)} />;
   }
 
   return (
@@ -168,6 +174,8 @@ function DashboardInner({ token }: { token: string }) {
             token={token}
             onTabChange={setActiveTab}
             onCartClick={(itemId?: string) => setPinnedCartItem(itemId ?? '')}
+            onUpdated={load}
+            onRemindersClick={() => setShowReminders(true)}
           />
         )}
         {activeTab === 'medical' && (

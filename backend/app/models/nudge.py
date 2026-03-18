@@ -8,12 +8,14 @@ prioritized by urgency and categorized by health domain.
 Constraints:
     - pet_id: FK to pets(id), ON DELETE CASCADE
     - priority: one of 'urgent', 'high', 'medium'
-    - category: one of 'deworming', 'vaccine', 'condition', 'nutrition', 'flea', 'grooming'
+    - category: one of 'vaccine', 'deworming', 'flea', 'condition', 'nutrition', 'grooming', 'checkup'
+    - source: 'record' (data-driven) or 'ai' (GPT-generated)
+    - trigger_type: 'cron', 'upload', or 'inactivity'
 """
 
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Boolean, Text, DateTime, ForeignKey
+from sqlalchemy import Column, String, Boolean, Text, DateTime, Date, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -35,7 +37,7 @@ class Nudge(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     pet_id = Column(UUID(as_uuid=True), ForeignKey("pets.id", ondelete="CASCADE"), index=True, nullable=False)
-    category = Column(String(30), nullable=False)   # deworming, vaccine, condition, nutrition, flea, grooming
+    category = Column(String(30), nullable=False)   # vaccine, deworming, flea, condition, nutrition, grooming, checkup
     priority = Column(String(10), nullable=False)    # urgent, high, medium
     icon = Column(String(10), nullable=True)
     title = Column(String(200), nullable=False)
@@ -47,6 +49,15 @@ class Nudge(Base):
     cart_item_id = Column(String(10), nullable=True)
     dismissed = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # Phase 7 — Nudge engine columns
+    source = Column(String(20), default="record")       # 'record' or 'ai'
+    wa_status = Column(String(20), nullable=True)        # NULL / pending / sent / failed / skipped
+    wa_sent_at = Column(DateTime, nullable=True)
+    wa_message_id = Column(String(100), nullable=True)
+    trigger_type = Column(String(20), default="cron")    # cron / upload / inactivity
+    expires_at = Column(Date, nullable=True)
+    acted_on = Column(Boolean, default=False)
 
     # Relationships
     pet = relationship("Pet")

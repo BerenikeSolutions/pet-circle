@@ -23,6 +23,8 @@ from app.core.security import validate_admin_key
 from app.core.rate_limiter import check_admin_rate_limit
 from app.services.reminder_engine import run_reminder_engine, send_pending_reminders
 from app.services.conflict_expiry import expire_pending_conflicts
+from app.services.nudge_engine import run_nudge_engine
+from app.services.nudge_sender import send_pending_nudges, check_inactivity_nudges
 
 
 logger = logging.getLogger(__name__)
@@ -106,25 +108,76 @@ def execute_reminder_engine(db: Session = Depends(get_db)):
         except Exception:
             pass
 
+    # --- Step 4: Generate nudges for all active pets ---
+    nudge_results = {"pets_processed": 0, "total_nudges": 0, "errors": 0}
+    nudge_error = None
+    try:
+        nudge_results = run_nudge_engine(db)
+    except Exception as e:
+        nudge_error = str(e)
+        logger.error("Nudge engine failed: %s", str(e), exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    # --- Step 5: Send pending nudges via WhatsApp ---
+    nudge_send_results = {"sent": 0, "skipped": 0, "failed": 0}
+    nudge_send_error = None
+    try:
+        nudge_send_results = send_pending_nudges(db)
+    except Exception as e:
+        nudge_send_error = str(e)
+        logger.error("Nudge sending failed: %s", str(e), exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    # --- Step 6: Check for inactive users and create re-engagement nudges ---
+    inactivity_results = {"inactivity_nudges_created": 0}
+    inactivity_error = None
+    try:
+        inactivity_results = check_inactivity_nudges(db)
+    except Exception as e:
+        inactivity_error = str(e)
+        logger.error("Inactivity nudge check failed: %s", str(e), exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
     logger.info(
         "Daily cron completed: conflicts_resolved=%d, "
         "reminders_created=%d, reminders_sent=%d, "
-        "errors=[conflict=%s, reminder=%s, send=%s]",
+        "nudges_generated=%d, nudges_sent=%d, "
+        "errors=[conflict=%s, reminder=%s, send=%s, nudge=%s, nudge_send=%s, inactivity=%s]",
         conflicts_resolved,
         reminder_results["reminders_created"],
         send_results["reminders_sent"],
+        nudge_results["total_nudges"],
+        nudge_send_results["sent"],
         conflict_error,
         reminder_error,
         send_error,
+        nudge_error,
+        nudge_send_error,
+        inactivity_error,
     )
 
     return {
         "conflicts_resolved": conflicts_resolved,
         "reminder_engine": reminder_results,
         "reminder_sending": send_results,
+        "nudge_engine": nudge_results,
+        "nudge_sending": nudge_send_results,
+        "inactivity_nudges": inactivity_results,
         "errors": {
             "conflict_expiry": conflict_error,
             "reminder_engine": reminder_error,
             "reminder_sending": send_error,
+            "nudge_engine": nudge_error,
+            "nudge_sending": nudge_send_error,
+            "inactivity_nudges": inactivity_error,
         },
     }

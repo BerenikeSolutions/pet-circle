@@ -18,9 +18,12 @@ Conversation flow:
    11. Gender or "skip" → state=awaiting_dob → ask DOB
    12. DOB or "skip" → state=awaiting_weight → ask weight
    13. Weight or "skip" → state=awaiting_neutered → ask neutered
-   14. Neutered or "skip" → seed preventive records, generate token,
+   14. Neutered or "skip" → state=awaiting_packaged_food → ask packaged food
+  14a. Packaged food or "skip" → state=awaiting_homemade_food → ask homemade food
+  14b. Homemade food or "skip" → state=awaiting_supplements → ask supplements
+  14c. Supplements or "skip" → seed preventive records, generate token,
        state=awaiting_documents → prompt upload window (5 min)
-   12. Upload docs / "skip" / timeout → state=complete → send dashboard link
+   15. Upload docs / "skip" / timeout → state=complete → send dashboard link
 
 Rules:
     - Max 5 pets per user (from constants).
@@ -61,6 +64,7 @@ from app.utils.breed_normalizer import normalize_breed, normalize_breed_with_ai
 from app.utils.file_reader import encode_image_base64
 from app.utils.retry import retry_openai_call
 from app.services.preventive_seeder import seed_preventive_master
+from app.services.diet_service import add_diet_item
 
 
 logger = logging.getLogger(__name__)
@@ -294,6 +298,15 @@ async def handle_onboarding_step(
     elif state == "awaiting_neutered":
         await _step_neutered(db, user, text_lower, send_fn)
 
+    elif state == "awaiting_packaged_food":
+        await _step_packaged_food(db, user, text, send_fn)
+
+    elif state == "awaiting_homemade_food":
+        await _step_homemade_food(db, user, text, send_fn)
+
+    elif state == "awaiting_supplements":
+        await _step_supplements(db, user, text, send_fn)
+
     elif state == "awaiting_documents":
         await _step_awaiting_documents(db, user, text_lower, send_fn)
 
@@ -352,6 +365,13 @@ async def _send_onboarding_resume(db, user, state, send_fn):
         if pet.neutered is not None:
             progress_lines.append(f"Neutered: {'Yes' if pet.neutered else 'No'}")
 
+        # Show diet progress for states past the diet collection steps.
+        if state in ("awaiting_homemade_food", "awaiting_supplements", "awaiting_documents", "complete"):
+            from app.models.diet_item import DietItem
+            diet_count = db.query(DietItem).filter(DietItem.pet_id == pet.id).count()
+            if diet_count > 0:
+                progress_lines.append(f"Diet items: {diet_count} recorded")
+
     # Compose welcome-back header.
     greeting = f"{APP_RETURNING_HEADING}\n\nLet's continue setting up your profile."
 
@@ -399,9 +419,21 @@ def _get_question_for_state(state: str, pet=None) -> str:
             f"Reply *yes* to keep it, enter a new weight, or *skip*."
         ),
         "awaiting_neutered": f"Is {pet_name} *neutered/spayed*? (*yes*, *no*, or *skip*)",
+        "awaiting_packaged_food": (
+            f"What packaged food does {pet_name} eat? "
+            f"Include brand, type, and how much per day. (or type *skip*)"
+        ),
+        "awaiting_homemade_food": (
+            f"Does {pet_name} eat any homemade food? "
+            f"Describe what you prepare. (or type *skip*)"
+        ),
+        "awaiting_supplements": (
+            f"Any supplements or medications {pet_name} takes regularly? (or type *skip*)"
+        ),
         "awaiting_documents": (
-            f"You can upload medical records for {pet_name} now, "
-            f"up to *5 documents at a time*, or type *skip* to continue without uploading."
+            f"Upload {pet_name}'s health records — vaccination cards, "
+            f"prescriptions, lab reports. Up to *5 files* (JPEG, PNG, or PDF, max 10 MB each). "
+            f"Or type *skip* to continue without uploading."
         ),
     }
     return prompts.get(state, "Let's continue setting up your profile.")
@@ -1157,7 +1189,7 @@ async def _step_weight_confirm(db, user, text, send_fn):
 
 
 async def _step_neutered(db, user, text_lower, send_fn):
-    """Handle neutered status, seed records, generate token, enter upload window."""
+    """Handle neutered status, then transition to diet collection."""
     pet = _get_pending_pet(db, user.id)
     if not pet:
         user.onboarding_state = "awaiting_pet_name"
@@ -1173,10 +1205,132 @@ async def _step_neutered(db, user, text_lower, send_fn):
         await send_fn(db, user._plaintext_mobile, "Please reply *yes*, *no*, or *skip*.")
         return
 
+    user.onboarding_state = "awaiting_packaged_food"
     db.commit()
+
+    await send_fn(
+        db, user._plaintext_mobile,
+        f"What packaged food does {pet.name} eat? "
+        f"Include brand, type, and how much per day. (or type *skip*)",
+    )
+
+
+async def _parse_diet_input(text: str) -> list[tuple[str, str]]:
+    """
+    Use GPT to extract structured diet items from free-text input.
+
+    Returns list of (label, detail) tuples.
+    """
+    client = _get_openai_onboarding_client()
+    prompt = (
+        "Extract food/supplement items from the user's message. "
+        "Return a JSON object with an 'items' array. Each item has 'label' (short name, e.g. brand or food name) "
+        "and 'detail' (quantity, frequency, or other details). "
+        "If the message is vague, use the whole text as a single item label with empty detail. "
+        "Return ONLY valid JSON, no markdown.\n\n"
+        f"User message: {text}"
+    )
+
+    try:
+        response = await retry_openai_call(
+            client.chat.completions.create,
+            model="gpt-4.1-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=500,
+        )
+        raw = response.choices[0].message.content.strip()
+        # Strip markdown code fences if present
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+            if raw.endswith("```"):
+                raw = raw[:-3]
+            raw = raw.strip()
+        data = json.loads(raw)
+        items = data.get("items", [])
+        return [(item.get("label", text), item.get("detail", "")) for item in items if item.get("label")]
+    except Exception as e:
+        logger.warning("Diet GPT parse failed, using raw text: %s", str(e))
+        return [(text.strip(), "")]
+
+
+async def _step_packaged_food(db, user, text, send_fn):
+    """Collect packaged food items, then ask about homemade food."""
+    pet = _get_pending_pet(db, user.id)
+    if not pet:
+        user.onboarding_state = "awaiting_pet_name"
+        db.commit()
+        await send_fn(db, user._plaintext_mobile, "Something went wrong. Please send your pet's name again.")
+        return
+
     mobile = user._plaintext_mobile
 
-    # --- Seed preventive records (same as before, done here now) ---
+    if text.strip().lower() not in _SKIP_INPUTS:
+        items = await _parse_diet_input(text)
+        for label, detail in items:
+            try:
+                await add_diet_item(db, pet.id, "packaged", label, detail or None)
+            except Exception as e:
+                logger.error("Failed to save packaged food item for pet %s: %s", str(pet.id), str(e))
+
+    user.onboarding_state = "awaiting_homemade_food"
+    db.commit()
+
+    await send_fn(
+        db, mobile,
+        f"Does {pet.name} eat any homemade food? "
+        f"Describe what you prepare. (or type *skip*)",
+    )
+
+
+async def _step_homemade_food(db, user, text, send_fn):
+    """Collect homemade food items, then ask about supplements."""
+    pet = _get_pending_pet(db, user.id)
+    if not pet:
+        user.onboarding_state = "awaiting_pet_name"
+        db.commit()
+        await send_fn(db, user._plaintext_mobile, "Something went wrong. Please send your pet's name again.")
+        return
+
+    mobile = user._plaintext_mobile
+
+    if text.strip().lower() not in _SKIP_INPUTS:
+        items = await _parse_diet_input(text)
+        for label, detail in items:
+            try:
+                await add_diet_item(db, pet.id, "homemade", label, detail or None)
+            except Exception as e:
+                logger.error("Failed to save homemade food item for pet %s: %s", str(pet.id), str(e))
+
+    user.onboarding_state = "awaiting_supplements"
+    db.commit()
+
+    await send_fn(
+        db, mobile,
+        f"Any supplements or medications {pet.name} takes regularly? (or type *skip*)",
+    )
+
+
+async def _step_supplements(db, user, text, send_fn):
+    """Collect supplements, seed preventive records, generate token, enter upload window."""
+    pet = _get_pending_pet(db, user.id)
+    if not pet:
+        user.onboarding_state = "awaiting_pet_name"
+        db.commit()
+        await send_fn(db, user._plaintext_mobile, "Something went wrong. Please send your pet's name again.")
+        return
+
+    mobile = user._plaintext_mobile
+
+    if text.strip().lower() not in _SKIP_INPUTS:
+        items = await _parse_diet_input(text)
+        for label, detail in items:
+            try:
+                await add_diet_item(db, pet.id, "supplement", label, detail or None)
+            except Exception as e:
+                logger.error("Failed to save supplement item for pet %s: %s", str(pet.id), str(e))
+
+    # --- Seed preventive records ---
     record_count = 0
     try:
         record_count = seed_preventive_records_for_pet(db, pet)
@@ -1222,13 +1376,12 @@ async def _step_neutered(db, user, text_lower, send_fn):
         "generated" if token else "FAILED",
     )
 
-    # --- Send upload prompt ---
+    # --- Send upload prompt (matches onboarding flow doc step 15) ---
     await send_fn(
         db, mobile,
-        f"✅ {pet.name}'s profile is ready!\n\n"
-        f"Now upload vaccination records, prescriptions, or health reports "
-        f"and I'll extract the details automatically.\n\n"
-        f"You can upload up to *5 documents at a time*.\n\n"
+        f"Now upload {pet.name}'s health records — vaccination cards, "
+        f"prescriptions, lab reports.\n\n"
+        f"You can send up to *5 files* (JPEG, PNG, or PDF, max 10 MB each).\n\n"
         f"You have *5 minutes* to upload. Type *skip* to continue without uploading.",
     )
 
@@ -1255,7 +1408,8 @@ async def _step_awaiting_documents(db, user, text_lower, send_fn):
     # Any other text — remind user to upload or skip.
     await send_fn(
         db, mobile,
-        "Please upload medical records (up to *5 documents at a time*) or type *skip* to continue.",
+        "Upload health records — vaccination cards, prescriptions, lab reports. "
+        "Up to *5 files* (JPEG, PNG, or PDF). Or type *skip* to continue.",
     )
 
 
@@ -1361,8 +1515,24 @@ async def _finalize_onboarding(db, user, send_fn):
     )
 
     # --- Build completion message ---
+    # --- Count diet items for checklist ---
+    from app.models.diet_item import DietItem
+    diet_count = db.query(DietItem).filter(DietItem.pet_id == pet.id).count()
+
+    # --- Build AI-processing-style checklist ---
+    checklist = []
+
+    # Profile setup — always done at this point
+    checklist.append(f"✅ {pet.name}'s profile created")
+
+    # Diet & nutrition
+    if diet_count > 0:
+        checklist.append(f"✅ {diet_count} diet/supplement item(s) recorded")
+    else:
+        checklist.append("⏭️ Diet & supplements skipped")
+
+    # Documents
     if docs_uploaded > 0:
-        # Documents were uploaded — check extraction status.
         pending_extractions = (
             db.query(Document)
             .filter(
@@ -1371,40 +1541,37 @@ async def _finalize_onboarding(db, user, send_fn):
             )
             .count()
         )
-
         if pending_extractions > 0:
-            # Extraction still in progress — basic "all set" + dashboard.
-            msg = (
-                f"All set! {pet.name}'s profile is ready and "
-                f"{docs_uploaded} document(s) are being processed.\n\n"
-                f"You'll receive extraction results shortly.\n\n"
-            )
+            checklist.append(f"⏳ Processing {docs_uploaded} document(s)...")
         else:
-            # All extractions done — include summary.
-            msg = (
-                f"All set! {pet.name}'s profile is ready and "
-                f"{docs_uploaded} document(s) have been processed.\n\n"
-            )
+            checklist.append(f"✅ {docs_uploaded} document(s) processed")
     else:
-        # No documents uploaded — standard message.
-        msg = f"All set! {pet.name}'s profile is ready.\n\n"
+        checklist.append("⏭️ No documents uploaded")
 
+    # Preventive records
     if record_count > 0:
-        msg += f"Preventive health items: {record_count} items are now being tracked.\n\n"
+        checklist.append(f"✅ {record_count} preventive health items tracked")
     else:
-        msg += (
-            "We couldn't load the preventive health items right now. "
-            "They will be set up automatically — no action needed.\n\n"
-        )
+        checklist.append("⏳ Preventive items will be set up automatically")
 
-    # --- Add active reminders ---
+    # Reminder schedule
     reminders_text = _get_active_reminders_text(db, pet.id)
     if reminders_text:
-        msg += reminders_text
+        checklist.append("✅ WhatsApp reminder schedule mapped")
+    else:
+        checklist.append("✅ Reminder engine ready")
+
+    checklist_str = "\n".join(checklist)
+
+    msg = f"*Processing {pet.name}'s records...* ⏳\n\n{checklist_str}\n\n"
+
+    if docs_uploaded > 0 and pending_extractions > 0:
+        msg += "You'll receive extraction results shortly.\n\n"
 
     if token:
         msg += (
-            f"View *{pet.name}'s Dashboard* here:\n"
+            f"✅ *{pet.name}'s profile is ready!*\n"
+            f"View the dashboard here:\n"
             f"{settings.FRONTEND_URL}/dashboard/{token}\n\n"
         )
     else:
@@ -1416,10 +1583,7 @@ async def _finalize_onboarding(db, user, send_fn):
     msg += (
         f"Need medicines, food, or supplements? Just type *order* and "
         f"we'll help you get what your pet needs!\n\n"
-    )
-
-    msg += (
-        f"You can upload medical records (photos, PDFs) anytime to update "
+        f"You can upload medical records anytime to update "
         f"{pet.name}'s health data.\n\n"
         f"Type *add pet* to add another pet, or ask any question about "
         f"{pet.name}'s health!"

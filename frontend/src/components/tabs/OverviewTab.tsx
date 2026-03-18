@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import type { DashboardData } from '@/lib/api';
+import { useState, useEffect, useCallback } from 'react';
+import type { DashboardData, ContactItem, NutritionAnalysis, NudgeItem } from '@/lib/api';
+import { addContact, updateContact, deleteContact, getNutritionAnalysis, getNudges, dismissNudge } from '@/lib/api';
 import StatusBadge from '@/components/ui/StatusBadge';
 import CollapsibleCard from '@/components/ui/CollapsibleCard';
 import AddRow from '@/components/ui/AddRow';
@@ -9,9 +10,10 @@ import BottomSheet from '@/components/ui/BottomSheet';
 import {
   filterByKeywords, countOverdue, formatApiDate, getStatusForRecord,
   VACCINE_KW, DEWORMING_KW, FLEA_TICK_KW, CHECKUP_KW,
-  MOCK_NUTRITION_DATA, MOCK_WA_REMINDERS, MOCK_DOC_SECTIONS,
+  MOCK_WA_REMINDERS, MOCK_DOC_SECTIONS,
   WA_REMINDER_COLORS, WA_REMINDER_BG, WA_REMINDER_LABELS,
-  REMINDER_EXPLAINER, STATUS_CONFIG,
+  REMINDER_EXPLAINER,
+  NUDGE_CATEGORY_ICONS, NUDGE_PRIORITY_COLORS,
 } from '@/lib/dashboard-utils';
 
 interface OverviewTabProps {
@@ -19,32 +21,71 @@ interface OverviewTabProps {
   token: string;
   onTabChange: (tab: string) => void;
   onCartClick: (itemId?: string) => void;
+  onUpdated?: () => void;
+  onRemindersClick?: () => void;
 }
 
-interface Contact {
-  id: string;
-  type: string;
-  name: string;
-  clinic: string;
-  phone: string;
-  note: string;
-}
+const SCORE_LABEL_COLORS: Record<string, { color: string; bg: string }> = {
+  Excellent: { color: '#34C759', bg: '#F0FFF4' },
+  Good: { color: '#007AFF', bg: '#F0F6FF' },
+  Fair: { color: '#FF9500', bg: '#FFF6ED' },
+  Poor: { color: '#FF3B30', bg: '#FFF0F0' },
+};
 
-export default function OverviewTab({ data, token, onTabChange, onCartClick }: OverviewTabProps) {
-  const [contacts, setContacts] = useState<Contact[]>([]);
+const CATEGORY_ICONS: Record<string, string> = {
+  vaccines: '💉',
+  deworming_flea: '🪱',
+  conditions: '🏥',
+  nutrition: '🥗',
+  grooming: '✂️',
+  checkups: '🩺',
+};
+
+const ROLE_LABELS: Record<string, string> = {
+  veterinarian: 'Vet',
+  groomer: 'Groomer',
+  trainer: 'Trainer',
+  specialist: 'Specialist',
+  other: 'Other',
+};
+
+const ROLE_API_MAP: Record<string, string> = {
+  Vet: 'veterinarian',
+  Groomer: 'groomer',
+  Trainer: 'trainer',
+  Other: 'other',
+};
+
+export default function OverviewTab({ data, token, onTabChange, onCartClick, onUpdated, onRemindersClick }: OverviewTabProps) {
   const [contactSheet, setContactSheet] = useState(false);
-  const [editContact, setEditContact] = useState<Contact | null>(null);
+  const [editContact, setEditContact] = useState<ContactItem | null>(null);
   const [contactForm, setContactForm] = useState({ type: 'Vet', name: '', clinic: '', phone: '', note: '' });
+  const [savingContact, setSavingContact] = useState(false);
+  const [nutritionData, setNutritionData] = useState<NutritionAnalysis | null>(null);
+  const [nudges, setNudges] = useState<NudgeItem[]>([]);
+  const [dismissingNudge, setDismissingNudge] = useState<string | null>(null);
 
+  // Fetch nutrition analysis and nudges on mount
   useEffect(() => {
-    const saved = localStorage.getItem(`petcircle_contacts_${token}`);
-    if (saved) setContacts(JSON.parse(saved));
+    getNutritionAnalysis(token).then(setNutritionData).catch(() => {});
+    getNudges(token).then(setNudges).catch(() => {});
   }, [token]);
 
-  const saveContacts = (list: Contact[]) => {
-    setContacts(list);
-    localStorage.setItem(`petcircle_contacts_${token}`, JSON.stringify(list));
-  };
+  const handleDismissNudge = useCallback(async (nudgeId: string) => {
+    setDismissingNudge(nudgeId);
+    try {
+      await dismissNudge(token, nudgeId);
+      setNudges(prev => prev.filter(n => n.id !== nudgeId));
+    } catch {
+      // ignore
+    } finally {
+      setDismissingNudge(null);
+    }
+  }, [token]);
+
+  const contacts = data.contacts || [];
+  const hs = data.health_score;
+  const labelStyle = SCORE_LABEL_COLORS[hs.label] || SCORE_LABEL_COLORS.Fair;
 
   const records = data.preventive_records || [];
   const vaccines = filterByKeywords(records, VACCINE_KW);
@@ -62,25 +103,183 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick }: O
   ];
 
   const apiReminders = data.reminders || [];
-  const hasDiagnostics = (data.diagnostic_results || []).length > 0;
+  const conditions = data.conditions || [];
+  const hasConditions = conditions.length > 0;
 
-  const handleSaveContact = () => {
-    const newContact: Contact = {
-      id: editContact?.id || Date.now().toString(),
-      ...contactForm,
-    };
-    if (editContact) {
-      saveContacts(contacts.map(c => c.id === editContact.id ? newContact : c));
-    } else {
-      saveContacts([...contacts, newContact]);
+  const handleSaveContact = useCallback(async () => {
+    setSavingContact(true);
+    try {
+      const body = {
+        role: ROLE_API_MAP[contactForm.type] || 'other',
+        name: contactForm.name,
+        clinic_name: contactForm.clinic || undefined,
+        phone: contactForm.phone || undefined,
+      };
+      if (editContact) {
+        await updateContact(token, editContact.id, body);
+      } else {
+        await addContact(token, body);
+      }
+      onUpdated?.();
+    } catch {
+      // Silently fail — user can retry
+    } finally {
+      setSavingContact(false);
+      setContactSheet(false);
+      setEditContact(null);
+      setContactForm({ type: 'Vet', name: '', clinic: '', phone: '', note: '' });
     }
-    setContactSheet(false);
-    setEditContact(null);
-    setContactForm({ type: 'Vet', name: '', clinic: '', phone: '', note: '' });
-  };
+  }, [contactForm, editContact, token, onUpdated]);
+
+  const handleDeleteContact = useCallback(async (id: string) => {
+    try {
+      await deleteContact(token, id);
+      onUpdated?.();
+    } catch {
+      // Silently fail
+    }
+  }, [token, onUpdated]);
+
+  // SVG ring parameters
+  const ringSize = 120;
+  const strokeWidth = 10;
+  const radius = (ringSize - strokeWidth) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const scorePct = Math.min(hs.score, 100);
+  const dashOffset = circumference - (scorePct / 100) * circumference;
 
   return (
     <div className="space-y-4">
+      {/* Health Score Ring */}
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
+        <div className="flex items-center gap-4">
+          <div className="relative shrink-0" style={{ width: ringSize, height: ringSize }}>
+            <svg width={ringSize} height={ringSize} className="-rotate-90">
+              <circle
+                cx={ringSize / 2} cy={ringSize / 2} r={radius}
+                fill="none" stroke="#F2F2F7" strokeWidth={strokeWidth}
+              />
+              <circle
+                cx={ringSize / 2} cy={ringSize / 2} r={radius}
+                fill="none" stroke={labelStyle.color} strokeWidth={strokeWidth}
+                strokeLinecap="round"
+                strokeDasharray={circumference}
+                strokeDashoffset={dashOffset}
+                style={{ transition: 'stroke-dashoffset 0.6s ease' }}
+              />
+            </svg>
+            <div className="absolute inset-0 flex flex-col items-center justify-center">
+              <span className="text-2xl font-bold" style={{ color: labelStyle.color }}>{hs.score}</span>
+              <span className="text-[10px] font-semibold text-gray-400">/ 100</span>
+            </div>
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 mb-1">
+              <span
+                className="text-xs font-bold px-2 py-0.5 rounded-full"
+                style={{ color: labelStyle.color, backgroundColor: labelStyle.bg }}
+              >
+                {hs.label}
+              </span>
+            </div>
+            <p className="text-xs text-gray-500 mb-2">
+              {data.pet.name}&apos;s overall health score based on 6 care categories.
+            </p>
+            {/* Draggers */}
+            {hs.draggers.length > 0 && (
+              <div className="space-y-1">
+                <p className="text-[10px] font-semibold text-red-500">Needs attention:</p>
+                {hs.draggers.map((d, i) => (
+                  <p key={i} className="text-[10px] text-red-400">
+                    {CATEGORY_ICONS[d.category.toLowerCase().replace(/ & /g, '_').replace(/ /g, '_')] || '!'} {d.category} — {d.score}%
+                  </p>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Breakdown bars */}
+        <div className="mt-4 space-y-2">
+          {hs.breakdown.map((b) => (
+            <div key={b.key} className="flex items-center gap-2">
+              <span className="text-sm shrink-0">{CATEGORY_ICONS[b.key] || '?'}</span>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-between mb-0.5">
+                  <span className="text-[11px] font-medium text-gray-700 truncate">{b.category}</span>
+                  <span className="text-[10px] text-gray-500 shrink-0">{b.score}% <span className="text-gray-300">({b.weight}%)</span></span>
+                </div>
+                <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all duration-500"
+                    style={{
+                      width: `${Math.min(b.score, 100)}%`,
+                      backgroundColor: b.score >= 75 ? '#34C759' : b.score >= 50 ? '#FF9500' : '#FF3B30',
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Action Plan (Nudges) */}
+      {nudges.length > 0 && (
+        <div>
+          <h3 className="text-sm font-semibold text-gray-500 mb-2">Action Plan</h3>
+          <div className="space-y-2">
+            {nudges.map((nudge) => {
+              const priorityStyle = NUDGE_PRIORITY_COLORS[nudge.priority] || NUDGE_PRIORITY_COLORS.medium;
+              const icon = nudge.icon || NUDGE_CATEGORY_ICONS[nudge.category] || '📌';
+              return (
+                <div
+                  key={nudge.id}
+                  className="bg-white rounded-xl border border-gray-100 shadow-sm p-3"
+                  style={{ borderLeftWidth: 3, borderLeftColor: priorityStyle.color }}
+                >
+                  <div className="flex items-start gap-2.5">
+                    <span className="text-lg shrink-0 mt-0.5">{icon}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5 mb-0.5">
+                        <span className="text-xs font-semibold text-gray-900 truncate">{nudge.title}</span>
+                        <span
+                          className="text-[10px] font-bold px-1.5 py-0.5 rounded-full shrink-0"
+                          style={{ color: priorityStyle.color, backgroundColor: priorityStyle.bg }}
+                        >
+                          {priorityStyle.label}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-gray-500 leading-snug">{nudge.message}</p>
+                      <div className="flex items-center gap-2 mt-2">
+                        {nudge.orderable && (
+                          <button
+                            onClick={() => onCartClick(nudge.cart_item_id || undefined)}
+                            className="text-[11px] font-semibold text-white px-3 py-1 rounded-full"
+                            style={{ backgroundColor: '#D44800' }}
+                          >
+                            Order {nudge.price ? `· ${nudge.price}` : ''}
+                          </button>
+                        )}
+                        {!nudge.mandatory && (
+                          <button
+                            onClick={() => handleDismissNudge(nudge.id)}
+                            disabled={dismissingNudge === nudge.id}
+                            className="text-[11px] text-gray-400 hover:text-gray-600"
+                          >
+                            {dismissingNudge === nudge.id ? 'Dismissing...' : 'Dismiss'}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Care at a Glance */}
       <div>
         <h3 className="text-sm font-semibold text-gray-500 mb-2">Care at a Glance</h3>
@@ -107,17 +306,32 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick }: O
         </div>
       </div>
 
-      {/* Condition Summary — only if diagnostics exist */}
-      {hasDiagnostics && (
+      {/* Condition Summary */}
+      {hasConditions && (
         <div className="bg-white rounded-2xl shadow-sm border border-blue-100 p-4">
           <div className="flex items-center gap-2 mb-2">
             <span className="text-lg">🏥</span>
             <h3 className="font-semibold text-sm">Condition Summary</h3>
           </div>
-          <p className="text-xs text-gray-500">
-            {data.diagnostic_results!.length} diagnostic parameter{data.diagnostic_results!.length !== 1 ? 's' : ''} on file.
-            Check the Conditions tab for details.
-          </p>
+          {conditions.map((cond) => (
+            <div key={cond.id} className="mb-2 last:mb-0">
+              <p className="text-xs font-semibold text-gray-800">{cond.name}</p>
+              {cond.medications.length > 0 && (
+                <p className="text-[11px] text-gray-500">
+                  {cond.medications.length} medication{cond.medications.length !== 1 ? 's' : ''}
+                  {cond.monitoring.length > 0 && ` · ${cond.monitoring.length} monitoring`}
+                </p>
+              )}
+              {cond.monitoring.length > 0 && (
+                <p className="text-[11px] text-gray-400">
+                  Next follow-up: {cond.monitoring
+                    .filter(m => m.next_due_date)
+                    .map(m => formatApiDate(m.next_due_date))
+                    .join(', ') || 'Not scheduled'}
+                </p>
+              )}
+            </div>
+          ))}
           <button
             onClick={() => onTabChange('conditions')}
             className="mt-2 text-xs text-brand font-semibold"
@@ -136,32 +350,53 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick }: O
         🛒 Order Now — Care Essentials
       </button>
 
-      {/* Nutrition Note */}
+      {/* Nutrition Note — real data or fallback */}
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 space-y-3">
         <h3 className="font-semibold text-sm flex items-center gap-2">
           <span>🥗</span> Nutrition Note
         </h3>
-        <div className="rounded-xl p-3" style={{ backgroundColor: '#FFF6ED', borderLeft: '3px solid #FF9500' }}>
-          <p className="text-xs font-semibold text-amber-800 mb-1">Overall Diet</p>
-          <p className="text-xs text-amber-700">
-            {MOCK_NUTRITION_DATA.calories.current}/{MOCK_NUTRITION_DATA.calories.target} kcal/day — slightly below target.
-          </p>
-        </div>
-        <div className="rounded-xl p-3" style={{ backgroundColor: '#F0F6FF', borderLeft: '3px solid #007AFF' }}>
-          <p className="text-xs font-semibold text-blue-800 mb-1">What to Improve</p>
-          <ul className="space-y-1">
-            {MOCK_NUTRITION_DATA.improve.slice(0, 3).map((item, i) => (
-              <li key={i} className="flex items-start gap-2 text-xs text-blue-700">
-                <span className="w-1.5 h-1.5 rounded-full mt-1.5 shrink-0" style={{ backgroundColor: item.dot }} />
-                {item.text}
-              </li>
-            ))}
-          </ul>
-        </div>
-        <div className="rounded-xl p-3" style={{ backgroundColor: '#F0FFF4', borderLeft: '3px solid #34C759' }}>
-          <p className="text-xs font-semibold text-green-800 mb-1">Recommendation</p>
-          <p className="text-xs text-green-700">Consider adding joint supplements and increasing protein intake.</p>
-        </div>
+        {nutritionData ? (
+          <>
+            <div className="rounded-xl p-3" style={{ backgroundColor: '#FFF6ED', borderLeft: '3px solid #FF9500' }}>
+              <p className="text-xs font-semibold text-amber-800 mb-1">Overall Diet</p>
+              <p className="text-xs text-amber-700">
+                {nutritionData.calories.actual}/{nutritionData.calories.target} kcal/day — {nutritionData.overall_label.toLowerCase()}.
+              </p>
+            </div>
+            {nutritionData.improvements.length > 0 && (
+              <div className="rounded-xl p-3" style={{ backgroundColor: '#F0F6FF', borderLeft: '3px solid #007AFF' }}>
+                <p className="text-xs font-semibold text-blue-800 mb-1">What to Improve</p>
+                <ul className="space-y-1">
+                  {nutritionData.improvements.slice(0, 3).map((item, i) => (
+                    <li key={i} className="flex items-start gap-2 text-xs text-blue-700">
+                      <span className="w-1.5 h-1.5 rounded-full mt-1.5 shrink-0" style={{ backgroundColor: item.dot }} />
+                      {item.text}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {nutritionData.recommendation && (
+              <div className="rounded-xl p-3" style={{ backgroundColor: '#F0FFF4', borderLeft: '3px solid #34C759' }}>
+                <p className="text-xs font-semibold text-green-800 mb-1">Recommendation</p>
+                <p className="text-xs text-green-700">{nutritionData.recommendation}</p>
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <div className="rounded-xl p-3" style={{ backgroundColor: '#FFF6ED', borderLeft: '3px solid #FF9500' }}>
+              <p className="text-xs font-semibold text-amber-800 mb-1">Overall Diet</p>
+              <p className="text-xs text-amber-700">Add diet items in the Nutrition tab to see your analysis.</p>
+            </div>
+            <button
+              onClick={() => onTabChange('nutrition')}
+              className="text-xs text-brand font-semibold"
+            >
+              Go to Nutrition →
+            </button>
+          </>
+        )}
       </div>
 
       {/* WhatsApp Reminders */}
@@ -221,6 +456,15 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick }: O
               </div>
             );
           })}
+          {onRemindersClick && (
+            <button
+              onClick={onRemindersClick}
+              className="w-full mt-2 py-2.5 rounded-xl text-xs font-semibold text-white"
+              style={{ backgroundColor: '#075E54' }}
+            >
+              View All Reminders
+            </button>
+          )}
         </div>
       </CollapsibleCard>
 
@@ -272,20 +516,23 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick }: O
         </div>
       </CollapsibleCard>
 
-      {/* Care Contacts */}
+      {/* Care Contacts — wired to real API */}
       <CollapsibleCard icon="📞" title="Care Contacts" subtitle={`${contacts.length} saved`}>
         <div className="p-4 space-y-3">
           {contacts.map(c => (
             <div key={c.id} className="flex items-center justify-between py-2 border-b border-gray-50 last:border-0">
               <div>
                 <p className="text-sm font-medium text-gray-900">{c.name}</p>
-                <p className="text-[11px] text-gray-500">{c.type} · {c.clinic || 'No clinic'} · {c.phone}</p>
+                <p className="text-[11px] text-gray-500">
+                  {ROLE_LABELS[c.role] || c.role} · {c.clinic_name || 'No clinic'} · {c.phone || 'No phone'}
+                </p>
               </div>
               <div className="flex gap-2">
                 <button
                   onClick={() => {
                     setEditContact(c);
-                    setContactForm({ type: c.type, name: c.name, clinic: c.clinic, phone: c.phone, note: c.note });
+                    const displayRole = Object.entries(ROLE_API_MAP).find(([, v]) => v === c.role)?.[0] || 'Other';
+                    setContactForm({ type: displayRole, name: c.name, clinic: c.clinic_name || '', phone: c.phone || '', note: '' });
                     setContactSheet(true);
                   }}
                   className="text-xs text-brand font-semibold"
@@ -293,7 +540,7 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick }: O
                   Edit
                 </button>
                 <button
-                  onClick={() => saveContacts(contacts.filter(x => x.id !== c.id))}
+                  onClick={() => handleDeleteContact(c.id)}
                   className="text-xs text-red-500 font-semibold"
                 >
                   Delete
@@ -334,7 +581,7 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick }: O
               ))}
             </div>
           </div>
-          {['name', 'clinic', 'phone', 'note'].map(field => (
+          {['name', 'clinic', 'phone'].map(field => (
             <div key={field}>
               <label className="text-xs font-semibold text-gray-500 mb-1 block capitalize">{field}</label>
               <input
@@ -347,10 +594,11 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick }: O
           ))}
           <button
             onClick={handleSaveContact}
-            className="w-full py-3 rounded-xl text-white text-sm font-semibold"
+            disabled={savingContact || !contactForm.name.trim()}
+            className="w-full py-3 rounded-xl text-white text-sm font-semibold disabled:opacity-50"
             style={{ background: 'var(--brand-gradient)' }}
           >
-            {editContact ? 'Save Changes' : 'Add Contact'}
+            {savingContact ? 'Saving...' : editContact ? 'Save Changes' : 'Add Contact'}
           </button>
         </div>
       </BottomSheet>

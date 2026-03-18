@@ -51,6 +51,8 @@ class Condition(Base):
     condition_type = Column(String(20), nullable=False, default="chronic")  # chronic | episodic | resolved
     diagnosed_at = Column(Date, nullable=True)
     notes = Column(String(1000), nullable=True)
+    icon = Column(String(10), nullable=True)  # Emoji icon for condition display
+    managed_by = Column(String(200), nullable=True)  # Managing doctor/vet name and location
     source = Column(String(20), nullable=False, default="extraction")  # extraction | manual
     is_active = Column(Boolean, default=True)
 

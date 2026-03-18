@@ -257,6 +257,36 @@ MONTH_YEAR_FORMATS: list[str] = [
 # Canonical storage format for all dates in the database.
 DB_DATE_FORMAT: str = "%Y-%m-%d"
 
+# --- Nudge Engine ---
+# Categories for health nudges (must match DB CHECK constraint).
+NUDGE_CATEGORIES: list[str] = [
+    "vaccine", "deworming", "flea", "condition", "nutrition", "grooming", "checkup",
+]
+
+# Priority sort order — lower number = higher priority.
+NUDGE_PRIORITY_ORDER: dict[str, int] = {"urgent": 0, "high": 1, "medium": 2}
+
+# Source sort order — record-based nudges rank above AI-generated ones.
+NUDGE_SOURCE_ORDER: dict[str, int] = {"record": 0, "ai": 1}
+
+# Trigger types for nudge generation.
+NUDGE_TRIGGER_CRON: str = "cron"
+NUDGE_TRIGGER_UPLOAD: str = "upload"
+NUDGE_TRIGGER_INACTIVITY: str = "inactivity"
+
+# WhatsApp button payload IDs for nudge interactions.
+NUDGE_ACTION: str = "NUDGE_ACTION"
+NUDGE_DISMISS: str = "NUDGE_DISMISS"
+NUDGE_VIEW_DASHBOARD: str = "NUDGE_VIEW_DASHBOARD"
+
+# Set for routing in message_router.
+NUDGE_PAYLOADS: frozenset[str] = frozenset({
+    NUDGE_ACTION, NUDGE_DISMISS, NUDGE_VIEW_DASHBOARD,
+})
+
+# Nudge cache freshness — skip regeneration if nudges are younger than this.
+NUDGE_CACHE_HOURS: int = 6
+
 # --- Document Categories ---
 # Categories assigned by GPT extraction to classify uploaded documents.
 # Used for grouping in the dashboard and filtering.

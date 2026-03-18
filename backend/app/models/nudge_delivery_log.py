@@ -1,0 +1,36 @@
+"""
+PetCircle Phase 1 — Nudge Delivery Log Model
+
+Tracks every WhatsApp nudge delivery attempt for rate limiting
+and analytics. Indexed on (user_id, sent_at) for efficient
+rate limit queries.
+"""
+
+import uuid
+from datetime import datetime
+from sqlalchemy import Column, String, DateTime, ForeignKey, Index
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
+from app.database import Base
+
+
+class NudgeDeliveryLog(Base):
+    """Log of every nudge sent via WhatsApp."""
+
+    __tablename__ = "nudge_delivery_log"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    nudge_id = Column(UUID(as_uuid=True), ForeignKey("nudges.id", ondelete="CASCADE"), nullable=False)
+    pet_id = Column(UUID(as_uuid=True), ForeignKey("pets.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    wa_status = Column(String(20), nullable=True)
+    sent_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    # Relationships
+    nudge = relationship("Nudge")
+    pet = relationship("Pet")
+    user = relationship("User")
+
+    __table_args__ = (
+        Index("idx_nudge_delivery_log_user_sent", "user_id", "sent_at"),
+    )

@@ -10,7 +10,7 @@ Constraints:
 
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, ForeignKey
+from sqlalchemy import Column, String, DateTime, Date, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -26,6 +26,8 @@ class ConditionMonitoring(Base):
 
     name = Column(String(200), nullable=False)
     frequency = Column(String(100), nullable=True)
+    next_due_date = Column(Date, nullable=True)  # When next check is due
+    last_done_date = Column(Date, nullable=True)  # When last performed
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

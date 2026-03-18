@@ -30,6 +30,7 @@ Rules:
     - OpenAI API key from environment (settings.OPENAI_API_KEY) — never hardcoded.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -1506,6 +1507,16 @@ async def extract_and_process_document(
             results["items_processed"],
             len(results["errors"]),
         )
+
+        # --- Step 6: Trigger immediate nudge after successful extraction ---
+        try:
+            from app.services.nudge_sender import send_immediate_nudge
+            asyncio.create_task(send_immediate_nudge(db, document.pet_id))
+        except Exception as nudge_err:
+            logger.warning(
+                "Post-extraction nudge trigger failed for pet %s: %s",
+                str(document.pet_id), str(nudge_err),
+            )
 
     except Exception as e:
         # Extraction-level failure — mark as failed, do not crash.

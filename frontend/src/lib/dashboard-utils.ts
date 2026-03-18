@@ -20,6 +20,23 @@ export const DEWORMING_KW = ["deworming", "deworm"];
 export const FLEA_TICK_KW = ["tick", "flea"];
 export const CHECKUP_KW = ["checkup", "annual", "wellness", "blood test", "preventive blood"];
 
+// ─── Nudge Constants ─────────────────────────────────────────────
+export const NUDGE_CATEGORY_ICONS: Record<string, string> = {
+  vaccine: '💉',
+  deworming: '💊',
+  flea: '🐛',
+  condition: '📋',
+  nutrition: '🍽️',
+  grooming: '✂️',
+  checkup: '🩸',
+};
+
+export const NUDGE_PRIORITY_COLORS: Record<string, { color: string; bg: string; label: string }> = {
+  urgent: { color: '#FF3B30', bg: '#FFF0F0', label: 'Urgent' },
+  high:   { color: '#FF9500', bg: '#FFF6ED', label: 'High' },
+  medium: { color: '#007AFF', bg: '#F0F6FF', label: 'Medium' },
+};
+
 // ─── Date Helpers ────────────────────────────────────────────────
 export function formatDMY(date: Date): string {
   const d = String(date.getDate()).padStart(2, '0');

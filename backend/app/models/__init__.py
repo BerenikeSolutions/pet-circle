@@ -29,6 +29,9 @@ from app.models.diet_item import DietItem
 from app.models.hygiene_preference import HygienePreference
 from app.models.product_catalog import ProductCatalog
 from app.models.nudge import Nudge
+from app.models.nudge_config import NudgeConfig
+from app.models.nudge_delivery_log import NudgeDeliveryLog
+from app.models.nudge_engagement import NudgeEngagement
 from app.models.cart_item import CartItem
 from app.models.ideal_weight_cache import IdealWeightCache
 from app.models.nutrition_target_cache import NutritionTargetCache
@@ -58,6 +61,9 @@ __all__ = [
     "HygienePreference",
     "ProductCatalog",
     "Nudge",
+    "NudgeConfig",
+    "NudgeDeliveryLog",
+    "NudgeEngagement",
     "CartItem",
     "IdealWeightCache",
     "NutritionTargetCache",

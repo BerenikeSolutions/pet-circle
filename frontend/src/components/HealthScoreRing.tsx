@@ -52,14 +52,7 @@ export default memo(function HealthScoreRing({ data }: { data: HealthScore }) {
           <span className="text-xs text-gray-500">/ 100</span>
         </div>
       </div>
-      <div className="flex gap-4 text-sm text-gray-600">
-        <span>
-          Mandatory: {data.essential_done}/{data.essential_total}
-        </span>
-        <span>
-          Recommended: {data.complementary_done}/{data.complementary_total}
-        </span>
-      </div>
+      <span className="text-sm font-semibold text-gray-600">{data.label}</span>
     </div>
   );
 })

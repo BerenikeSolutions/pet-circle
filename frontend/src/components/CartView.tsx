@@ -1,11 +1,16 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import type { DashboardData } from '@/lib/api';
-import { MOCK_CART_ITEMS, PAYMENT_METHODS, NET_BANKS } from '@/lib/dashboard-utils';
+import type { DashboardData, CartItemData, CartRecommendation, PlaceOrderResponse } from '@/lib/api';
+import {
+  getCart, toggleCartItem, updateCartQuantity, addToCart,
+  getCartRecommendations, applyCoupon, placeOrder,
+} from '@/lib/api';
+import { PAYMENT_METHODS, NET_BANKS } from '@/lib/dashboard-utils';
 
 interface CartViewProps {
   data: DashboardData;
+  token: string;
   pinnedItemId?: string;
   onBack: () => void;
 }
@@ -25,29 +30,26 @@ interface AddressSheetState {
 
 type Screen = 'cart' | 'payment' | 'success';
 
-export default function CartView({ data, pinnedItemId, onBack }: CartViewProps) {
+export default function CartView({ data, token, pinnedItemId, onBack }: CartViewProps) {
   const petName = data.pet.name || 'Your Pet';
 
   const [screen, setScreen] = useState<Screen>('cart');
-  const [cart, setCart] = useState<Record<string, boolean>>(() =>
-    MOCK_CART_ITEMS.reduce((a, i) => ({ ...a, [i.id]: i.inCart }), {} as Record<string, boolean>)
-  );
-  const [qtys, setQtys] = useState<Record<string, number>>(() =>
-    MOCK_CART_ITEMS.reduce((a, i) => ({ ...a, [i.id]: 1 }), {} as Record<string, number>)
-  );
+  const [items, setItems] = useState<CartItemData[]>([]);
+  const [recommendations, setRecommendations] = useState<CartRecommendation[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [recsLoading, setRecsLoading] = useState(true);
   const [coupon, setCoupon] = useState('');
   const [couponApplied, setCouponApplied] = useState(false);
+  const [discountPercent, setDiscountPercent] = useState(0);
   const [payMethod, setPayMethod] = useState('upi');
   const [upiId, setUpiId] = useState('');
-
-  // Card state
   const [cardNum, setCardNum] = useState('');
   const [cardName, setCardName] = useState('');
   const [cardExp, setCardExp] = useState('');
   const [cardCvv, setCardCvv] = useState('');
-
-  // Net banking
   const [netBank, setNetBank] = useState('');
+  const [orderResult, setOrderResult] = useState<PlaceOrderResponse | null>(null);
+  const [placing, setPlacing] = useState(false);
 
   // Address state
   const [addresses, setAddresses] = useState<AddressData[]>([
@@ -58,37 +60,145 @@ export default function CartView({ data, pinnedItemId, onBack }: CartViewProps) 
 
   const selectedAddr = addresses.find(a => a.selected) || addresses[0];
 
+  // Load cart items from API
+  const loadCart = useCallback(async () => {
+    try {
+      setLoading(true);
+      const cartData = await getCart(token);
+      setItems(cartData.items);
+    } catch (e) {
+      console.error('Failed to load cart:', e);
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
+
+  // Load recommendations from API
+  const loadRecommendations = useCallback(async () => {
+    try {
+      setRecsLoading(true);
+      const recs = await getCartRecommendations(token);
+      setRecommendations(recs);
+    } catch (e) {
+      console.error('Failed to load recommendations:', e);
+    } finally {
+      setRecsLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    loadCart();
+    loadRecommendations();
+  }, [loadCart, loadRecommendations]);
+
   // Auto-add pinned item to cart on mount
   useEffect(() => {
-    if (pinnedItemId) {
-      setCart(prev => ({ ...prev, [pinnedItemId]: true }));
+    if (pinnedItemId && !loading) {
+      const existing = items.find(i => i.product_id === pinnedItemId);
+      if (!existing || !existing.in_cart) {
+        handleToggle(pinnedItemId);
+      }
     }
-  }, [pinnedItemId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pinnedItemId, loading]);
 
-  // Sort helper: pinned item always first
-  const sortWithPin = useCallback((items: typeof MOCK_CART_ITEMS) => {
-    if (!pinnedItemId) return items;
-    return [...items].sort((a, b) => {
-      if (a.id === pinnedItemId) return -1;
-      if (b.id === pinnedItemId) return 1;
+  const handleToggle = useCallback(async (productId: string) => {
+    try {
+      const updated = await toggleCartItem(token, productId);
+      setItems(prev => {
+        const exists = prev.find(i => i.product_id === productId);
+        if (exists) {
+          return prev.map(i => i.product_id === productId ? updated : i);
+        }
+        return [...prev, updated];
+      });
+      // Remove from recommendations if added
+      if (updated.in_cart) {
+        setRecommendations(prev => prev.filter(r => r.product_id !== productId));
+      }
+    } catch (e) {
+      console.error('Toggle failed:', e);
+    }
+  }, [token]);
+
+  const handleAddRecommendation = useCallback(async (rec: CartRecommendation) => {
+    try {
+      const added = await addToCart(token, {
+        product_id: rec.product_id,
+        name: rec.name,
+        price: rec.price,
+        icon: rec.icon,
+        sub: rec.sub,
+        tag: rec.tag || undefined,
+        tag_color: rec.tag_color || undefined,
+      });
+      setItems(prev => [...prev, added]);
+      setRecommendations(prev => prev.filter(r => r.product_id !== rec.product_id));
+    } catch (e) {
+      console.error('Add to cart failed:', e);
+    }
+  }, [token]);
+
+  const handleQtyChange = useCallback(async (productId: string, newQty: number) => {
+    const qty = Math.max(1, newQty);
+    // Optimistic update
+    setItems(prev => prev.map(i => i.product_id === productId ? { ...i, quantity: qty } : i));
+    try {
+      await updateCartQuantity(token, productId, qty);
+    } catch (e) {
+      console.error('Quantity update failed:', e);
+      loadCart(); // Revert on failure
+    }
+  }, [token, loadCart]);
+
+  const handleApplyCoupon = useCallback(async () => {
+    if (!coupon) return;
+    try {
+      const result = await applyCoupon(token, coupon);
+      if (result.valid) {
+        setCouponApplied(true);
+        setDiscountPercent(result.discount_percent);
+      }
+    } catch (e) {
+      console.error('Coupon failed:', e);
+    }
+  }, [token, coupon]);
+
+  const handlePlaceOrder = useCallback(async () => {
+    setPlacing(true);
+    try {
+      const result = await placeOrder(token, {
+        payment_method: payMethod === 'net' ? 'netbanking' : payMethod,
+        address: selectedAddr ? { name: selectedAddr.name, line: selectedAddr.line, tag: selectedAddr.tag } : undefined,
+        coupon: couponApplied ? coupon : undefined,
+      });
+      setOrderResult(result);
+      setScreen('success');
+    } catch (e) {
+      console.error('Order failed:', e);
+      alert('Failed to place order. Please try again.');
+    } finally {
+      setPlacing(false);
+    }
+  }, [token, payMethod, selectedAddr, couponApplied, coupon]);
+
+  // Derived values
+  const inCartItems = useMemo(() => items.filter(i => i.in_cart), [items]);
+  const notInCartItems = useMemo(() => items.filter(i => !i.in_cart), [items]);
+  const subtotal = useMemo(() => inCartItems.reduce((s, i) => s + i.price * i.quantity, 0), [inCartItems]);
+  const discount = useMemo(() => couponApplied ? Math.round(subtotal * discountPercent / 100) : 0, [subtotal, couponApplied, discountPercent]);
+  const delivery = subtotal > 999 ? 0 : 49;
+  const total = subtotal - discount + delivery;
+
+  // Sort pinned item first
+  const sortWithPin = useCallback((arr: CartItemData[]) => {
+    if (!pinnedItemId) return arr;
+    return [...arr].sort((a, b) => {
+      if (a.product_id === pinnedItemId) return -1;
+      if (b.product_id === pinnedItemId) return 1;
       return 0;
     });
   }, [pinnedItemId]);
-
-  // Derived cart values
-  const { inCart, subtotal, discount, delivery, total } = useMemo(() => {
-    const inCart = MOCK_CART_ITEMS.filter(i => cart[i.id]);
-    const subtotal = inCart.reduce((s, i) => s + i.price * qtys[i.id], 0);
-    const discount = couponApplied ? Math.round(subtotal * 0.1) : 0;
-    const delivery = subtotal > 999 ? 0 : 49;
-    return { inCart, subtotal, discount, delivery, total: subtotal - discount + delivery };
-  }, [cart, qtys, couponApplied]);
-
-  const toggleCart = useCallback((id: string) => setCart(p => ({ ...p, [id]: !p[id] })), []);
-  const setQty = useCallback((id: string, v: number) => setQtys(p => ({ ...p, [id]: Math.max(1, v) })), []);
-
-  const urgentItems = useMemo(() => sortWithPin(MOCK_CART_ITEMS.filter(i => i.inCart || i.id === pinnedItemId)), [sortWithPin, pinnedItemId]);
-  const recItems = useMemo(() => sortWithPin(MOCK_CART_ITEMS.filter(i => !i.inCart && i.id !== pinnedItemId)), [sortWithPin, pinnedItemId]);
 
   const openEditAddress = () => {
     setAddrForm({ name: selectedAddr.name, line: selectedAddr.line, tag: selectedAddr.tag });
@@ -109,36 +219,44 @@ export default function CartView({ data, pinnedItemId, onBack }: CartViewProps) 
     setAddressSheet(null);
   };
 
-  const orderId = `PC-${Math.floor(Math.random() * 90000 + 10000)}`;
+  // ─── LOADING ──────────────────────────────────────────────
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center" style={{ background: 'var(--bg-app)' }}>
+        <div className="text-center">
+          <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-t-transparent" style={{ borderColor: '#FFD5C2', borderTopColor: '#D44800' }} />
+          <p className="text-gray-500 text-sm">Loading cart...</p>
+        </div>
+      </div>
+    );
+  }
 
   // ─── SUCCESS SCREEN ──────────────────────────────────────────
-  if (screen === 'success') {
+  if (screen === 'success' && orderResult) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center px-6" style={{ background: 'var(--bg-app)' }}>
         <div className="max-w-[430px] w-full text-center animate-fadeIn">
           <span className="text-6xl mb-4 block">🎉</span>
           <h1 className="font-display text-2xl font-bold text-gray-900 mb-2">Order Confirmed!</h1>
-          <p className="text-sm text-gray-500 mb-6">Order ID: {orderId}</p>
+          <p className="text-sm text-gray-500 mb-6">Order ID: {orderResult.order_id}</p>
 
-          {/* Itemized receipt */}
           <div className="bg-white rounded-2xl shadow-sm p-4 mb-4 text-left" style={{ border: '1.5px solid rgba(52,199,89,0.2)' }}>
-            {inCart.map(i => (
-              <div key={i.id} className="flex justify-between items-center py-1.5" style={{ borderBottom: '1px solid #F5F2EE' }}>
+            {orderResult.items.map(i => (
+              <div key={i.product_id} className="flex justify-between items-center py-1.5" style={{ borderBottom: '1px solid #F5F2EE' }}>
                 <span className="text-[13px]">{i.icon} {i.name}</span>
                 <span className="text-[13px] font-bold" style={{ color: '#D44800' }}>
-                  ₹{(i.price * qtys[i.id]).toLocaleString('en-IN')}
+                  ₹{i.total.toLocaleString('en-IN')}
                 </span>
               </div>
             ))}
             <div className="flex justify-between pt-2 mt-0.5">
               <span className="font-bold text-sm">Total paid</span>
               <span className="font-extrabold text-[15px]" style={{ color: '#D44800' }}>
-                ₹{total.toLocaleString('en-IN')}
+                ₹{orderResult.total.toLocaleString('en-IN')}
               </span>
             </div>
           </div>
 
-          {/* Green delivery note */}
           <div className="rounded-xl px-3.5 py-2.5 mb-5 text-left text-xs" style={{ background: '#F0FFF4', color: '#1A6B2A' }}>
             ✅ Payment received · Estimated delivery 1–2 business days<br />
             🏠 Home vet visit & grooming scheduled for confirmed slots
@@ -161,16 +279,14 @@ export default function CartView({ data, pinnedItemId, onBack }: CartViewProps) 
     return (
       <div className="min-h-screen" style={{ background: 'var(--bg-app)' }}>
         <div className="max-w-[430px] mx-auto">
-          {/* Header */}
           <div className="flex items-center gap-3 px-4 py-4 bg-white border-b border-gray-100">
             <button onClick={() => setScreen('cart')} className="text-gray-600 text-lg">←</button>
             <h2 className="font-display font-bold text-lg">Payment</h2>
           </div>
 
           <div className="p-4 space-y-3 pb-32">
-            {/* Order Summary Pill */}
             <div className="bg-white rounded-xl px-4 py-3 flex justify-between items-center" style={{ border: '1px solid #E8E4DF' }}>
-              <span className="text-[13px] text-gray-600">{inCart.length} items for {petName}</span>
+              <span className="text-[13px] text-gray-600">{inCartItems.length} items for {petName}</span>
               <span className="font-extrabold text-base" style={{ color: '#D44800' }}>₹{total.toLocaleString('en-IN')}</span>
             </div>
 
@@ -238,7 +354,6 @@ export default function CartView({ data, pinnedItemId, onBack }: CartViewProps) 
                     </div>
                   </div>
 
-                  {/* UPI input */}
                   {payMethod === 'upi' && pm.id === 'upi' && (
                     <div className="py-2.5 pb-3.5" style={{ borderBottom: '1px solid #F5F2EE' }}>
                       <input
@@ -250,7 +365,6 @@ export default function CartView({ data, pinnedItemId, onBack }: CartViewProps) 
                     </div>
                   )}
 
-                  {/* Card input */}
                   {payMethod === 'card' && pm.id === 'card' && (
                     <div className="py-2.5 pb-3.5 space-y-2" style={{ borderBottom: '1px solid #F5F2EE' }}>
                       <input
@@ -289,7 +403,6 @@ export default function CartView({ data, pinnedItemId, onBack }: CartViewProps) 
                     </div>
                   )}
 
-                  {/* Net banking chips */}
                   {payMethod === 'net' && pm.id === 'net' && (
                     <div className="py-2.5 pb-3.5" style={{ borderBottom: '1px solid #F5F2EE' }}>
                       <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2">Select your bank</p>
@@ -325,7 +438,7 @@ export default function CartView({ data, pinnedItemId, onBack }: CartViewProps) 
                 </div>
                 {couponApplied && (
                   <div className="flex justify-between py-1 text-green-600" style={{ borderBottom: '1px solid #F5F2EE' }}>
-                    <span>Discount (10%)</span>
+                    <span>Discount ({discountPercent}%)</span>
                     <span className="font-semibold">-₹{discount.toLocaleString('en-IN')}</span>
                   </div>
                 )}
@@ -345,17 +458,18 @@ export default function CartView({ data, pinnedItemId, onBack }: CartViewProps) 
           <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-100 p-4 shadow-lg" style={{ zIndex: 100 }}>
             <div className="max-w-[430px] mx-auto">
               <button
-                onClick={() => setScreen('success')}
-                className="w-full py-3.5 rounded-2xl text-white font-bold text-[15px]"
+                onClick={handlePlaceOrder}
+                disabled={placing}
+                className="w-full py-3.5 rounded-2xl text-white font-bold text-[15px] disabled:opacity-50"
                 style={{ background: '#D44800' }}
               >
-                Pay ₹{total.toLocaleString('en-IN')} →
+                {placing ? 'Processing...' : `Pay ₹${total.toLocaleString('en-IN')} →`}
               </button>
             </div>
           </div>
         </div>
 
-        {/* Address Bottom Sheet (inline) */}
+        {/* Address Bottom Sheet */}
         {addressSheet && (
           <div
             className="fixed inset-0 flex items-end justify-center"
@@ -432,6 +546,9 @@ export default function CartView({ data, pinnedItemId, onBack }: CartViewProps) 
   }
 
   // ─── CART SCREEN ─────────────────────────────────────────────
+  const sortedInCart = sortWithPin(inCartItems);
+  const hasItems = items.length > 0 || recommendations.length > 0;
+
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-app)' }}>
       <div className="max-w-[430px] mx-auto">
@@ -439,18 +556,20 @@ export default function CartView({ data, pinnedItemId, onBack }: CartViewProps) 
         <div className="flex items-center gap-3 px-4 py-4 bg-white border-b border-gray-100">
           <button onClick={onBack} className="text-gray-600 text-lg">←</button>
           <h2 className="font-display font-bold text-lg">{petName}&apos;s Care Orders</h2>
-          <div
-            className="ml-auto rounded-full px-2.5 py-0.5 text-xs font-bold text-white"
-            style={{ background: '#FF3B30' }}
-          >
-            {inCart.length} items
-          </div>
+          {inCartItems.length > 0 && (
+            <div
+              className="ml-auto rounded-full px-2.5 py-0.5 text-xs font-bold text-white"
+              style={{ background: '#FF3B30' }}
+            >
+              {inCartItems.length} items
+            </div>
+          )}
         </div>
 
         <div className="p-4 space-y-2 pb-40">
           {/* Pinned item banner */}
           {pinnedItemId && (() => {
-            const pinned = MOCK_CART_ITEMS.find(i => i.id === pinnedItemId);
+            const pinned = items.find(i => i.product_id === pinnedItemId);
             return pinned ? (
               <div
                 className="flex items-center gap-2.5 rounded-xl px-3.5 py-2.5 mb-0.5"
@@ -465,37 +584,72 @@ export default function CartView({ data, pinnedItemId, onBack }: CartViewProps) 
             ) : null;
           })()}
 
-          {/* Urgent section */}
-          <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mt-1 mb-0.5 pl-0.5">
-            🚨 Urgent for {petName}
-          </p>
-          {urgentItems.map(item => (
-            <CartItemRow
-              key={item.id} item={item}
-              inCart={!!cart[item.id]} qty={qtys[item.id]}
-              onToggle={() => toggleCart(item.id)}
-              onQtyChange={v => setQty(item.id, v)}
-            />
-          ))}
+          {/* Empty state */}
+          {!hasItems && !recsLoading && (
+            <div className="text-center py-12">
+              <span className="text-4xl block mb-3">🛒</span>
+              <p className="text-gray-500 text-sm">No items in your cart yet.</p>
+              <p className="text-gray-400 text-xs mt-1">Recommendations will appear as we analyze {petName}&apos;s needs.</p>
+            </div>
+          )}
 
-          {/* Recommended section */}
-          <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mt-2 mb-0.5 pl-0.5">
-            ✨ Recommended for {petName}
-          </p>
-          {recItems.map(item => (
-            <CartItemRow
-              key={item.id} item={item}
-              inCart={!!cart[item.id]} qty={qtys[item.id]}
-              onToggle={() => toggleCart(item.id)}
-              onQtyChange={v => setQty(item.id, v)}
-            />
-          ))}
+          {/* In-cart items */}
+          {sortedInCart.length > 0 && (
+            <>
+              <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mt-1 mb-0.5 pl-0.5">
+                🛒 In Cart
+              </p>
+              {sortedInCart.map(item => (
+                <CartItemRow
+                  key={item.product_id} item={item}
+                  inCart={true} qty={item.quantity}
+                  onToggle={() => handleToggle(item.product_id)}
+                  onQtyChange={v => handleQtyChange(item.product_id, v)}
+                />
+              ))}
+            </>
+          )}
+
+          {/* Items removed from cart */}
+          {notInCartItems.length > 0 && (
+            <>
+              <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mt-2 mb-0.5 pl-0.5">
+                Previously Added
+              </p>
+              {notInCartItems.map(item => (
+                <CartItemRow
+                  key={item.product_id} item={item}
+                  inCart={false} qty={item.quantity}
+                  onToggle={() => handleToggle(item.product_id)}
+                  onQtyChange={v => handleQtyChange(item.product_id, v)}
+                />
+              ))}
+            </>
+          )}
+
+          {/* Recommendations section */}
+          {recommendations.length > 0 && (
+            <>
+              <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mt-3 mb-0.5 pl-0.5">
+                ✨ Recommended for {petName}
+              </p>
+              {recommendations.map(rec => (
+                <RecommendationRow key={rec.product_id} rec={rec} onAdd={() => handleAddRecommendation(rec)} />
+              ))}
+            </>
+          )}
+
+          {recsLoading && (
+            <div className="text-center py-4">
+              <div className="mx-auto h-6 w-6 animate-spin rounded-full border-2 border-t-transparent" style={{ borderColor: '#FFD5C2', borderTopColor: '#D44800' }} />
+              <p className="text-gray-400 text-xs mt-2">Finding recommendations...</p>
+            </div>
+          )}
         </div>
 
         {/* Sticky Footer */}
         <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-100 shadow-lg" style={{ zIndex: 100 }}>
           <div className="max-w-[430px] mx-auto px-4 py-2.5 pb-5">
-            {/* Coupon row */}
             <div className="flex gap-2 mb-2">
               <input
                 value={coupon} onChange={e => setCoupon(e.target.value)}
@@ -504,7 +658,7 @@ export default function CartView({ data, pinnedItemId, onBack }: CartViewProps) 
                 style={{ border: '1px solid #E0E0E0' }}
               />
               <button
-                onClick={() => { if (coupon.toUpperCase() === 'PETCARE10') setCouponApplied(true); }}
+                onClick={handleApplyCoupon}
                 className="px-3.5 py-1.5 rounded-xl text-xs font-bold border-none whitespace-nowrap"
                 style={{
                   background: couponApplied ? '#34C759' : '#F2EDE8',
@@ -517,7 +671,7 @@ export default function CartView({ data, pinnedItemId, onBack }: CartViewProps) 
 
             <div className="flex justify-between items-center mb-2">
               <div className="text-xs text-gray-600">
-                {inCart.length} items · {delivery === 0
+                {inCartItems.length} items · {delivery === 0
                   ? <span className="text-green-600 font-semibold">Free delivery</span>
                   : `₹${delivery} delivery`}
                 {couponApplied && <span className="text-green-600 font-semibold"> · −₹{discount} off</span>}
@@ -529,9 +683,9 @@ export default function CartView({ data, pinnedItemId, onBack }: CartViewProps) 
 
             <button
               onClick={() => setScreen('payment')}
-              disabled={inCart.length === 0}
+              disabled={inCartItems.length === 0}
               className="w-full py-3.5 rounded-2xl text-white font-bold text-[15px] disabled:opacity-50"
-              style={{ background: inCart.length ? '#D44800' : '#D1D1D6' }}
+              style={{ background: inCartItems.length ? '#D44800' : '#D1D1D6' }}
             >
               Proceed to Payment →
             </button>
@@ -545,7 +699,7 @@ export default function CartView({ data, pinnedItemId, onBack }: CartViewProps) 
 // ─── Cart Item Row Component ───────────────────────────────────
 
 interface CartItemRowProps {
-  item: typeof MOCK_CART_ITEMS[number];
+  item: CartItemData;
   inCart: boolean;
   qty: number;
   onToggle: () => void;
@@ -553,32 +707,34 @@ interface CartItemRowProps {
 }
 
 function CartItemRow({ item, inCart, qty, onToggle, onQtyChange }: CartItemRowProps) {
+  const tagColor = item.tag_color || '#FF9500';
   return (
     <div
       className="bg-white rounded-xl transition-all"
       style={{
-        border: `1.5px solid ${inCart ? item.tagColor + '55' : '#EBEBEB'}`,
+        border: `1.5px solid ${inCart ? tagColor + '55' : '#EBEBEB'}`,
         opacity: inCart ? 1 : 0.6,
       }}
     >
       <div className="flex items-center gap-2.5 px-3 py-2.5">
-        {/* Colored icon box */}
         <div
           className="w-[38px] h-[38px] rounded-[10px] flex items-center justify-center text-[19px] shrink-0"
-          style={{ background: item.tagColor + '15' }}
+          style={{ background: tagColor + '15' }}
         >
-          {item.icon}
+          {item.icon || '📦'}
         </div>
 
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5 mb-0.5">
             <span className="font-bold text-[13px] text-gray-900">{item.name}</span>
-            <span
-              className="text-[9px] font-extrabold px-1.5 py-0.5 rounded shrink-0"
-              style={{ background: item.tagColor + '18', color: item.tagColor, letterSpacing: '0.3px' }}
-            >
-              {item.tag}
-            </span>
+            {item.tag && (
+              <span
+                className="text-[9px] font-extrabold px-1.5 py-0.5 rounded shrink-0"
+                style={{ background: tagColor + '18', color: tagColor, letterSpacing: '0.3px' }}
+              >
+                {item.tag}
+              </span>
+            )}
           </div>
           <p className="text-[11px] text-gray-400 truncate">{item.sub}</p>
         </div>
@@ -598,7 +754,6 @@ function CartItemRow({ item, inCart, qty, onToggle, onQtyChange }: CartItemRowPr
         </div>
       </div>
 
-      {/* Qty row + per-item total */}
       {inCart && (
         <div className="flex items-center justify-end gap-1.5 px-3 py-1.5" style={{ borderTop: '1px solid #F5F2EE' }}>
           <button
@@ -621,6 +776,56 @@ function CartItemRow({ item, inCart, qty, onToggle, onQtyChange }: CartItemRowPr
           </span>
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Recommendation Row Component ──────────────────────────────
+
+interface RecommendationRowProps {
+  rec: CartRecommendation;
+  onAdd: () => void;
+}
+
+function RecommendationRow({ rec, onAdd }: RecommendationRowProps) {
+  const tagColor = rec.tag_color || '#007AFF';
+  return (
+    <div className="bg-white rounded-xl" style={{ border: '1.5px solid #EBEBEB' }}>
+      <div className="flex items-center gap-2.5 px-3 py-2.5">
+        <div
+          className="w-[38px] h-[38px] rounded-[10px] flex items-center justify-center text-[19px] shrink-0"
+          style={{ background: tagColor + '15' }}
+        >
+          {rec.icon}
+        </div>
+
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5 mb-0.5">
+            <span className="font-bold text-[13px] text-gray-900">{rec.name}</span>
+            {rec.tag && (
+              <span
+                className="text-[9px] font-extrabold px-1.5 py-0.5 rounded shrink-0"
+                style={{ background: tagColor + '18', color: tagColor, letterSpacing: '0.3px' }}
+              >
+                {rec.tag}
+              </span>
+            )}
+          </div>
+          <p className="text-[11px] text-gray-400 truncate">{rec.sub}</p>
+          <p className="text-[10px] mt-0.5" style={{ color: '#D44800' }}>{rec.reason}</p>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          {rec.price > 0 && <span className="text-sm font-extrabold" style={{ color: '#D44800' }}>₹{rec.price}</span>}
+          <button
+            onClick={onAdd}
+            className="w-[26px] h-[26px] rounded-full border-none flex items-center justify-center text-[13px] font-bold shrink-0"
+            style={{ background: '#F2EDE8', color: '#777' }}
+          >
+            ＋
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

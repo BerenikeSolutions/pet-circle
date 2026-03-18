@@ -48,6 +48,10 @@ from app.core.constants import (
     ORDER_CONFIRM_PAYLOADS,
     ORDER_FULFILL_YES_PREFIX,
     ORDER_FULFILL_NO_PREFIX,
+    NUDGE_PAYLOADS,
+    NUDGE_ACTION,
+    NUDGE_DISMISS,
+    NUDGE_VIEW_DASHBOARD,
 )
 
 # Semaphore to limit concurrent background extraction tasks.
@@ -549,6 +553,8 @@ async def _handle_button(db: Session, user, message_data: dict) -> None:
     elif payload in ORDER_CONFIRM_PAYLOADS:
         from app.services.order_service import handle_order_confirmation
         await handle_order_confirmation(db, user, payload)
+    elif payload in NUDGE_PAYLOADS:
+        await _handle_nudge_button(db, user, payload)
     else:
         logger.warning("Unknown button payload '%s' from %s", payload, from_number)
         await send_text_message(
@@ -653,6 +659,68 @@ async def _handle_conflict_button(db: Session, user, payload: str) -> None:
             await send_text_message(db, from_number, "Kept the existing date.")
     except ValueError as e:
         await send_text_message(db, from_number, str(e))
+
+
+async def _handle_nudge_button(db: Session, user, payload: str) -> None:
+    """Handle a nudge button response (action, dismiss, view dashboard)."""
+    from app.services.nudge_sender import record_nudge_engagement
+    from app.services.whatsapp_sender import send_text_message
+    from app.models.dashboard_token import DashboardToken
+
+    from_number = _get_mobile(user)
+
+    # Find user's active pet
+    pet = (
+        db.query(Pet)
+        .filter(Pet.user_id == user.id, Pet.is_deleted == False)
+        .first()
+    )
+
+    if not pet:
+        await send_text_message(db, from_number, "No active pet found.")
+        return
+
+    if payload == NUDGE_ACTION:
+        record_nudge_engagement(db, user.id, pet.id)
+        await send_text_message(
+            db, from_number,
+            "Great! Open your dashboard to take action on this health recommendation.",
+        )
+    elif payload == NUDGE_DISMISS:
+        # Dismiss the most recent undismissed nudge
+        from app.models.nudge import Nudge
+        nudge = (
+            db.query(Nudge)
+            .filter(
+                Nudge.pet_id == pet.id,
+                Nudge.dismissed == False,
+                Nudge.mandatory == False,
+            )
+            .order_by(Nudge.created_at.desc())
+            .first()
+        )
+        if nudge:
+            nudge.dismissed = True
+            db.commit()
+            await send_text_message(db, from_number, "Nudge dismissed.")
+        else:
+            await send_text_message(db, from_number, "No dismissible nudges found.")
+    elif payload == NUDGE_VIEW_DASHBOARD:
+        record_nudge_engagement(db, user.id, pet.id)
+        token = (
+            db.query(DashboardToken)
+            .filter(DashboardToken.pet_id == pet.id, DashboardToken.is_active == True)
+            .first()
+        )
+        if token:
+            from app.config import settings
+            url = f"{settings.FRONTEND_URL}/dashboard/{token.token}"
+            await send_text_message(db, from_number, f"Here's your dashboard:\n{url}")
+        else:
+            await send_text_message(
+                db, from_number,
+                "Type *dashboard* to get a fresh link to your pet's health dashboard.",
+            )
 
 
 async def _handle_media(db: Session, user, message_data: dict) -> None:
