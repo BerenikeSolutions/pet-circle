@@ -25,7 +25,7 @@ Rules:
 import logging
 from typing import Optional, List
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, File
 from fastapi.responses import Response as FastAPIResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -386,6 +386,85 @@ async def dashboard_retry_extraction(
             status_code=503,
             detail="Extraction retry failed. Please try again later.",
         )
+
+
+@router.post("/{token}/upload-document")
+async def dashboard_upload_document(
+    token: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Upload a document from the dashboard and trigger GPT extraction."""
+    import asyncio
+    from app.services.document_upload import (
+        validate_file_upload,
+        check_daily_upload_limit,
+        build_storage_path,
+        upload_to_supabase,
+        create_document_record,
+    )
+
+    try:
+        dt = validate_dashboard_token(db, token)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+
+    from app.models.pet import Pet
+
+    pet = db.query(Pet).filter(Pet.id == dt.pet_id).first()
+    if not pet:
+        raise HTTPException(status_code=404, detail="Pet not found.")
+
+    # Read file content
+    file_content = await file.read()
+    mime_type = file.content_type or "application/octet-stream"
+    filename = file.filename or "upload"
+
+    # Validate
+    try:
+        validate_file_upload(len(file_content), mime_type)
+        check_daily_upload_limit(db, pet.id, pet.name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Upload to Supabase
+    try:
+        storage_path = build_storage_path(pet.user_id, pet.id, filename)
+        await upload_to_supabase(file_content, storage_path, mime_type)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail="File upload failed. Please try again.")
+
+    # Create DB record
+    document = create_document_record(
+        db, pet.id, storage_path, mime_type, original_filename=filename,
+    )
+
+    # Trigger extraction in background
+    async def _run_extraction():
+        from app.database import SessionLocal
+        from app.services.gpt_extraction import extract_and_process_document
+        extraction_db = SessionLocal()
+        try:
+            await extract_and_process_document(
+                db=extraction_db,
+                document_id=document.id,
+                document_text="",
+                file_bytes=file_content,
+            )
+        except Exception as exc:
+            logger.error("Dashboard upload extraction failed: doc=%s, error=%s", document.id, exc)
+        finally:
+            extraction_db.close()
+
+    asyncio.create_task(_run_extraction())
+
+    return {
+        "id": str(document.id),
+        "document_name": document.document_name,
+        "mime_type": document.mime_type,
+        "extraction_status": document.extraction_status,
+        "uploaded_at": document.created_at.isoformat() if document.created_at else None,
+    }
 
 
 @router.get("/{token}/trends")

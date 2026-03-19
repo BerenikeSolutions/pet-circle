@@ -3,7 +3,6 @@
 import { useState } from 'react';
 import type { DashboardData } from '@/lib/api';
 import {
-  MOCK_WA_REMINDERS,
   WA_REMINDER_COLORS, WA_REMINDER_BG, WA_REMINDER_LABELS,
   REMINDER_EXPLAINER,
 } from '@/lib/dashboard-utils';
@@ -26,18 +25,16 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
   const [filter, setFilter] = useState<string>('all');
 
   const apiReminders = data.reminders || [];
-  const reminders = apiReminders.length > 0
-    ? apiReminders.map((r: any, i: number) => ({
-        id: r.id || `api-${i}`,
-        type: r.type || 'general',
-        daysOut: r.daysOut ?? 0,
-        status: r.status || 'upcoming',
-        icon: r.icon || '🔔',
-        title: r.title || r.item_name || 'Reminder',
-        body: r.body || '',
-        actions: r.actions || [],
-      }))
-    : MOCK_WA_REMINDERS;
+  const reminders = apiReminders.map((r: any, i: number) => ({
+    id: r.id || `api-${i}`,
+    type: r.type || 'general',
+    daysOut: r.daysOut ?? 0,
+    status: r.status || 'upcoming',
+    icon: r.icon || '🔔',
+    title: r.title || r.item_name || 'Reminder',
+    body: r.body || '',
+    actions: r.actions || [],
+  }));
 
   const filtered = filter === 'all'
     ? reminders

@@ -629,6 +629,38 @@ export async function retryExtraction(
   }
 }
 
+export async function uploadDocument(
+  token: string,
+  file: File
+): Promise<DocumentItem> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 60000);
+  try {
+    const res = await fetch(
+      `${API_BASE}/dashboard/${token}/upload-document`,
+      {
+        method: "POST",
+        body: formData,
+        signal: controller.signal,
+      }
+    );
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Upload failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") {
+      throw new Error("Upload timed out. Please try again.");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 export async function fetchHealthTrends(token: string): Promise<HealthTrendsData> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 15000);

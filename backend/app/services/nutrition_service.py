@@ -599,6 +599,26 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
     breed_label = pet.breed or "your pet's breed"
     condition_context = " + " + conditions[0].name if conditions else ""
 
+    # Build explicit diet summary describing current diet and its strengths
+    diet_labels = [item.label for item in diet_items if item.label]
+    if diet_labels:
+        diet_list = ", ".join(diet_labels[:5])
+        strengths = []
+        if actual["protein"] >= targets.get("protein_min", 20):
+            strengths.append("good protein levels")
+        if actual["omega_3"] > 0:
+            strengths.append("omega-3 support")
+        if actual.get("probiotics"):
+            strengths.append("probiotic support")
+        if actual["fibre"] >= targets.get("fibre_min", 3):
+            strengths.append("adequate fibre")
+        if actual["calcium"] >= targets.get("calcium_min", 0.8):
+            strengths.append("sufficient calcium")
+        strength_text = (". Strengths: " + ", ".join(strengths)) if strengths else ""
+        diet_summary = f"Current diet: {diet_list}{strength_text}."
+    else:
+        diet_summary = "No diet items added yet. Add your pet's food in the Nutrition tab for a detailed analysis."
+
     return {
         "calories": {"actual": actual["calories"], "target": target_cal, "status": cal_status},
         "macros": macros,
@@ -608,6 +628,7 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
         "improvements": improvements,
         "overall_label": overall_label,
         "recommendation": recommendation,
+        "diet_summary": diet_summary,
         "analysis_context": f"Analysis based on {breed_label} breed profile{condition_context}",
         "gap_count": gap_count,
     }

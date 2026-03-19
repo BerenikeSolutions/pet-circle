@@ -327,6 +327,9 @@ export default function NutritionTab({ data, token, onCartClick, onUpdated }: Nu
             <p className="text-xs text-amber-700">
               {nd.calories.actual}/{nd.calories.target} kcal/day — {nd.calories.status === 'adequate' ? 'on target' : nd.calories.status === 'low' ? 'slightly below target' : 'below target'}.
             </p>
+            {(nd as any).diet_summary && (
+              <p className="text-xs text-amber-600 mt-1">{(nd as any).diet_summary}</p>
+            )}
           </div>
           {nd.improvements.length > 0 && (
             <div className="rounded-xl p-3" style={{ backgroundColor: '#F0F6FF', borderLeft: '3px solid #007AFF' }}>

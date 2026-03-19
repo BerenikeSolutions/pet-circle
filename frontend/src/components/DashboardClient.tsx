@@ -181,6 +181,7 @@ function DashboardInner({ token }: { token: string }) {
         owner={data.owner}
         overdueCount={overdueCount}
         onCartClick={(itemId?: string) => setPinnedCartItem(itemId ?? '')}
+        onActionsClick={() => setShowNudges(true)}
       />
 
       {/* Tab Bar */}

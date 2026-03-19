@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import type { DashboardData, ContactItem, NutritionAnalysis, NudgeItem } from '@/lib/api';
-import { addContact, updateContact, deleteContact, getNutritionAnalysis, getNudges, dismissNudge } from '@/lib/api';
+import { addContact, updateContact, deleteContact, getNutritionAnalysis, getNudges, dismissNudge, uploadDocument } from '@/lib/api';
 import StatusBadge from '@/components/ui/StatusBadge';
 import CollapsibleCard from '@/components/ui/CollapsibleCard';
 import AddRow from '@/components/ui/AddRow';
@@ -10,7 +10,6 @@ import BottomSheet from '@/components/ui/BottomSheet';
 import {
   filterByKeywords, countOverdue, formatApiDate, getStatusForRecord,
   VACCINE_KW, DEWORMING_KW, FLEA_TICK_KW, CHECKUP_KW,
-  MOCK_WA_REMINDERS, MOCK_DOC_SECTIONS,
   WA_REMINDER_COLORS, WA_REMINDER_BG, WA_REMINDER_LABELS,
   REMINDER_EXPLAINER,
   NUDGE_CATEGORY_ICONS, NUDGE_PRIORITY_COLORS,
@@ -64,6 +63,7 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
   const [nutritionData, setNutritionData] = useState<NutritionAnalysis | null>(null);
   const [nudges, setNudges] = useState<NudgeItem[]>([]);
   const [dismissingNudge, setDismissingNudge] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   // Fetch nutrition analysis and nudges on mount
   useEffect(() => {
@@ -82,6 +82,21 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
       setDismissingNudge(null);
     }
   }, [token]);
+
+  const handleUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      await uploadDocument(token, file);
+      onUpdated?.();
+    } catch (err: any) {
+      alert(err.message || 'Upload failed');
+    } finally {
+      setUploading(false);
+      e.target.value = '';
+    }
+  }, [token, onUpdated]);
 
   const contacts = data.contacts || [];
   const hs = data.health_score;
@@ -292,7 +307,7 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
               <button
                 key={i}
                 onClick={() => onTabChange(tile.tab)}
-                className="bg-white rounded-xl p-3 border border-gray-100 shadow-sm text-left hover:shadow-md transition-shadow"
+                className="bg-white rounded-xl p-3 border border-gray-100 shadow-sm text-center hover:shadow-md transition-shadow flex flex-col items-center"
               >
                 <span className="text-xl">{tile.icon}</span>
                 <p className="text-[11px] font-medium text-gray-700 mt-1 truncate">{tile.label}</p>
@@ -362,6 +377,9 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
               <p className="text-xs text-amber-700">
                 {nutritionData.calories.actual}/{nutritionData.calories.target} kcal/day — {nutritionData.overall_label.toLowerCase()}.
               </p>
+              {(nutritionData as any).diet_summary && (
+                <p className="text-xs text-amber-600 mt-1">{(nutritionData as any).diet_summary}</p>
+              )}
             </div>
             {nutritionData.improvements.length > 0 && (
               <div className="rounded-xl p-3" style={{ backgroundColor: '#F0F6FF', borderLeft: '3px solid #007AFF' }}>
@@ -403,7 +421,7 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
       <CollapsibleCard
         icon="💬"
         title="WhatsApp Reminders"
-        subtitle={`${apiReminders.length || MOCK_WA_REMINDERS.length} scheduled`}
+        subtitle={`${apiReminders.length} scheduled`}
         headerBg="#075E54"
         headerColor="white"
       >
@@ -419,43 +437,50 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
             ))}
           </div>
           {/* Reminder Items */}
-          {(apiReminders.length > 0 ? apiReminders : MOCK_WA_REMINDERS).map((rem: any, i: number) => {
-            const status = rem.status || 'upcoming';
-            const color = WA_REMINDER_COLORS[status] || '#FF9500';
-            const bg = WA_REMINDER_BG[status] || '#FFF6ED';
-            const label = WA_REMINDER_LABELS[status] || 'UPCOMING';
-            return (
-              <div key={rem.id || i} className="rounded-xl border overflow-hidden" style={{ borderColor: color + '30' }}>
-                <div className="flex items-center justify-between px-3 py-2" style={{ backgroundColor: bg }}>
-                  <div className="flex items-center gap-2">
-                    <span>{rem.icon || '🔔'}</span>
-                    <span className="text-xs font-semibold" style={{ color }}>{rem.title || rem.item_name}</span>
+          {apiReminders.length > 0 ? (
+            apiReminders.map((rem: any, i: number) => {
+              const status = rem.status || 'upcoming';
+              const color = WA_REMINDER_COLORS[status] || '#FF9500';
+              const bg = WA_REMINDER_BG[status] || '#FFF6ED';
+              const label = WA_REMINDER_LABELS[status] || 'UPCOMING';
+              return (
+                <div key={rem.id || i} className="rounded-xl border overflow-hidden" style={{ borderColor: color + '30' }}>
+                  <div className="flex items-center justify-between px-3 py-2" style={{ backgroundColor: bg }}>
+                    <div className="flex items-center gap-2">
+                      <span>{rem.icon || '🔔'}</span>
+                      <span className="text-xs font-semibold" style={{ color }}>{rem.title || rem.item_name}</span>
+                    </div>
+                    <span className="text-[9px] font-bold px-2 py-0.5 rounded-full" style={{ color, backgroundColor: color + '20' }}>
+                      {label}
+                    </span>
                   </div>
-                  <span className="text-[9px] font-bold px-2 py-0.5 rounded-full" style={{ color, backgroundColor: color + '20' }}>
-                    {label}
-                  </span>
+                  {rem.body && (
+                    <div className="px-3 py-2 bg-white">
+                      <p className="text-[11px] text-gray-600">{rem.body}</p>
+                      {rem.actions && (
+                        <div className="flex gap-2 mt-2">
+                          {rem.actions.map((a: any, j: number) => (
+                            <button
+                              key={j}
+                              className="text-[10px] font-semibold px-3 py-1.5 rounded-full text-white"
+                              style={{ backgroundColor: a.color }}
+                            >
+                              {a.label}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
-                {rem.body && (
-                  <div className="px-3 py-2 bg-white">
-                    <p className="text-[11px] text-gray-600">{rem.body}</p>
-                    {rem.actions && (
-                      <div className="flex gap-2 mt-2">
-                        {rem.actions.map((a: any, j: number) => (
-                          <button
-                            key={j}
-                            className="text-[10px] font-semibold px-3 py-1.5 rounded-full text-white"
-                            style={{ backgroundColor: a.color }}
-                          >
-                            {a.label}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+              );
+            })
+          ) : (
+            <div className="text-center py-4">
+              <p className="text-xs text-gray-500">No reminders scheduled yet.</p>
+              <p className="text-[11px] text-gray-400 mt-1">Reminders will appear here once preventive care records are added.</p>
+            </div>
+          )}
           {onRemindersClick && (
             <button
               onClick={onRemindersClick}
@@ -495,24 +520,21 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
               </div>
             ))
           ) : (
-            MOCK_DOC_SECTIONS.map(section => (
-              <div key={section.id} className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <span>{section.icon}</span>
-                  <span className="text-xs font-semibold" style={{ color: section.color }}>{section.label}</span>
-                </div>
-                {section.files.map((f, j) => (
-                  <div key={j} className="pl-7 py-1.5">
-                    <p className="text-xs text-gray-800">{f.parsed}</p>
-                    <p className="text-[10px] text-gray-500">{f.note}</p>
-                  </div>
-                ))}
-              </div>
-            ))
+            <div className="text-center py-4">
+              <p className="text-xs text-gray-500">No documents uploaded yet.</p>
+              <p className="text-[11px] text-gray-400 mt-1">Upload vaccination cards, prescriptions, or reports via WhatsApp or the button below.</p>
+            </div>
           )}
-          <button className="w-full py-2.5 border-2 border-dashed border-gray-200 rounded-xl text-xs font-semibold text-gray-500">
-            + Upload Document
-          </button>
+          <label className="w-full py-2.5 border-2 border-dashed border-gray-200 rounded-xl text-xs font-semibold text-gray-500 block text-center cursor-pointer hover:border-brand hover:text-brand transition-colors">
+            {uploading ? 'Uploading...' : '+ Upload Document'}
+            <input
+              type="file"
+              accept="image/jpeg,image/png,application/pdf"
+              className="hidden"
+              onChange={handleUpload}
+              disabled={uploading}
+            />
+          </label>
         </div>
       </CollapsibleCard>
 

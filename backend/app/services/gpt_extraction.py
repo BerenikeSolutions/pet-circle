@@ -1289,23 +1289,39 @@ async def extract_and_process_document(
                         ))
 
             except Exception as e:
+                db.rollback()
                 logger.warning(
                     "Error storing extracted condition '%s': %s. document_id=%s",
                     condition_name, str(e), str(document_id),
                 )
 
-        # --- Store extracted contacts ---
+        # --- Store extracted contacts (deduplicated) ---
         extracted_contacts = metadata.get("contacts") or []
+        # Deduplicate by (name, role) — keep last occurrence (richest data).
+        seen_contacts: dict[tuple[str, str], dict] = {}
         for raw_contact in extracted_contacts:
             if not isinstance(raw_contact, dict):
                 continue
-            contact_name = str(raw_contact.get("name") or "").strip()
-            if not contact_name:
+            c_name = str(raw_contact.get("name") or "").strip()
+            if not c_name:
                 continue
+            c_role = str(raw_contact.get("role") or "veterinarian").strip().lower()
+            if c_role not in ("veterinarian", "groomer", "trainer", "specialist", "other"):
+                c_role = "veterinarian"
+            key = (c_name, c_role)
+            # Merge: keep non-None fields from later duplicates.
+            if key in seen_contacts:
+                prev = seen_contacts[key]
+                for field in ("clinic_name", "phone", "email", "address"):
+                    if raw_contact.get(field) and not prev.get(field):
+                        prev[field] = raw_contact[field]
+            else:
+                seen_contacts[key] = {**raw_contact, "name": c_name, "role": c_role}
+
+        for (contact_name, role), raw_contact in seen_contacts.items():
             try:
-                role = str(raw_contact.get("role") or "veterinarian").strip().lower()
-                if role not in ("veterinarian", "groomer", "trainer", "specialist", "other"):
-                    role = "veterinarian"
+                # Flush first to ensure session is clean before querying.
+                db.flush()
 
                 # Upsert by (pet_id, name, role).
                 existing_contact = (
@@ -1335,7 +1351,9 @@ async def extract_and_process_document(
                         address=(str(raw_contact.get("address"))[:500] if raw_contact.get("address") else None),
                         source="extraction",
                     ))
+                    db.flush()
             except Exception as e:
+                db.rollback()
                 logger.warning(
                     "Error storing extracted contact '%s': %s. document_id=%s",
                     contact_name, str(e), str(document_id),
@@ -1344,6 +1362,7 @@ async def extract_and_process_document(
         # Auto-create contact from document-level doctor_name/clinic_name.
         if selected_doctor_name and _is_plausible_doctor_name(selected_doctor_name, pet_name=pet.name):
             try:
+                db.flush()
                 existing_doc_contact = (
                     db.query(Contact)
                     .filter(Contact.pet_id == pet.id, Contact.name == selected_doctor_name, Contact.role == "veterinarian")
@@ -1358,7 +1377,9 @@ async def extract_and_process_document(
                         clinic_name=(str(metadata["clinic_name"])[:200] if metadata["clinic_name"] else None),
                         source="extraction",
                     ))
+                    db.flush()
             except Exception as e:
+                db.rollback()
                 logger.warning(
                     "Error auto-creating contact from doctor_name '%s': %s",
                     selected_doctor_name, str(e),
@@ -1482,8 +1503,10 @@ async def extract_and_process_document(
                     results["items_processed"] += 1
 
             except Exception as e:
-                # Individual item failure — log and continue.
-                # Never crash on single-item extraction errors.
+                # Individual item failure — rollback broken transaction, log, continue.
+                # Without rollback the session stays in InFailedSqlTransaction state
+                # and all subsequent operations fail.
+                db.rollback()
                 logger.error(
                     "Error processing extracted item '%s': %s. "
                     "document_id=%s",

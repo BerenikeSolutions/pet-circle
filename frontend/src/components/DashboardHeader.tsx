@@ -11,9 +11,10 @@ interface DashboardHeaderProps {
   owner: OwnerInfo;
   overdueCount: number;
   onCartClick: (itemId?: string) => void;
+  onActionsClick?: () => void;
 }
 
-export default function DashboardHeader({ pet, owner, overdueCount, onCartClick }: DashboardHeaderProps) {
+export default function DashboardHeader({ pet, owner, overdueCount, onCartClick, onActionsClick }: DashboardHeaderProps) {
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
 
   const photoUrl = photoPreview || (pet.photo_url ? `${API_BASE}${pet.photo_url}` : null);
@@ -78,7 +79,7 @@ export default function DashboardHeader({ pet, owner, overdueCount, onCartClick 
         {/* Actions Banner */}
         {overdueCount > 0 && (
           <button
-            onClick={() => onCartClick()}
+            onClick={() => onActionsClick ? onActionsClick() : onCartClick()}
             className="w-full flex items-center justify-between rounded-xl px-4 py-3 text-white"
             style={{ border: '1px solid rgba(255,255,255,0.25)', background: 'transparent' }}
           >
