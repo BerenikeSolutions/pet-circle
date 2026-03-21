@@ -772,7 +772,7 @@ export async function addDietItem(
 export async function updateDietItem(
   token: string,
   itemId: string,
-  body: { label: string; detail?: string }
+  body: { label: string; detail?: string | null }
 ): Promise<BackendDietItem> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 15000);

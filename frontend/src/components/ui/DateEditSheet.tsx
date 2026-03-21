@@ -36,7 +36,7 @@ export default function DateEditSheet({ open, onClose, title, subtitle, currentD
 
   const handleSave = async () => {
     if (!isDateInputValid(value)) {
-      setError('Enter date as DD/MM/YYYY');
+      setError('Enter a valid date (DD/MM/YYYY, DD-MM-YYYY, 12 March 2024, or YYYY-MM-DD)');
       return;
     }
     setSaving(true);
@@ -57,14 +57,15 @@ export default function DateEditSheet({ open, onClose, title, subtitle, currentD
       {subtitle && <p className="text-sm text-gray-500 mb-4">{subtitle}</p>}
       <div className="space-y-4">
         <div>
-          <label className="text-xs font-semibold text-gray-500 mb-1 block">Last Done (DD/MM/YYYY)</label>
+          <label className="text-xs font-semibold text-gray-500 mb-1 block">Last Done</label>
           <input
             type="text"
             value={value}
             onChange={(e) => { setValue(e.target.value); setError(''); }}
-            placeholder="DD/MM/YYYY"
+            placeholder="DD/MM/YYYY, DD-MM-YYYY, or 12 March 2024"
             className="w-full px-4 py-3 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-brand"
           />
+          <p className="text-[10px] text-gray-400 mt-0.5">Accepts: DD/MM/YYYY, DD-MM-YYYY, 12 March 2024, YYYY-MM-DD</p>
           {error && <p className="text-xs text-red-500 mt-1">{error}</p>}
         </div>
         {nextDuePreview && (

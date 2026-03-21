@@ -45,12 +45,40 @@ export function formatDMY(date: Date): string {
   return `${d}/${m}/${y}`;
 }
 
+const MONTH_NAMES: Record<string, number> = {
+  january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
+  july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
+  jan: 1, feb: 2, mar: 3, apr: 4, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
+
 export function parseDMY(str: string): Date | null {
-  const parts = str.split('/');
-  if (parts.length !== 3) return null;
-  const [d, m, y] = parts.map(Number);
-  if (!d || !m || !y || d < 1 || d > 31 || m < 1 || m > 12) return null;
-  return new Date(y, m - 1, d);
+  const s = str.trim();
+  if (!s) return null;
+
+  // DD/MM/YYYY or DD-MM-YYYY
+  const slashDash = s.match(/^(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})$/);
+  if (slashDash) {
+    const [, dd, mm, yy] = slashDash.map(Number);
+    if (dd >= 1 && dd <= 31 && mm >= 1 && mm <= 12) return new Date(yy, mm - 1, dd);
+  }
+
+  // "12 March 2024" or "12 Mar 2024"
+  const named = s.match(/^(\d{1,2})\s+([a-zA-Z]+)\s+(\d{4})$/);
+  if (named) {
+    const d = Number(named[1]);
+    const m = MONTH_NAMES[named[2].toLowerCase()];
+    const y = Number(named[3]);
+    if (d >= 1 && d <= 31 && m) return new Date(y, m - 1, d);
+  }
+
+  // ISO: YYYY-MM-DD
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (iso) {
+    const [, yy, mm, dd] = iso.map(Number);
+    if (dd >= 1 && dd <= 31 && mm >= 1 && mm <= 12) return new Date(yy, mm - 1, dd);
+  }
+
+  return null;
 }
 
 export function isDateInputValid(str: string): boolean {

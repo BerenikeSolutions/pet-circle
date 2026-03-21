@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import type { DashboardData, WeightEntry, WeightHistoryResponse } from '@/lib/api';
 import {
   updatePreventiveDate, updateWeight, updatePreventiveFrequency,
-  getWeightHistory, addWeightEntry, updateMedicineName,
+  getWeightHistory, addWeightEntry, updateMedicineName, addToCart,
 } from '@/lib/api';
 import StatusBadge from '@/components/ui/StatusBadge';
 import CareCard from '@/components/ui/CareCard';
@@ -99,6 +99,28 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
   const handleMedicineSave = async (itemName: string, medicineName: string) => {
     await updateMedicineName(token, itemName, medicineName);
     onUpdated();
+  };
+
+  const handleOrderWithMedicine = async (medicineName: string | null | undefined, category: string, fallbackId: string) => {
+    if (medicineName) {
+      try {
+        const productId = `med_${medicineName.toLowerCase().replace(/\s+/g, '_')}`;
+        await addToCart(token, {
+          product_id: productId,
+          name: medicineName,
+          price: 0,
+          icon: category === 'deworming' ? '🪱' : '🐛',
+          sub: category === 'deworming' ? 'Deworming medicine' : 'Flea & Tick treatment',
+          tag: 'Reorder',
+          tag_color: '#D44800',
+        });
+        onCartClick(productId);
+      } catch {
+        onCartClick(fallbackId);
+      }
+    } else {
+      onCartClick(fallbackId);
+    }
   };
 
   const handleWeightSave = async () => {
@@ -229,7 +251,7 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
           medicineDependant={d.medicine_dependent}
           medicineName={d.medicine_name}
           onDateSave={(dateStr) => handleDateSave(d.item_name, dateStr)}
-          onOrderClick={() => onCartClick('c2')}
+          onOrderClick={() => handleOrderWithMedicine(d.medicine_name, 'deworming', 'c2')}
           onFreqChange={(f, u) => handleFreqChange(d.item_name, f, u)}
           onMedicineSave={(name) => handleMedicineSave(d.item_name, name)}
         />
@@ -255,7 +277,7 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
           medicineDependant={f.medicine_dependent}
           medicineName={f.medicine_name}
           onDateSave={(dateStr) => handleDateSave(f.item_name, dateStr)}
-          onOrderClick={() => onCartClick('c5')}
+          onOrderClick={() => handleOrderWithMedicine(f.medicine_name, 'flea_tick', 'c5')}
           onFreqChange={(freq, unit) => handleFreqChange(f.item_name, freq, unit)}
           onMedicineSave={(name) => handleMedicineSave(f.item_name, name)}
         />

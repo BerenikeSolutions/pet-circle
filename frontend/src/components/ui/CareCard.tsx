@@ -127,7 +127,7 @@ export default function CareCard({
           />
         </div>
 
-        {(status === 'overdue' || status === 'missing') && onOrderClick && (
+        {onOrderClick && (
           <button
             onClick={() => onOrderClick?.()}
             className="w-full py-2.5 rounded-xl text-white text-sm font-semibold"

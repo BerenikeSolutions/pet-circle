@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import type { DashboardData, BackendDietItem, NutritionAnalysis } from '@/lib/api';
-import { getDietItems, addDietItem, updateDietItem, deleteDietItem, getNutritionAnalysis } from '@/lib/api';
+import { getDietItems, addDietItem, updateDietItem, deleteDietItem, getNutritionAnalysis, addToCart } from '@/lib/api';
 import AddRow from '@/components/ui/AddRow';
 import BottomSheet from '@/components/ui/BottomSheet';
 
@@ -34,6 +34,21 @@ function statusBarColor(s: string): string {
   if (s === 'Adequate') return '#34C759';
   if (s === 'Low') return '#FF9500';
   return '#FF3B30';
+}
+
+/** Capitalize first letter of each word */
+function titleCase(str: string): string {
+  return str.replace(/\b\w/g, c => c.toUpperCase());
+}
+
+/** Format detail consistently: capitalize, normalize quantity/occurrence */
+function formatDetail(detail: string | null): string | null {
+  if (!detail) return null;
+  // Capitalize first letter
+  let d = detail.charAt(0).toUpperCase() + detail.slice(1);
+  // Normalize common patterns: "2x daily" → "2x Daily", "per day" → "Per Day"
+  d = d.replace(/\b(daily|weekly|monthly|twice|once|per day|per week)\b/gi, match => titleCase(match));
+  return d;
 }
 
 /** Loading skeleton placeholder */
@@ -87,7 +102,7 @@ export default function NutritionTab({ data, token, onCartClick, onUpdated }: Nu
       if (editItem) {
         await updateDietItem(token, editItem.id, {
           label: form.label.trim(),
-          detail: form.detail.trim() || undefined,
+          detail: form.detail.trim(),
         });
       } else {
         await addDietItem(token, {
@@ -189,8 +204,8 @@ export default function NutritionTab({ data, token, onCartClick, onUpdated }: Nu
             {foods.map(f => (
               <div key={f.id} className="flex items-center justify-between py-2 border-b border-gray-50 last:border-0">
                 <div>
-                  <p className="text-sm font-medium text-gray-900">{f.icon} {f.label}</p>
-                  {f.detail && <p className="text-[11px] text-gray-500">{f.detail}</p>}
+                  <p className="text-sm font-medium text-gray-900">{f.icon} {titleCase(f.label)}</p>
+                  {f.detail && <p className="text-[11px] text-gray-500">{formatDetail(f.detail)}</p>}
                 </div>
                 <div className="flex gap-2">
                   <button
@@ -221,8 +236,8 @@ export default function NutritionTab({ data, token, onCartClick, onUpdated }: Nu
             {supplements.map(s => (
               <div key={s.id} className="flex items-center justify-between py-2 border-b border-gray-50 last:border-0">
                 <div>
-                  <p className="text-sm font-medium text-gray-900">{s.icon} {s.label}</p>
-                  {s.detail && <p className="text-[11px] text-gray-500">{s.detail}</p>}
+                  <p className="text-sm font-medium text-gray-900">{s.icon} {titleCase(s.label)}</p>
+                  {s.detail && <p className="text-[11px] text-gray-500">{formatDetail(s.detail)}</p>}
                 </div>
                 <div className="flex gap-2">
                   <button
@@ -307,7 +322,23 @@ export default function NutritionTab({ data, token, onCartClick, onUpdated }: Nu
             })}
           </div>
           <button
-            onClick={() => onCartClick()}
+            onClick={async () => {
+              for (const item of reorderItems) {
+                const productId = `supp_${item.name.toLowerCase().replace(/\s+/g, '_')}`;
+                try {
+                  await addToCart(token, {
+                    product_id: productId,
+                    name: item.supplement,
+                    price: parseFloat(item.price.replace(/[^\d.]/g, '')) || 0,
+                    icon: '💊',
+                    sub: item.name,
+                    tag: 'Supplement',
+                    tag_color: '#34C759',
+                  });
+                } catch { /* item might already be in cart */ }
+              }
+              onCartClick();
+            }}
             className="w-full mt-3 py-2 rounded-xl text-sm font-semibold border-2 border-dashed"
             style={{ borderColor: '#D44800', color: '#D44800' }}
           >
@@ -489,7 +520,25 @@ export default function NutritionTab({ data, token, onCartClick, onUpdated }: Nu
           </div>
 
           <button
-            onClick={() => onCartClick('c4')}
+            onClick={async () => {
+              if (reorderItems.length > 0) {
+                for (const item of reorderItems) {
+                  const productId = `supp_${item.name.toLowerCase().replace(/\s+/g, '_')}`;
+                  try {
+                    await addToCart(token, {
+                      product_id: productId,
+                      name: item.supplement,
+                      price: parseFloat(item.price.replace(/[^\d.]/g, '')) || 0,
+                      icon: '💊',
+                      sub: item.name,
+                      tag: 'Supplement',
+                      tag_color: '#34C759',
+                    });
+                  } catch { /* item might already be in cart */ }
+                }
+              }
+              onCartClick();
+            }}
             className="w-full py-2.5 rounded-xl text-white text-sm font-semibold"
             style={{ background: 'var(--brand-gradient)' }}
           >
@@ -533,12 +582,14 @@ export default function NutritionTab({ data, token, onCartClick, onUpdated }: Nu
             />
           </div>
           <div>
-            <label className="text-xs font-semibold text-gray-500 mb-1 block">Detail</label>
+            <label className="text-xs font-semibold text-gray-500 mb-1 block">
+              {form.type === 'supplement' ? 'Dose' : 'Detail'}
+            </label>
             <input
               type="text"
               value={form.detail}
               onChange={(e) => setForm({ ...form, detail: e.target.value })}
-              placeholder="e.g., 280g/day, 2 scoops"
+              placeholder={form.type === 'supplement' ? 'e.g., 2 scoops, twice daily' : 'e.g., 280g/day'}
               className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-brand"
             />
           </div>
