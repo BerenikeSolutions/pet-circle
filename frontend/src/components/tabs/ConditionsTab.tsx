@@ -255,8 +255,6 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
             onDelete={() => handleDeleteCondition(condition.id)}
             onAddMed={() => setAddMedSheet(condition.id)}
             onDeleteMed={handleDeleteMed}
-            onAddMon={() => setAddMonSheet(condition.id)}
-            onDeleteMon={handleDeleteMon}
             onCartClick={onCartClick}
           />
         ))
@@ -487,8 +485,6 @@ function ConditionCard({
   onDelete,
   onAddMed,
   onDeleteMed,
-  onAddMon,
-  onDeleteMon,
   onCartClick,
 }: {
   condition: ConditionItem;
@@ -496,8 +492,6 @@ function ConditionCard({
   onDelete: () => void;
   onAddMed: () => void;
   onDeleteMed: (id: string) => void;
-  onAddMon: () => void;
-  onDeleteMon: (id: string) => void;
   onCartClick: (itemId?: string) => void;
 }) {
   const statusMap: Record<string, string> = {
@@ -589,32 +583,6 @@ function ConditionCard({
         </button>
       )}
 
-      {/* Monitoring Checkups */}
-      <div style={{ fontSize: 11, fontWeight: 700, color: '#8E8E93', textTransform: 'uppercase', letterSpacing: 0.5, margin: '14px 0 8px' }}>
-        Monitoring checkups
-      </div>
-      {condition.monitoring.length > 0 ? (
-        condition.monitoring.map((mon, j) => (
-          <MonitorRow
-            key={mon.id}
-            mon={mon}
-            isFirst={j === 0}
-            onDelete={() => onDeleteMon(mon.id)}
-          />
-        ))
-      ) : (
-        <p className="text-xs text-gray-400 mb-2">No monitoring items</p>
-      )}
-      <button
-        onClick={() => onCartClick()}
-        style={{
-          width: '100%', marginTop: 12, background: '#D44800',
-          color: 'white', border: 'none', borderRadius: 10,
-          padding: '10px', fontSize: 13, fontWeight: 700, cursor: 'pointer',
-        }}
-      >
-        📅 Book Tests
-      </button>
 
       {/* PetCircle Recommendations */}
       {condRecs.length > 0 && (

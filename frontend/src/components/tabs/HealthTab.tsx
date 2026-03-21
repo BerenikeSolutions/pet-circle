@@ -47,8 +47,32 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
   const mandatoryVax = vaccines.filter(v => v.category === 'essential');
   const optionalVax = vaccines.filter(v => v.category !== 'essential');
 
-  const checkupItems = ['Vet Visit', 'Blood Work', 'X-Ray', 'Urinalysis', 'Fecal Test'];
-  const completedCheckups = checkups.filter(c => c.status === 'up_to_date' || c.status === 'done').length;
+  // Base items — always shown, PetCircle Recommended
+  const BASE_CHECKUP_NAMES = ['Vet Visit', 'Blood Work'];
+  const baseCheckupItems = BASE_CHECKUP_NAMES.map(name => ({
+    key: name,
+    name,
+    source: 'petcircle' as const,
+    record: checkups.find(c => c.item_name.toLowerCase().includes(name.toLowerCase())),
+  }));
+
+  // Condition monitoring items — Vet Prescribed, pulled from conditions
+  const conditionMonItems = (data.conditions || []).flatMap(cond =>
+    cond.monitoring.map(mon => ({
+      key: `${cond.id}_${mon.id}`,
+      name: mon.name,
+      source: 'vet' as const,
+      conditionName: cond.name,
+      monitoringItem: mon,
+    }))
+  );
+
+  const allCheckupItems = [...baseCheckupItems, ...conditionMonItems];
+  const completedCheckups = allCheckupItems.filter(item =>
+    'record' in item
+      ? !!(item.record && (item.record.status === 'up_to_date' || item.record.status === 'done'))
+      : !!item.monitoringItem.last_done_date
+  ).length;
 
   const pet = data.pet;
 
@@ -289,41 +313,100 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
         />
       )}
 
-      {/* Annual Checkups */}
+      {/* Preventive Checkup */}
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
         <h3 className="font-semibold text-sm flex items-center gap-2 mb-3">
-          <span>🩺</span> Annual Health Checkups
+          <span>🩺</span> Preventive Checkup
         </h3>
         <div className="mb-3">
           <div className="flex items-center justify-between mb-1">
-            <span className="text-xs text-gray-500">{completedCheckups}/{checkupItems.length} completed</span>
-            <span className="text-xs font-semibold" style={{ color: completedCheckups >= checkupItems.length ? '#34C759' : '#FF9500' }}>
-              {Math.round((completedCheckups / checkupItems.length) * 100)}%
+            <span className="text-xs text-gray-500">{completedCheckups}/{allCheckupItems.length} completed</span>
+            <span className="text-xs font-semibold" style={{ color: completedCheckups >= allCheckupItems.length ? '#34C759' : '#FF9500' }}>
+              {allCheckupItems.length > 0 ? Math.round((completedCheckups / allCheckupItems.length) * 100) : 0}%
             </span>
           </div>
           <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-            <div className="h-full rounded-full" style={{ width: `${(completedCheckups / checkupItems.length) * 100}%`, background: 'var(--brand-gradient)' }} />
+            <div className="h-full rounded-full" style={{ width: `${allCheckupItems.length > 0 ? (completedCheckups / allCheckupItems.length) * 100 : 0}%`, background: 'var(--brand-gradient)' }} />
           </div>
         </div>
-        {checkupItems.map((item, i) => {
-          const match = checkups.find(c => c.item_name.toLowerCase().includes(item.toLowerCase()));
-          const status = match ? getStatusForRecord(match) : 'missing';
-          return (
-            <div key={i} className="flex items-center justify-between py-2 border-b border-gray-50 last:border-0">
-              <div className="flex items-center gap-2">
-                <div className="w-5 h-5 rounded-full border-2 flex items-center justify-center"
-                  style={{ borderColor: status === 'up_to_date' || status === 'done' ? '#34C759' : '#E5E5EA' }}
-                >
-                  {(status === 'up_to_date' || status === 'done') && <span className="text-green-500 text-xs">✓</span>}
+        {allCheckupItems.map((item) => {
+          if (item.source === 'petcircle') {
+            const status = item.record ? getStatusForRecord(item.record) : 'missing';
+            const isDone = status === 'up_to_date' || status === 'done';
+            return (
+              <div key={item.key} className="py-2 border-b border-gray-50 last:border-0">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 flex-1 min-w-0">
+                    <div className="w-5 h-5 rounded-full border-2 flex-shrink-0 flex items-center justify-center"
+                      style={{ borderColor: isDone ? '#34C759' : '#E5E5EA' }}
+                    >
+                      {isDone && <span className="text-green-500 text-xs">✓</span>}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-sm text-gray-800">{item.name}</span>
+                        <span style={{ background: '#FFF3EE', color: '#D44800', borderRadius: 20, padding: '1px 7px', fontSize: 9, fontWeight: 700, flexShrink: 0 }}>
+                          🐾 PetCircle
+                        </span>
+                      </div>
+                      {item.record?.last_done_date && (
+                        <p className="text-[10px] text-gray-400 mt-0.5">Last: {formatApiDate(item.record.last_done_date)}</p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <StatusBadge status={status} />
+                    <button
+                      onClick={() => setEditingCheckup(item.record?.item_name || item.name)}
+                      className="text-xs text-brand font-semibold"
+                    >
+                      Log
+                    </button>
+                  </div>
                 </div>
-                <span className="text-sm text-gray-800">{item}</span>
               </div>
-              <div className="flex items-center gap-2">
-                <StatusBadge status={status} />
-                <button onClick={() => setEditingCheckup(match?.item_name || item)} className="text-xs text-brand font-semibold">Edit</button>
+            );
+          } else {
+            // Vet-prescribed condition monitoring item
+            const mon = item.monitoringItem;
+            const monStatus = (() => {
+              if (!mon.next_due_date) return 'upcoming';
+              const today = new Date(); today.setHours(0, 0, 0, 0);
+              const due = new Date(mon.next_due_date);
+              if (isNaN(due.getTime())) return 'upcoming';
+              const diff = Math.ceil((due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+              return diff < 0 ? 'overdue' : diff <= 30 ? 'upcoming' : 'done';
+            })();
+            const isDone = !!mon.last_done_date;
+            return (
+              <div key={item.key} className="py-2 border-b border-gray-50 last:border-0">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 flex-1 min-w-0">
+                    <div className="w-5 h-5 rounded-full border-2 flex-shrink-0 flex items-center justify-center"
+                      style={{ borderColor: isDone ? '#34C759' : '#E5E5EA' }}
+                    >
+                      {isDone && <span className="text-green-500 text-xs">✓</span>}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-sm text-gray-800">{mon.name}</span>
+                        <span style={{ background: '#F0F6FF', color: '#007AFF', borderRadius: 20, padding: '1px 7px', fontSize: 9, fontWeight: 700, flexShrink: 0 }}>
+                          Vet Prescribed
+                        </span>
+                      </div>
+                      <p className="text-[10px] text-gray-400 mt-0.5">{item.conditionName}</p>
+                      {mon.last_done_date && (
+                        <p className="text-[10px] text-gray-400">Last: {formatApiDate(mon.last_done_date)}</p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex-shrink-0">
+                    <StatusBadge status={monStatus} />
+                  </div>
+                </div>
               </div>
-            </div>
-          );
+            );
+          }
         })}
       </div>
 
@@ -500,9 +583,9 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
         <DateEditSheet
           open={!!editingCheckup}
           onClose={() => setEditingCheckup(null)}
-          title={`Edit ${editingCheckup}`}
+          title={`Log ${editingCheckup}`}
           subtitle="When was this last done?"
-          currentDate={checkups.find(c => c.item_name === editingCheckup)?.last_done_date || null}
+          currentDate={checkups.find(c => c.item_name.toLowerCase().includes(editingCheckup.toLowerCase()))?.last_done_date || null}
           recurrenceDays={365}
           onSave={(d) => handleDateSave(editingCheckup, d)}
         />
