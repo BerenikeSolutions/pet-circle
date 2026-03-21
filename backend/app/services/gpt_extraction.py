@@ -107,24 +107,71 @@ def _salvage_partial_extraction_json(raw_json: str) -> dict | None:
 
 
 def _normalize_document_category(raw_category: str | None) -> str | None:
-    """Normalize GPT category output to one of the dashboard's canonical values."""
+    """Normalize GPT category output to one of the dashboard's canonical values.
+
+    Maps legacy values ("Diagnostic") and any GPT variants to the 5-section
+    document taxonomy: Blood Report, Urine Report, Imaging, Prescription,
+    PCR & Parasite Panel, Vaccination, Other.
+    """
     value = (raw_category or "").strip().lower()
     if not value:
         return None
 
     aliases = {
-        "vaccination": "Vaccination",
-        "vaccinations": "Vaccination",
-        "vaccine": "Vaccination",
-        "vaccines": "Vaccination",
+        # Blood report aliases
+        "blood report": "Blood Report",
+        "blood": "Blood Report",
+        "blood test": "Blood Report",
+        "blood tests": "Blood Report",
+        "cbc": "Blood Report",
+        "biochemistry": "Blood Report",
+        "haematology": "Blood Report",
+        "hematology": "Blood Report",
+        "hemogram": "Blood Report",
+        "complete blood count": "Blood Report",
+        # Urine report aliases
+        "urine report": "Urine Report",
+        "urine": "Urine Report",
+        "urine test": "Urine Report",
+        "urine tests": "Urine Report",
+        "urinalysis": "Urine Report",
+        "urine culture": "Urine Report",
+        "urine culture & sensitivity": "Urine Report",
+        # Imaging aliases
+        "imaging": "Imaging",
+        "ultrasound": "Imaging",
+        "usg": "Imaging",
+        "x-ray": "Imaging",
+        "xray": "Imaging",
+        "x ray": "Imaging",
+        "radiology": "Imaging",
+        "scan": "Imaging",
+        # PCR & Parasite Panel aliases
+        "pcr & parasite panel": "PCR & Parasite Panel",
+        "pcr": "PCR & Parasite Panel",
+        "parasite panel": "PCR & Parasite Panel",
+        "parasite": "PCR & Parasite Panel",
+        "parasite screen": "PCR & Parasite Panel",
+        "tick panel": "PCR & Parasite Panel",
+        "vector-borne": "PCR & Parasite Panel",
+        # Prescription aliases
         "prescription": "Prescription",
         "prescriptions": "Prescription",
         "rx": "Prescription",
         "medication": "Prescription",
-        "diagnostic": "Diagnostic",
-        "diagnostics": "Diagnostic",
-        "lab": "Diagnostic",
-        "laboratory": "Diagnostic",
+        "treatment": "Prescription",
+        # Vaccination aliases
+        "vaccination": "Vaccination",
+        "vaccinations": "Vaccination",
+        "vaccine": "Vaccination",
+        "vaccines": "Vaccination",
+        # Legacy "Diagnostic" — map to Blood Report as the most common sub-type;
+        # _infer_document_category will override with a more specific value.
+        "diagnostic": "Blood Report",
+        "diagnostics": "Blood Report",
+        "lab": "Blood Report",
+        "laboratory": "Blood Report",
+        # Other
         "other": "Other",
         "misc": "Other",
         "miscellaneous": "Other",
@@ -146,35 +193,66 @@ def _infer_document_category(
     vaccination_details: list[dict],
     diagnostic_values: list[dict],
 ) -> str:
-    """Infer a document category when GPT omits or misformats it."""
+    """Infer the specific document category when GPT omits or misformats it.
+
+    Resolves to one of the 5 report sections used in the dashboard appendix:
+    Blood Report | Urine Report | Imaging | Prescription | PCR & Parasite Panel
+    (plus Vaccination and Other for non-lab documents).
+    """
     name_text = (document_name or "").strip().lower()
     file_text = os.path.basename(file_path or "").strip().lower()
     combined_text = f"{name_text} {file_text}"
 
+    # --- Strong keyword matches (most specific wins) ---
     if any(keyword in combined_text for keyword in ("prescription", "rx", "medicine", "medication")):
         return "Prescription"
     if any(keyword in combined_text for keyword in ("vaccin", "rabies", "dhpp", "fvrcp", "booster")):
         return "Vaccination"
+
+    # PCR / parasite panel — check before generic blood/urine
     if any(keyword in combined_text for keyword in (
-        "blood",
-        "urine",
-        "diagnostic",
-        "lab",
-        "laboratory",
-        "cbc",
-        "biochemistry",
-        "hematology",
-        "haematology",
-        "urinalysis",
-        "x-ray",
-        "xray",
+        "pcr", "parasite", "tick panel", "vector", "anaplasma",
+        "ehrlichia", "babesia", "hepatozoon", "leishmania",
     )):
-        return "Diagnostic"
+        return "PCR & Parasite Panel"
+
+    # Imaging
+    if any(keyword in combined_text for keyword in (
+        "ultrasound", "usg", "x-ray", "xray", "x ray", "radiology", "scan", "imaging",
+    )):
+        return "Imaging"
+
+    # Urine — before blood so "urine" is not captured by generic "lab"
+    if any(keyword in combined_text for keyword in (
+        "urine", "urinalysis", "urine culture", "urine test",
+    )):
+        return "Urine Report"
+
+    # Blood
+    if any(keyword in combined_text for keyword in (
+        "blood", "cbc", "biochemistry", "hematology", "haematology",
+        "hemogram", "complete blood count", "lab", "laboratory", "diagnostic",
+    )):
+        return "Blood Report"
+
+    # --- Infer from extracted diagnostic_values test_type ---
+    if diagnostic_values:
+        test_types = {
+            str(v.get("test_type") or "").strip().lower()
+            for v in diagnostic_values
+            if isinstance(v, dict)
+        }
+        if "xray" in test_types:
+            return "Imaging"
+        if "urine" in test_types:
+            return "Urine Report"
+        if "blood" in test_types:
+            return "Blood Report"
+        if "fecal" in test_types:
+            return "PCR & Parasite Panel"  # closest category for parasite/fecal results
 
     if vaccination_details:
         return "Vaccination"
-    if diagnostic_values:
-        return "Diagnostic"
 
     item_names = {
         _normalize_preventive_item_name(str(item.get("item_name") or ""))
@@ -184,7 +262,7 @@ def _infer_document_category(
     if item_names & {"rabies vaccine", "core vaccine", "feline core"}:
         return "Vaccination"
     if "preventive blood test" in item_names:
-        return "Diagnostic"
+        return "Blood Report"
     if any(item_name in item_names for item_name in ("annual checkup", "dental check", "deworming", "tick/flea")):
         return "Prescription"
 
@@ -197,24 +275,34 @@ def _resolve_document_category(
     document_name: str | None = None,
     file_path: str | None = None,
 ) -> str:
-    """Prefer inferred category when GPT returned blank, Other, or misclassified.
+    """Prefer inferred category when GPT returned blank, Other, or a coarse legacy value.
 
-    Strong keyword signals from filename or document name override GPT's
-    category. Example: a file named 'Prescription_...' that GPT labelled
-    'Diagnostic' because it mentions blood tests should stay 'Prescription'.
+    Rules (in priority order):
+    1. If raw is None / "Other" and inferred is specific → use inferred.
+    2. If filename/document name has a strong keyword that contradicts GPT → use keyword signal.
+    3. Otherwise trust GPT's (normalized) raw_category.
+
+    This keeps the 5 specific categories (Blood Report, Urine Report, Imaging,
+    Prescription, PCR & Parasite Panel) authoritative over GPT's legacy "Diagnostic".
     """
-    if raw_category in (None, "Other") and inferred_category != "Other":
-        return inferred_category
+    combined = f"{(document_name or '').lower()} {os.path.basename(file_path or '').lower()}"
 
-    # When inferred category comes from a strong keyword match in the
-    # filename/document name (Prescription, Vaccination), prefer it over
-    # GPT's classification if the keywords differ.
-    if inferred_category == "Prescription" and raw_category != "Prescription":
-        combined = f"{(document_name or '').lower()} {os.path.basename(file_path or '').lower()}"
-        if "prescription" in combined or "rx" in combined:
-            return "Prescription"
+    # Always trust strong keyword signals in filename / document name.
+    if "prescription" in combined or " rx " in combined:
+        return "Prescription"
+    if any(kw in combined for kw in ("pcr", "parasite panel", "parasite screen")):
+        return "PCR & Parasite Panel"
+    if any(kw in combined for kw in ("ultrasound", "usg", "x-ray", "xray", " xray")):
+        return "Imaging"
+    if any(kw in combined for kw in ("urine culture", "urinalysis", "urine test")):
+        return "Urine Report"
 
-    return raw_category or inferred_category
+    # If GPT returned a specific known category, trust it.
+    if raw_category and raw_category not in (None, "Other"):
+        return raw_category
+
+    # Fall back to inference.
+    return inferred_category if inferred_category != "Other" else (raw_category or "Other")
 
 
 def _normalize_name_for_matching(value: str | None) -> str:
@@ -386,8 +474,8 @@ def _derive_blood_test_fallback_items(
     document_category: str | None,
     diagnostic_values: list[dict],
 ) -> list[dict]:
-    """Fill in Preventive Blood Test when diagnostic blood/CBC docs omit tracked items."""
-    if document_category != "Diagnostic":
+    """Fill in Preventive Blood Test when blood report docs omit tracked items."""
+    if document_category not in ("Blood Report", "Diagnostic"):
         return extracted_items
 
     # Skip fallback if items already include a Preventive Blood Test entry.
@@ -453,11 +541,16 @@ EXTRACTION_SYSTEM_PROMPT = (
     '  - "document_type": "pet_medical" or "not_pet_related" '
     "(set to 'not_pet_related' if the document is clearly NOT a pet/veterinary document, "
     "e.g., a human medical report, invoice, random photo, etc.)\n"
-    '  - "document_category": one of "Vaccination", "Prescription", "Diagnostic", "Other" '
-    "(classify the document: Vaccination for vaccine certificates/records, "
+    '  - "document_category": one of "Blood Report", "Urine Report", "Imaging", '
+    '"Prescription", "PCR & Parasite Panel", "Vaccination", "Other" — '
+    "pick the most specific match: "
+    "Blood Report for CBC/biochemistry/haematology/blood test reports, "
+    "Urine Report for urinalysis/urine culture/urine sensitivity reports, "
+    "Imaging for ultrasound/USG/X-ray/radiology reports, "
     "Prescription for vet prescriptions/medication records, "
-    "Diagnostic for blood tests/urine tests/lab reports/x-rays, "
-    "Other for anything else)\n"
+    "PCR & Parasite Panel for PCR/parasite/tick-borne disease panels, "
+    "Vaccination for vaccine certificates/immunisation records, "
+    "Other for anything else\n"
     '  - "diagnostic_summary": string or null (for Diagnostic documents only — '
     "provide a 1-2 sentence plain-language summary of key findings; null otherwise)\n"
     '  - "diagnostic_values": array (for Diagnostic reports), each with:\n'

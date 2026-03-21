@@ -231,9 +231,16 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
     }
   };
 
-  const handleGeneratePdf = () => {
+  const handleGeneratePdf = async () => {
     setPdfState('generating');
-    setTimeout(() => setPdfState('done'), 2200);
+    try {
+      const { generateHealthPdf } = await import('@/lib/generate-pdf');
+      generateHealthPdf(data);
+      setPdfState('done');
+    } catch (err) {
+      console.error('PDF generation failed:', err);
+      setPdfState('idle');
+    }
   };
 
   return (

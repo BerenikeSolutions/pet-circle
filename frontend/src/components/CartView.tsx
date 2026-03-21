@@ -93,16 +93,6 @@ export default function CartView({ data, token, pinnedItemId, onBack }: CartView
     loadRecommendations();
   }, [loadCart, loadRecommendations]);
 
-  // Auto-add pinned item once after initial cart load completes
-  useEffect(() => {
-    if (!pinnedItemId || loading || pinnedHandled.current) return;
-    pinnedHandled.current = true;
-    const alreadyInCart = items.find(i => i.product_id === pinnedItemId && i.in_cart);
-    if (!alreadyInCart) {
-      handleToggle(pinnedItemId);
-    }
-  }, [pinnedItemId, loading, items, handleToggle]);
-
   const handleToggle = useCallback(async (productId: string) => {
     try {
       const updated = await toggleCartItem(token, productId);
@@ -121,6 +111,16 @@ export default function CartView({ data, token, pinnedItemId, onBack }: CartView
       console.error('Toggle failed:', e);
     }
   }, [token]);
+
+  // Auto-add pinned item once after initial cart load completes
+  useEffect(() => {
+    if (!pinnedItemId || loading || pinnedHandled.current) return;
+    pinnedHandled.current = true;
+    const alreadyInCart = items.find(i => i.product_id === pinnedItemId && i.in_cart);
+    if (!alreadyInCart) {
+      handleToggle(pinnedItemId);
+    }
+  }, [pinnedItemId, loading, items, handleToggle]);
 
   const handleAddRecommendation = useCallback(async (rec: CartRecommendation) => {
     try {

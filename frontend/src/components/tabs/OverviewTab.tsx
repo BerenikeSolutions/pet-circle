@@ -56,27 +56,62 @@ const ROLE_API_MAP: Record<string, string> = {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
-const DOC_CATEGORIES = ['Vaccination', 'Prescription', 'Diagnostic'] as const;
+const DOC_CATEGORIES = [
+  'Blood Report',
+  'Urine Report',
+  'Imaging',
+  'Prescription',
+  'PCR & Parasite Panel',
+  'Vaccination',
+] as const;
 
 const DOC_CATEGORY_ICONS: Record<string, string> = {
-  Vaccination: '💉',
-  Prescription: '💊',
-  Diagnostic: '🔬',
+  'Blood Report':        '🩸',
+  'Urine Report':        '💧',
+  'Imaging':             '🔍',
+  'Prescription':        '💊',
+  'PCR & Parasite Panel': '🔬',
+  'Vaccination':         '💉',
 };
 
 const DOC_CATEGORY_COLORS: Record<string, { color: string; bg: string }> = {
-  Vaccination: { color: '#007AFF', bg: '#F0F6FF' },
-  Prescription: { color: '#FF9500', bg: '#FFF6ED' },
-  Diagnostic: { color: '#AF52DE', bg: '#F5F0FF' },
+  'Blood Report':        { color: '#EF4444', bg: '#FFF1F1' },
+  'Urine Report':        { color: '#3B82F6', bg: '#EFF6FF' },
+  'Imaging':             { color: '#8B5CF6', bg: '#F5F0FF' },
+  'Prescription':        { color: '#F59E0B', bg: '#FFF6ED' },
+  'PCR & Parasite Panel': { color: '#10B981', bg: '#F0FDF4' },
+  'Vaccination':         { color: '#007AFF', bg: '#F0F6FF' },
 };
 
+/** Display labels for each category (pluralised where grammatical). */
+const DOC_CATEGORY_LABELS: Record<string, string> = {
+  'Blood Report':         'Blood Reports',
+  'Urine Report':         'Urine Reports',
+  'Imaging':              'Imaging',
+  'Prescription':         'Prescriptions',
+  'PCR & Parasite Panel': 'PCR & Parasite Panel',
+  'Vaccination':          'Vaccinations',
+  'Other':                'Other',
+};
+
+/** Map document_category from backend to one of the canonical display buckets. */
 function inferDocCategory(doc: DocumentItem): string {
   const cat = (doc.document_category || '').trim();
+
+  // Exact match against canonical list (backend already normalises)
   if (DOC_CATEGORIES.includes(cat as typeof DOC_CATEGORIES[number])) return cat;
-  const name = `${doc.document_name || ''} ${doc.hospital_name || ''}`.toLowerCase();
-  if (/(vaccin|rabies|booster|dhpp|fvrcp)/.test(name)) return 'Vaccination';
-  if (/(prescription|rx|medicine|medication)/.test(name)) return 'Prescription';
-  if (/(blood|cbc|urine|urinalysis|hematology|lab|diagnostic|xray|x-ray)/.test(name)) return 'Diagnostic';
+
+  // Legacy "Diagnostic" bucket — reclassify by name/hospital keywords
+  const text = `${doc.document_name || ''} ${doc.hospital_name || ''}`.toLowerCase();
+  if (/(pcr|parasite|anaplasma|ehrlichia|babesia|hepatozoon|tick panel)/.test(text))
+    return 'PCR & Parasite Panel';
+  if (/(ultrasound|usg|x.?ray|radiology|scan|imaging)/.test(text)) return 'Imaging';
+  if (/(urine|urinalysis|urine culture)/.test(text)) return 'Urine Report';
+  if (/(blood|cbc|biochem|haem|hematology|haematology|hemogram|lab|diagnostic)/.test(text))
+    return 'Blood Report';
+  if (/(vaccin|rabies|booster|dhpp|fvrcp)/.test(text)) return 'Vaccination';
+  if (/(prescription|rx|medicine|medication)/.test(text)) return 'Prescription';
+
   return 'Other';
 }
 
@@ -608,7 +643,7 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
                 <div key={cat}>
                   <div className="flex items-center gap-2 mb-2">
                     <span className="text-sm">{catIcon}</span>
-                    <span className="text-xs font-bold" style={{ color: catStyle.color }}>{cat}s</span>
+                    <span className="text-xs font-bold" style={{ color: catStyle.color }}>{DOC_CATEGORY_LABELS[cat] || cat}</span>
                     <span className="text-[10px] text-gray-400">({groupedDocs[cat].length})</span>
                   </div>
                   <div className="space-y-2">

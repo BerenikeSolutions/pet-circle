@@ -289,10 +289,14 @@ NUDGE_CACHE_HOURS: int = 6
 
 # --- Document Categories ---
 # Categories assigned by GPT extraction to classify uploaded documents.
-# Used for grouping in the dashboard and filtering.
+# Used for grouping in the dashboard, PDF appendix, and filtering.
+# The 5 primary report types (Blood Report → PCR) map to the PDF appendix sections.
 DOCUMENT_CATEGORIES: list[str] = [
-    "Vaccination",
+    "Blood Report",
+    "Urine Report",
+    "Imaging",
     "Prescription",
-    "Diagnostic",
+    "PCR & Parasite Panel",
+    "Vaccination",
     "Other",
 ]
