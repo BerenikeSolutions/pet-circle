@@ -26,6 +26,10 @@ from app.models.order import Order
 
 logger = logging.getLogger(__name__)
 
+# --- Constants ---
+FREE_DELIVERY_THRESHOLD = 500  # Free delivery for orders >= ₹500
+DELIVERY_FEE = 49
+
 
 # --- Cart CRUD ---
 
@@ -454,7 +458,7 @@ async def place_order(
 
     subtotal = sum(item.price * item.quantity for item in in_cart)
     discount = round(subtotal * 0.1) if coupon else 0
-    delivery = 0 if subtotal > 999 else 49
+    delivery = 0 if subtotal >= FREE_DELIVERY_THRESHOLD else DELIVERY_FEE
     total = subtotal - discount + delivery
 
     order_id = f"PC-{uuid.uuid4().hex[:8].upper()}"

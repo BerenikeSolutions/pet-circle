@@ -1498,8 +1498,17 @@ async def dashboard_update_quantity(
         raise HTTPException(status_code=503, detail="Could not update quantity.")
 
 
+# Valid coupon codes and their discount percentages
+VALID_COUPONS: dict[str, int] = {
+    "PETCIRCLE10": 10,
+    "WELCOME10": 10,
+    "SAVE10": 10,
+    "CARE10": 10,
+}
+
+
 class CouponRequest(BaseModel):
-    code: str = Field(..., min_length=3, max_length=20)
+    code: str = Field(..., min_length=1, max_length=20)
 
 
 @router.post("/{token}/cart/apply-coupon")
@@ -1508,12 +1517,17 @@ async def dashboard_apply_coupon(
     body: CouponRequest,
     db: Session = Depends(get_db),
 ):
-    """Apply coupon code to cart (any 3+ char code gives 10% off)."""
+    """Apply coupon code to cart. Returns discount_percent for valid codes, valid=False otherwise."""
     try:
         validate_dashboard_token(db, token)
-        return {"valid": True, "discount_percent": 10, "code": body.code}
     except ValueError:
         raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+
+    code = body.code.strip().upper()
+    discount = VALID_COUPONS.get(code)
+    if discount is None:
+        return {"valid": False, "discount_percent": 0, "code": code}
+    return {"valid": True, "discount_percent": discount, "code": code}
 
 
 class PlaceOrderRequest(BaseModel):

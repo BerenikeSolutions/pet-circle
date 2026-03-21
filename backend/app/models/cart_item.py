@@ -36,7 +36,7 @@ class CartItem(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     pet_id = Column(UUID(as_uuid=True), ForeignKey("pets.id", ondelete="CASCADE"), index=True, nullable=False)
-    product_id = Column(String(10), nullable=False)  # matches cart_item_id in product_catalog
+    product_id = Column(String(100), nullable=False)  # matches cart_item_id in product_catalog or generated IDs
     icon = Column(String(10), nullable=True)
     name = Column(String(200), nullable=False)
     sub = Column(String(200), nullable=True)

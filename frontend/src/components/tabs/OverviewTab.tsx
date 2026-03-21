@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import type { DashboardData, ContactItem, DocumentItem, NutritionAnalysis, NudgeItem, BackendDietItem } from '@/lib/api';
-import { addContact, updateContact, deleteContact, getNutritionAnalysis, getNudges, dismissNudge, uploadDocument, retryExtraction, getDietItems } from '@/lib/api';
+import { addContact, updateContact, deleteContact, getNutritionAnalysis, getNudges, dismissNudge, uploadDocument, retryExtraction, getDietItems, addToCart } from '@/lib/api';
 import StatusBadge from '@/components/ui/StatusBadge';
 import CollapsibleCard from '@/components/ui/CollapsibleCard';
 import AddRow from '@/components/ui/AddRow';
@@ -11,7 +11,7 @@ import {
   filterByKeywords, countOverdue, formatApiDate, getStatusForRecord,
   VACCINE_KW, DEWORMING_KW, FLEA_TICK_KW, CHECKUP_KW,
   WA_REMINDER_COLORS, WA_REMINDER_BG, WA_REMINDER_LABELS,
-  NUDGE_CATEGORY_ICONS, NUDGE_PRIORITY_COLORS,
+  NUDGE_CATEGORY_ICONS, NUDGE_PRIORITY_COLORS, parseFirstPrice,
 } from '@/lib/dashboard-utils';
 
 interface OverviewTabProps {
@@ -339,7 +339,23 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
                       <div className="flex items-center gap-2 mt-2">
                         {nudge.orderable && (
                           <button
-                            onClick={() => onCartClick(nudge.cart_item_id || undefined)}
+                            onClick={async () => {
+                              const productId = nudge.cart_item_id || `nudge_${nudge.id}`;
+                              try {
+                                await addToCart(token, {
+                                  product_id: productId,
+                                  name: nudge.title,
+                                  price: parseFirstPrice(nudge.price),
+                                  icon: nudge.icon || NUDGE_CATEGORY_ICONS[nudge.category] || '📌',
+                                  sub: nudge.message,
+                                  tag: nudge.order_type || nudge.category,
+                                  tag_color: '#D44800',
+                                });
+                              } catch {
+                                // item may already exist — still open cart
+                              }
+                              onCartClick(productId);
+                            }}
                             className="text-[11px] font-semibold text-white px-3 py-1 rounded-full"
                             style={{ backgroundColor: '#D44800' }}
                           >

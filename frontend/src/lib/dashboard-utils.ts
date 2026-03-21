@@ -198,6 +198,16 @@ export function getStatusForRecord(record: PreventiveRecord): string {
 }
 
 
+/** Extract the first price from strings like "₹1,499 / ₹4,599" → 1499 */
+export function parseFirstPrice(priceStr: string | null | undefined): number {
+  if (!priceStr) return 0;
+  const m = priceStr.replace(/\s/g, '').match(/[\d,]+/);
+  return m ? parseInt(m[0].replace(/,/g, ''), 10) || 0 : 0;
+}
+
+export const FREE_DELIVERY_THRESHOLD = 500;
+export const DELIVERY_FEE = 49;
+
 export const PAYMENT_METHODS = [
   { id: 'upi', label: 'UPI', icon: '📱', sub: 'Pay via any UPI app' },
   { id: 'card', label: 'Card', icon: '💳', sub: 'Credit / Debit card' },

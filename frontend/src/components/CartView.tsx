@@ -1,12 +1,12 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type { DashboardData, CartItemData, CartRecommendation, PlaceOrderResponse } from '@/lib/api';
 import {
   getCart, toggleCartItem, updateCartQuantity, addToCart,
   getCartRecommendations, applyCoupon, placeOrder,
 } from '@/lib/api';
-import { PAYMENT_METHODS, NET_BANKS } from '@/lib/dashboard-utils';
+import { PAYMENT_METHODS, NET_BANKS, FREE_DELIVERY_THRESHOLD, DELIVERY_FEE } from '@/lib/dashboard-utils';
 
 interface CartViewProps {
   data: DashboardData;
@@ -40,6 +40,7 @@ export default function CartView({ data, token, pinnedItemId, onBack }: CartView
   const [recsLoading, setRecsLoading] = useState(true);
   const [coupon, setCoupon] = useState('');
   const [couponApplied, setCouponApplied] = useState(false);
+  const [couponError, setCouponError] = useState(false);
   const [discountPercent, setDiscountPercent] = useState(0);
   const [payMethod, setPayMethod] = useState('upi');
   const [upiId, setUpiId] = useState('');
@@ -53,12 +54,13 @@ export default function CartView({ data, token, pinnedItemId, onBack }: CartView
 
   // Address state
   const [addresses, setAddresses] = useState<AddressData[]>([
-    { id: 'a1', name: data.owner.full_name || 'Pet Parent', line: 'Mumbai 400001', tag: 'Home', selected: true },
+    { id: 'a1', name: data.owner.full_name || '', line: '', tag: 'Home', selected: true },
   ]);
   const [addressSheet, setAddressSheet] = useState<AddressSheetState | null>(null);
   const [addrForm, setAddrForm] = useState({ name: '', line: '', tag: 'Home' });
 
   const selectedAddr = addresses.find(a => a.selected) || addresses[0];
+  const pinnedHandled = useRef(false);
 
   // Load cart items from API
   const loadCart = useCallback(async () => {
@@ -91,16 +93,15 @@ export default function CartView({ data, token, pinnedItemId, onBack }: CartView
     loadRecommendations();
   }, [loadCart, loadRecommendations]);
 
-  // Auto-add pinned item to cart on mount
+  // Auto-add pinned item once after initial cart load completes
   useEffect(() => {
-    if (pinnedItemId && !loading) {
-      const existing = items.find(i => i.product_id === pinnedItemId);
-      if (!existing || !existing.in_cart) {
-        handleToggle(pinnedItemId);
-      }
+    if (!pinnedItemId || loading || pinnedHandled.current) return;
+    pinnedHandled.current = true;
+    const alreadyInCart = items.find(i => i.product_id === pinnedItemId && i.in_cart);
+    if (!alreadyInCart) {
+      handleToggle(pinnedItemId);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pinnedItemId, loading]);
+  }, [pinnedItemId, loading, items, handleToggle]);
 
   const handleToggle = useCallback(async (productId: string) => {
     try {
@@ -153,14 +154,21 @@ export default function CartView({ data, token, pinnedItemId, onBack }: CartView
 
   const handleApplyCoupon = useCallback(async () => {
     if (!coupon) return;
+    setCouponError(false);
     try {
       const result = await applyCoupon(token, coupon);
       if (result.valid) {
         setCouponApplied(true);
+        setCouponError(false);
         setDiscountPercent(result.discount_percent);
+      } else {
+        setCouponApplied(false);
+        setCouponError(true);
+        setDiscountPercent(0);
       }
     } catch (e) {
       console.error('Coupon failed:', e);
+      setCouponError(true);
     }
   }, [token, coupon]);
 
@@ -187,7 +195,7 @@ export default function CartView({ data, token, pinnedItemId, onBack }: CartView
   const notInCartItems = useMemo(() => items.filter(i => !i.in_cart), [items]);
   const subtotal = useMemo(() => inCartItems.reduce((s, i) => s + i.price * i.quantity, 0), [inCartItems]);
   const discount = useMemo(() => couponApplied ? Math.round(subtotal * discountPercent / 100) : 0, [subtotal, couponApplied, discountPercent]);
-  const delivery = subtotal > 999 ? 0 : 49;
+  const delivery = subtotal >= FREE_DELIVERY_THRESHOLD ? 0 : DELIVERY_FEE;
   const total = subtotal - discount + delivery;
 
   // Sort pinned item first
@@ -457,9 +465,14 @@ export default function CartView({ data, token, pinnedItemId, onBack }: CartView
           {/* Sticky Pay Button */}
           <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-100 p-4 shadow-lg" style={{ zIndex: 100 }}>
             <div className="max-w-[430px] mx-auto">
+              {!selectedAddr?.line && (
+                <p className="text-xs text-center text-orange-600 font-medium mb-2">
+                  Add a delivery address to continue
+                </p>
+              )}
               <button
                 onClick={handlePlaceOrder}
-                disabled={placing}
+                disabled={placing || !selectedAddr?.line}
                 className="w-full py-3.5 rounded-2xl text-white font-bold text-[15px] disabled:opacity-50"
                 style={{ background: '#D44800' }}
               >
@@ -650,24 +663,28 @@ export default function CartView({ data, token, pinnedItemId, onBack }: CartView
         {/* Sticky Footer */}
         <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-100 shadow-lg" style={{ zIndex: 100 }}>
           <div className="max-w-[430px] mx-auto px-4 py-2.5 pb-5">
-            <div className="flex gap-2 mb-2">
+            <div className="flex gap-2 mb-1">
               <input
-                value={coupon} onChange={e => setCoupon(e.target.value)}
+                value={coupon}
+                onChange={e => { setCoupon(e.target.value); setCouponError(false); }}
                 placeholder="Coupon code"
                 className="flex-1 px-3 py-1.5 rounded-xl text-xs focus:outline-none"
-                style={{ border: '1px solid #E0E0E0' }}
+                style={{ border: `1px solid ${couponError ? '#FF3B30' : '#E0E0E0'}` }}
               />
               <button
                 onClick={handleApplyCoupon}
                 className="px-3.5 py-1.5 rounded-xl text-xs font-bold border-none whitespace-nowrap"
                 style={{
-                  background: couponApplied ? '#34C759' : '#F2EDE8',
-                  color: couponApplied ? 'white' : '#555',
+                  background: couponApplied ? '#34C759' : couponError ? '#FFF0F0' : '#F2EDE8',
+                  color: couponApplied ? 'white' : couponError ? '#FF3B30' : '#555',
                 }}
               >
-                {couponApplied ? '✓ Applied' : 'Apply'}
+                {couponApplied ? '✓ Applied' : couponError ? '✗ Invalid' : 'Apply'}
               </button>
             </div>
+            {couponError && (
+              <p className="text-[11px] text-red-500 mb-1.5 pl-1">Invalid coupon code. Try PETCIRCLE10.</p>
+            )}
 
             <div className="flex justify-between items-center mb-2">
               <div className="text-xs text-gray-600">
