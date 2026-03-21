@@ -36,6 +36,8 @@ export interface PreventiveRecord {
   status: string;
   recurrence_days: number;
   custom_recurrence_days: number | null;
+  medicine_dependent?: boolean;
+  medicine_name?: string | null;
 }
 
 export interface WeightEntry {
@@ -535,6 +537,40 @@ export async function updatePreventiveFrequency(
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ item_name, recurrence_days }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export async function updateMedicineName(
+  token: string,
+  item_name: string,
+  medicine_name: string
+): Promise<{
+  status: string;
+  item_name: string;
+  medicine_name: string;
+  recurrence_days: number;
+  next_due_date: string | null;
+  record_status: string;
+}> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 20000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/preventive-medicine`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item_name, medicine_name }),
       signal: controller.signal,
     });
     if (!res.ok) {

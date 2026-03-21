@@ -385,6 +385,74 @@ SEED_DATA: list[dict] = [
     },
 
     # =============================
+    # OPTIONAL VACCINES
+    # =============================
+
+    # --- Bordetella (Dogs only) ---
+    # Optional vaccine for kennel cough. Annual recurrence (365 days).
+    # Recommended for dogs that board, attend daycare, or visit dog parks.
+    {
+        "item_name": "Bordetella",
+        "category": "complete",
+        "circle": "health",
+        "species": "dog",
+        "recurrence_days": 365,
+        "medicine_dependent": False,
+        "reminder_before_days": 30,
+        "overdue_after_days": 14,
+    },
+    # --- Leptospirosis (Dogs only) ---
+    # Optional vaccine. Annual recurrence (365 days).
+    # Recommended in areas with wildlife or standing water exposure.
+    {
+        "item_name": "Leptospirosis",
+        "category": "complete",
+        "circle": "health",
+        "species": "dog",
+        "recurrence_days": 365,
+        "medicine_dependent": False,
+        "reminder_before_days": 30,
+        "overdue_after_days": 14,
+    },
+    # --- Canine Influenza (Dogs only) ---
+    # Optional vaccine. Annual recurrence (365 days).
+    {
+        "item_name": "Canine Influenza",
+        "category": "complete",
+        "circle": "health",
+        "species": "dog",
+        "recurrence_days": 365,
+        "medicine_dependent": False,
+        "reminder_before_days": 30,
+        "overdue_after_days": 14,
+    },
+    # --- FeLV — Feline Leukemia (Cats only) ---
+    # Optional vaccine. Annual recurrence (365 days).
+    # Recommended for outdoor or multi-cat households.
+    {
+        "item_name": "FeLV Vaccine",
+        "category": "complete",
+        "circle": "health",
+        "species": "cat",
+        "recurrence_days": 365,
+        "medicine_dependent": False,
+        "reminder_before_days": 30,
+        "overdue_after_days": 14,
+    },
+    # --- FIV — Feline Immunodeficiency (Cats only) ---
+    # Optional vaccine. Annual recurrence (365 days).
+    {
+        "item_name": "FIV Vaccine",
+        "category": "complete",
+        "circle": "health",
+        "species": "cat",
+        "recurrence_days": 365,
+        "medicine_dependent": False,
+        "reminder_before_days": 30,
+        "overdue_after_days": 14,
+    },
+
+    # =============================
     # SPECIAL: BIRTHDAY CELEBRATION
     # =============================
 

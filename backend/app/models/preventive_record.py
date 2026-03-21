@@ -66,6 +66,11 @@ class PreventiveRecord(Base):
     # Nullable — None means use the master default.
     custom_recurrence_days = Column(Integer, nullable=True)
 
+    # Medicine/product name used for this preventive item.
+    # Relevant for medicine-dependent items (Deworming, Tick/Flea, Supplements).
+    # Used to calculate AI-based next due date based on specific product + species.
+    medicine_name = Column(String(200), nullable=True)
+
     # Timestamps managed by PostgreSQL DEFAULT NOW().
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

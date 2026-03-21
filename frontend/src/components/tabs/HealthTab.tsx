@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import type { DashboardData, WeightEntry, WeightHistoryResponse } from '@/lib/api';
 import {
   updatePreventiveDate, updateWeight, updatePreventiveFrequency,
-  getWeightHistory, addWeightEntry,
+  getWeightHistory, addWeightEntry, updateMedicineName,
 } from '@/lib/api';
 import StatusBadge from '@/components/ui/StatusBadge';
 import CareCard from '@/components/ui/CareCard';
@@ -44,8 +44,8 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
   const fleaTick = filterByKeywords(records, FLEA_TICK_KW);
   const checkups = filterByKeywords(records, CHECKUP_KW);
 
-  const mandatoryVax = vaccines.filter(v => ['rabies', 'dhpp'].some(k => v.item_name.toLowerCase().includes(k)));
-  const optionalVax = vaccines.filter(v => !['rabies', 'dhpp'].some(k => v.item_name.toLowerCase().includes(k)));
+  const mandatoryVax = vaccines.filter(v => v.category === 'essential');
+  const optionalVax = vaccines.filter(v => v.category !== 'essential');
 
   const checkupItems = ['Vet Visit', 'Blood Work', 'X-Ray', 'Urinalysis', 'Fecal Test'];
   const completedCheckups = checkups.filter(c => c.status === 'up_to_date' || c.status === 'done').length;
@@ -69,8 +69,13 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
     loadWeightHistory();
   }, [loadWeightHistory]);
 
+  // If no weight history entries but pet has an onboarding weight, show it as synthetic entry
+  const effectiveHistory = weightHistory.length === 0 && pet.weight
+    ? [{ id: 'onboarding', weight: pet.weight, recorded_at: new Date().toISOString().split('T')[0], note: 'Onboarding weight' } as WeightEntry]
+    : weightHistory;
+
   // Weight history sorted oldest-first for sparkline
-  const sortedHistory = [...weightHistory].sort((a, b) =>
+  const sortedHistory = [...effectiveHistory].sort((a, b) =>
     (a.recorded_at || '').localeCompare(b.recorded_at || '')
   );
   const sparklineData = sortedHistory.slice(-6);
@@ -91,9 +96,20 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
     }
   };
 
+  const handleMedicineSave = async (itemName: string, medicineName: string) => {
+    await updateMedicineName(token, itemName, medicineName);
+    onUpdated();
+  };
+
   const handleWeightSave = async () => {
     const w = parseFloat(weightInput);
-    if (!w || w < 0.01 || w > 999.99) { setWeightMsg('Enter valid weight (0.01–999.99)'); return; }
+    if (!w || w < 0.01 || w > 999.99) {
+      const rangeHint = idealRange
+        ? `Expected range for ${pet.breed || pet.species}: ${idealRange.min}–${idealRange.max} kg`
+        : `Enter valid weight for your ${pet.species || 'pet'} (0.01–999.99 kg)`;
+      setWeightMsg(rangeHint);
+      return;
+    }
     setWeightSaving(true);
     try {
       const today = new Date().toISOString().split('T')[0];
@@ -205,14 +221,17 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
           key={d.item_name}
           icon="🪱"
           title={d.item_name}
-          product="Bayer Drontal Plus"
+          product={d.medicine_name || undefined}
           lastDone={d.last_done_date}
           nextDue={d.next_due_date}
           status={getStatusForRecord(d)}
           recurrenceDays={d.recurrence_days}
+          medicineDependant={d.medicine_dependent}
+          medicineName={d.medicine_name}
           onDateSave={(dateStr) => handleDateSave(d.item_name, dateStr)}
           onOrderClick={() => onCartClick('c2')}
           onFreqChange={(f, u) => handleFreqChange(d.item_name, f, u)}
+          onMedicineSave={(name) => handleMedicineSave(d.item_name, name)}
         />
       )) : (
         <CareCard
@@ -228,14 +247,17 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
           key={f.item_name}
           icon="🐛"
           title={f.item_name}
-          product="NexGard"
+          product={f.medicine_name || undefined}
           lastDone={f.last_done_date}
           nextDue={f.next_due_date}
           status={getStatusForRecord(f)}
           recurrenceDays={f.recurrence_days}
+          medicineDependant={f.medicine_dependent}
+          medicineName={f.medicine_name}
           onDateSave={(dateStr) => handleDateSave(f.item_name, dateStr)}
           onOrderClick={() => onCartClick('c5')}
           onFreqChange={(freq, unit) => handleFreqChange(f.item_name, freq, unit)}
+          onMedicineSave={(name) => handleMedicineSave(f.item_name, name)}
         />
       )) : (
         <CareCard
@@ -340,18 +362,21 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
         )}
 
         {/* Sparkline with labels */}
-        {sparklineData.length > 1 && (
+        {sparklineData.length >= 1 && (
           <div className="mb-3">
-            <svg viewBox={`0 0 ${sparklineData.length * 50} 80`} className="w-full h-16">
+            <svg viewBox={`0 0 ${Math.max(sparklineData.length, 2) * 50} 90`} className="w-full h-20">
               {sparklineData.map((w, i) => {
-                const h = (w.weight / maxWeight) * 50;
+                const maxBarH = 40;
+                const minBarH = 6;
+                const h = Math.max((w.weight / maxWeight) * maxBarH, minBarH);
+                const barBase = 70;
                 const year = w.recorded_at ? new Date(w.recorded_at).getFullYear().toString().slice(-2) : '';
                 return (
                   <g key={i}>
                     {/* Weight label above bar */}
                     <text
                       x={i * 50 + 25}
-                      y={55 - h - 4}
+                      y={barBase - h - 4}
                       textAnchor="middle"
                       fontSize="8"
                       fill="#666"
@@ -361,7 +386,7 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
                     </text>
                     <rect
                       x={i * 50 + 10}
-                      y={55 - h}
+                      y={barBase - h}
                       width={30}
                       height={h}
                       rx={4}
@@ -371,7 +396,7 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
                     {year && (
                       <text
                         x={i * 50 + 25}
-                        y={70}
+                        y={83}
                         textAnchor="middle"
                         fontSize="8"
                         fill="#999"
@@ -391,7 +416,7 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
           <p className="text-xs text-gray-400 py-2 text-center">Loading history...</p>
         ) : (
           <div className="space-y-0 mb-3 border border-gray-100 rounded-xl overflow-hidden">
-            {weightHistory.slice(0, 5).map((w, idx) => (
+            {effectiveHistory.slice(0, 5).map((w, idx) => (
               <div
                 key={w.id}
                 className="flex items-center justify-between text-xs px-3 py-2 border-b border-gray-50 last:border-0"
@@ -409,7 +434,7 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
                 </div>
               </div>
             ))}
-            {weightHistory.length === 0 && (
+            {effectiveHistory.length === 0 && (
               <p className="text-xs text-gray-400 py-3 text-center">No weight entries yet</p>
             )}
           </div>

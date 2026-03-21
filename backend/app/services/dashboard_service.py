@@ -232,6 +232,8 @@ def get_dashboard_data(db: Session, token: str) -> dict:
             "status": record.status,
             "recurrence_days": effective_recurrence,
             "custom_recurrence_days": record.custom_recurrence_days,
+            "medicine_dependent": master.medicine_dependent,
+            "medicine_name": record.medicine_name if hasattr(record, 'medicine_name') and record.medicine_name else None,
         })
 
         # Classify into 6-category buckets (skip cancelled).

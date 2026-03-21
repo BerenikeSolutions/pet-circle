@@ -15,7 +15,7 @@ export const STATUS_CONFIG: Record<string, { color: string; bg: string; label: s
 };
 
 // ─── Keyword Arrays ──────────────────────────────────────────────
-export const VACCINE_KW = ["vaccine", "rabies", "dhpp", "core vaccine", "feline core", "bordetella"];
+export const VACCINE_KW = ["vaccine", "rabies", "dhpp", "core vaccine", "feline core", "bordetella", "leptospirosis", "canine influenza", "felv", "fiv"];
 export const DEWORMING_KW = ["deworming", "deworm"];
 export const FLEA_TICK_KW = ["tick", "flea"];
 export const CHECKUP_KW = ["checkup", "annual", "wellness", "blood test", "preventive blood"];

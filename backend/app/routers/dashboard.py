@@ -1041,6 +1041,93 @@ def dashboard_update_frequency(
         raise HTTPException(status_code=503, detail="Could not update frequency.")
 
 
+# --- Medicine Name Update (AI-based due date) ---
+
+class MedicineNameRequest(BaseModel):
+    item_name: str = Field(..., min_length=1)
+    medicine_name: str = Field(..., min_length=1, max_length=200)
+
+
+@router.patch("/{token}/preventive-medicine")
+def dashboard_update_medicine_name(
+    token: str,
+    body: MedicineNameRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Update medicine name for a medicine-dependent preventive item.
+    Uses AI to calculate the recommended recurrence based on species + medicine.
+    """
+    try:
+        dt = validate_dashboard_token(db, token)
+        from app.models.preventive_record import PreventiveRecord
+        from app.models.preventive_master import PreventiveMaster
+        from app.models.pet import Pet
+
+        result = (
+            db.query(PreventiveRecord, PreventiveMaster)
+            .join(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
+            .filter(
+                PreventiveRecord.pet_id == dt.pet_id,
+                PreventiveMaster.item_name == body.item_name,
+                PreventiveRecord.status != "cancelled",
+            )
+            .first()
+        )
+        if not result:
+            raise HTTPException(status_code=404, detail="Preventive record not found.")
+
+        record, master = result
+
+        pet = db.query(Pet).filter(Pet.id == dt.pet_id).first()
+        species = pet.species if pet else "dog"
+
+        # Save the medicine name
+        record.medicine_name = body.medicine_name
+
+        # Use AI to calculate recommended recurrence days
+        from app.services.medicine_recurrence_service import get_medicine_recurrence
+        ai_days = get_medicine_recurrence(
+            species=species,
+            item_type=master.item_name,
+            medicine_name=body.medicine_name,
+            default_days=master.recurrence_days,
+        )
+
+        record.custom_recurrence_days = ai_days
+
+        # Recalculate next_due_date if last_done_date exists
+        if record.last_done_date:
+            from datetime import timedelta, date as date_type
+            record.next_due_date = record.last_done_date + timedelta(days=ai_days)
+            today = date_type.today()
+            if record.next_due_date < today:
+                record.status = "overdue"
+            elif (record.next_due_date - today).days <= 30:
+                record.status = "upcoming"
+            else:
+                record.status = "up_to_date"
+
+        db.commit()
+
+        return {
+            "status": "updated",
+            "item_name": body.item_name,
+            "medicine_name": body.medicine_name,
+            "recurrence_days": ai_days,
+            "next_due_date": str(record.next_due_date) if record.next_due_date else None,
+            "record_status": record.status,
+        }
+
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Medicine name update error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not update medicine name.")
+
+
 # --- Diet Items CRUD ---
 
 class DietItemRequest(BaseModel):
