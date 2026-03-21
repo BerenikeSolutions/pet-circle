@@ -36,6 +36,7 @@ from app.models.cart_item import CartItem
 from app.models.ideal_weight_cache import IdealWeightCache
 from app.models.nutrition_target_cache import NutritionTargetCache
 from app.models.food_nutrition_cache import FoodNutritionCache
+from app.models.hygiene_tip_cache import HygieneTipCache
 from app.models.custom_preventive_item import CustomPreventiveItem
 
 __all__ = [
@@ -69,5 +70,6 @@ __all__ = [
     "IdealWeightCache",
     "NutritionTargetCache",
     "FoodNutritionCache",
+    "HygieneTipCache",
     "CustomPreventiveItem",
 ]

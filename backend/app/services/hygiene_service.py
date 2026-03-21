@@ -4,13 +4,22 @@ PetCircle Phase 1 — Hygiene Service
 CRUD operations for pet grooming/hygiene preferences.
 Seeds default hygiene items for new pets on first access.
 Supports user-added custom items per pet.
+Generates AI-powered one-line tips per hygiene activity (cached by breed).
 """
 
+import json
 import re
 import logging
+from datetime import datetime, date, timedelta
 from sqlalchemy.orm import Session
+from openai import AsyncOpenAI
 
 from app.models.hygiene_preference import HygienePreference
+from app.models.hygiene_tip_cache import HygieneTipCache
+from app.models.pet import Pet
+from app.config import settings
+from app.core.constants import OPENAI_QUERY_MODEL
+from app.utils.retry import retry_openai_call
 
 logger = logging.getLogger(__name__)
 
@@ -24,10 +33,24 @@ DEFAULT_HYGIENE = {
     "anal-gland":  {"name": "Anal gland cleaning",       "icon": "🐾", "category": "periodic", "freq": 6, "unit": "week",  "reminder": True},
 }
 
+# Cache staleness — regenerate tips after this many days
+HYGIENE_TIP_CACHE_DAYS = 365
 
-def _pref_to_dict(p: HygienePreference) -> dict:
+# Lazy-initialised OpenAI client
+_openai_client = None
+
+
+def _get_openai_client():
+    """Lazy-init OpenAI client."""
+    global _openai_client
+    if _openai_client is None:
+        _openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    return _openai_client
+
+
+def _pref_to_dict(p: HygienePreference, tip: str | None = None) -> dict:
     """Convert a HygienePreference ORM object to a response dict."""
-    return {
+    d = {
         "id": str(p.id),
         "item_id": p.item_id,
         "name": p.name or p.item_id,
@@ -38,7 +61,9 @@ def _pref_to_dict(p: HygienePreference) -> dict:
         "unit": p.unit,
         "reminder": p.reminder,
         "last_done": p.last_done,
+        "tip": tip,
     }
+    return d
 
 
 def _slugify(name: str) -> str:
@@ -47,9 +72,149 @@ def _slugify(name: str) -> str:
     return slug.strip("-")[:50]
 
 
-async def get_hygiene_preferences(db: Session, pet_id) -> list[dict]:
+def _compute_age_label(dob: date | None) -> str:
+    """Compute a human-readable age label from DOB."""
+    if not dob:
+        return "adult"
+    today = date.today()
+    months = (today.year - dob.year) * 12 + (today.month - dob.month)
+    if months < 6:
+        return "young puppy/kitten (under 6 months)"
+    if months < 12:
+        return "puppy/kitten (6-12 months)"
+    if months < 24:
+        return "junior (1-2 years)"
+    years = months // 12
+    if years < 7:
+        return f"adult ({years} years)"
+    return f"senior ({years} years)"
+
+
+async def _generate_hygiene_tips(
+    db: Session,
+    species: str,
+    breed: str,
+    age_label: str,
+    item_ids_and_names: list[tuple[str, str]],
+) -> dict[str, str]:
     """
-    Returns hygiene preferences for a pet.
+    Generate one-line tips for multiple hygiene items in a single GPT call.
+    Returns dict of {item_id: tip_text}.
+    Checks cache first, only calls GPT for uncached items.
+    """
+    breed_norm = breed.lower().strip() if breed else "mixed breed"
+    tips: dict[str, str] = {}
+    uncached: list[tuple[str, str]] = []
+
+    # Check cache for each item
+    cutoff = datetime.utcnow() - timedelta(days=HYGIENE_TIP_CACHE_DAYS)
+    for item_id, name in item_ids_and_names:
+        cached = (
+            db.query(HygieneTipCache)
+            .filter(
+                HygieneTipCache.species == species,
+                HygieneTipCache.breed_normalized == breed_norm,
+                HygieneTipCache.item_id == item_id,
+                HygieneTipCache.created_at >= cutoff,
+            )
+            .first()
+        )
+        if cached:
+            tips[item_id] = cached.tip
+        else:
+            uncached.append((item_id, name))
+
+    if not uncached:
+        return tips
+
+    # Build prompt for uncached items
+    items_list = "\n".join(f"- {item_id}: {name}" for item_id, name in uncached)
+
+    try:
+        client = _get_openai_client()
+
+        async def _call():
+            return await client.chat.completions.create(
+                model=OPENAI_QUERY_MODEL,
+                temperature=0.4,
+                max_tokens=600,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a veterinary grooming expert. For each hygiene activity, "
+                            "write ONE short sentence (max 20 words) explaining why it's important "
+                            "for this specific breed and age. Be specific to the breed's traits "
+                            "(coat type, ear shape, skin folds, etc). No generic advice.\n\n"
+                            "Return ONLY a JSON object mapping item_id to tip string. No markdown."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Species: {species}\n"
+                            f"Breed: {breed or 'mixed breed'}\n"
+                            f"Age: {age_label}\n\n"
+                            f"Activities:\n{items_list}"
+                        ),
+                    },
+                ],
+            )
+
+        resp = await retry_openai_call(_call)
+        raw = resp.choices[0].message.content.strip()
+        # Strip markdown code fences if present
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+
+        generated: dict = json.loads(raw)
+
+        # Save to cache and collect results
+        for item_id, name in uncached:
+            tip = generated.get(item_id, "")
+            if tip:
+                # Truncate to 300 chars
+                tip = tip[:300]
+                tips[item_id] = tip
+                # Upsert cache entry
+                existing = (
+                    db.query(HygieneTipCache)
+                    .filter(
+                        HygieneTipCache.species == species,
+                        HygieneTipCache.breed_normalized == breed_norm,
+                        HygieneTipCache.item_id == item_id,
+                    )
+                    .first()
+                )
+                if existing:
+                    existing.tip = tip
+                    existing.created_at = datetime.utcnow()
+                else:
+                    db.add(HygieneTipCache(
+                        species=species,
+                        breed_normalized=breed_norm,
+                        item_id=item_id,
+                        tip=tip,
+                    ))
+        db.commit()
+
+    except Exception as e:
+        logger.warning("Failed to generate hygiene tips: %s", str(e))
+        # Return whatever we have — tips will be None for failed items
+
+    return tips
+
+
+async def get_hygiene_preferences(
+    db: Session,
+    pet_id,
+    species: str | None = None,
+    breed: str | None = None,
+    dob: date | None = None,
+) -> list[dict]:
+    """
+    Returns hygiene preferences for a pet with AI-generated tips.
     Seeds defaults on first access if none exist.
     """
     prefs = (
@@ -83,7 +248,17 @@ async def get_hygiene_preferences(db: Session, pet_id) -> list[dict]:
         )
         logger.info("Seeded default hygiene preferences for pet %s", pet_id)
 
-    return [_pref_to_dict(p) for p in prefs]
+    # Generate tips if we have species/breed info
+    tips: dict[str, str] = {}
+    if species:
+        age_label = _compute_age_label(dob)
+        item_ids_and_names = [(p.item_id, p.name or p.item_id) for p in prefs]
+        try:
+            tips = await _generate_hygiene_tips(db, species, breed or "mixed breed", age_label, item_ids_and_names)
+        except Exception as e:
+            logger.warning("Tip generation failed, returning prefs without tips: %s", str(e))
+
+    return [_pref_to_dict(p, tip=tips.get(p.item_id)) for p in prefs]
 
 
 async def add_hygiene_item(

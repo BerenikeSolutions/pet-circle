@@ -1236,10 +1236,16 @@ async def dashboard_hygiene_preferences(
     token: str,
     db: Session = Depends(get_db),
 ):
-    """Get hygiene preferences for a pet."""
+    """Get hygiene preferences for a pet, with AI-generated tips."""
     try:
         dt = validate_dashboard_token(db, token)
-        return await get_hygiene_preferences(db, dt.pet_id)
+        # Fetch pet info for breed-specific tip generation
+        from app.models.pet import Pet
+        pet = db.query(Pet).filter(Pet.id == dt.pet_id).first()
+        species = pet.species if pet else None
+        breed = pet.breed if pet else None
+        dob = pet.dob if pet else None
+        return await get_hygiene_preferences(db, dt.pet_id, species=species, breed=breed, dob=dob)
     except ValueError:
         raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
     except Exception as e:

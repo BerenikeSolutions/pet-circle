@@ -878,6 +878,7 @@ export interface HygienePreference {
   unit: string;
   reminder: boolean;
   last_done: string | null;
+  tip: string | null;
 }
 
 export async function getHygienePreferences(token: string): Promise<HygienePreference[]> {

@@ -96,7 +96,6 @@ export default function HygieneTab({ data, token, onUpdated, onCartClick }: Hygi
   const [addCategory, setAddCategory] = useState<'daily' | 'periodic'>('daily');
   const [addForm, setAddForm] = useState({ name: '', icon: '🧹', freq: 1, unit: 'month' });
 
-  const breed = data.pet.breed || 'your breed';
 
   const loadData = useCallback(async () => {
     try {
@@ -215,6 +214,7 @@ export default function HygieneTab({ data, token, onUpdated, onCartClick }: Hygi
             <span className="text-lg">{item.icon}</span>
             <div>
               <p className="text-sm font-medium text-gray-900">{item.name}</p>
+              {item.tip && <p className="text-[11px] text-amber-700 leading-snug">{item.tip}</p>}
               <p className="text-[11px] text-gray-500">Last: {lastDone}</p>
             </div>
           </div>
@@ -256,6 +256,7 @@ export default function HygieneTab({ data, token, onUpdated, onCartClick }: Hygi
             <span className="text-lg">{item.icon}</span>
             <div>
               <p className="text-sm font-medium text-gray-900">{item.name}</p>
+              {item.tip && <p className="text-[11px] text-amber-700 leading-snug">{item.tip}</p>}
               <p className="text-[11px] text-gray-500">Last: {lastDone}</p>
               {nextDue && (
                 <p className="text-[11px] text-gray-500">
@@ -305,16 +306,9 @@ export default function HygieneTab({ data, token, onUpdated, onCartClick }: Hygi
         </div>
       )}
 
-      {/* Breed Note */}
-      <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
-        <p className="text-xs text-amber-800">
-          <span className="font-semibold">Note:</span> Frequencies are breed-adjusted for {breed}.
-        </p>
-      </div>
-
-      {/* Frequent Activities */}
+      {/* Frequent Activity */}
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
-        <h3 className="font-semibold text-sm mb-3">Frequent Activities</h3>
+        <h3 className="font-semibold text-sm mb-3">Frequent Activity</h3>
         <div className="space-y-0">
           {dailyItems.map(item => renderDailyItem(item))}
         </div>
