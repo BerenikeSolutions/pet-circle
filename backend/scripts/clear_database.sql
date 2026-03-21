@@ -1,4 +1,4 @@
--- Clear all data from the database (keeps preventive_master and product_catalog reference data).
+-- Clear all data from the database (keeps preventive_master, product_catalog, nudge_config reference data).
 -- Truncates tables in FK-safe order (children first) using CASCADE.
 
 -- Logs & engagement
@@ -13,6 +13,7 @@ TRUNCATE TABLE conflict_flags CASCADE;
 -- Reminders & preventive records
 TRUNCATE TABLE reminders CASCADE;
 TRUNCATE TABLE preventive_records CASCADE;
+TRUNCATE TABLE custom_preventive_items CASCADE;
 
 -- Diagnostics & medicines
 TRUNCATE TABLE diagnostic_test_results CASCADE;
@@ -32,8 +33,9 @@ TRUNCATE TABLE ideal_weight_cache CASCADE;
 -- Weight & hygiene
 TRUNCATE TABLE weight_history CASCADE;
 TRUNCATE TABLE hygiene_preferences CASCADE;
+TRUNCATE TABLE hygiene_tip_cache CASCADE;
 
--- Nudges (config rows are reference data — skip nudge_config)
+-- Nudges (nudge_config is reference data — skip it)
 TRUNCATE TABLE nudges CASCADE;
 
 -- Orders & cart
