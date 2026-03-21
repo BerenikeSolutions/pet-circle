@@ -66,6 +66,7 @@ export interface DocumentItem {
   mime_type: string;
   extraction_status: string;
   uploaded_at: string | null;
+  event_date: string | null;
 }
 
 export interface DiagnosticResultItem {

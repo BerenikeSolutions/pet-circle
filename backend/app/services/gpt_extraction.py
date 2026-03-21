@@ -1119,6 +1119,20 @@ async def extract_and_process_document(
             )[:200]
         if document_category:
             document.document_category = document_category
+
+        # Compute event_date: the most recent last_done_date from extracted items.
+        # If a document has multiple items with different dates, use the most recent.
+        event_dates: list = []
+        for item in extracted_items:
+            raw_date = item.get("last_done_date")
+            if raw_date:
+                try:
+                    event_dates.append(parse_date(str(raw_date)))
+                except ValueError:
+                    pass
+        if event_dates:
+            document.event_date = max(event_dates)
+
         selected_doctor_name = _select_best_doctor_name(
             metadata_doctor_name=(str(metadata["doctor_name"]).strip() if metadata["doctor_name"] else None),
             extracted_items=extracted_items,
@@ -1383,6 +1397,45 @@ async def extract_and_process_document(
                 logger.warning(
                     "Error auto-creating contact from doctor_name '%s': %s",
                     selected_doctor_name, str(e),
+                )
+
+        # Auto-create contacts from ALL item-level doctor names.
+        # A single document (e.g. vaccination card) may mention multiple doctors
+        # across different line items — each should be stored as a contact.
+        for item in extracted_items:
+            item_doctor = item.get("doctor_name")
+            item_clinic = item.get("clinic_name")
+            if not item_doctor or not isinstance(item_doctor, str):
+                continue
+            item_doctor = item_doctor.strip()
+            if not item_doctor or not _is_plausible_doctor_name(item_doctor, pet_name=pet.name):
+                continue
+            # Skip if it's the same as the document-level doctor (already handled above)
+            if selected_doctor_name and item_doctor.lower() == selected_doctor_name.lower():
+                continue
+            try:
+                db.flush()
+                existing_item_contact = (
+                    db.query(Contact)
+                    .filter(Contact.pet_id == pet.id, Contact.name == item_doctor, Contact.role == "veterinarian")
+                    .first()
+                )
+                if not existing_item_contact:
+                    db.add(Contact(
+                        pet_id=pet.id,
+                        document_id=document.id,
+                        role="veterinarian",
+                        name=item_doctor[:200],
+                        clinic_name=(str(item_clinic)[:200] if item_clinic else
+                                     (str(metadata["clinic_name"])[:200] if metadata["clinic_name"] else None)),
+                        source="extraction",
+                    ))
+                    db.flush()
+            except Exception as e:
+                db.rollback()
+                logger.warning(
+                    "Error auto-creating contact from item doctor_name '%s': %s",
+                    item_doctor, str(e),
                 )
 
         # --- Non-pet document check ---

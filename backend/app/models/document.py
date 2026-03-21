@@ -12,7 +12,7 @@ Constraints:
 
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, ForeignKey
+from sqlalchemy import Column, String, DateTime, Date, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -69,6 +69,11 @@ class Document(Base):
     # 'success' — extraction completed, structured data saved
     # 'failed' — extraction failed after retries, user notified
     extraction_status = Column(String(20), nullable=False)
+
+    # Date when the medical event (vaccination, test, etc.) occurred.
+    # Extracted from document content by GPT. Distinct from created_at (upload date).
+    # May be null if extraction failed or document has no clear event date.
+    event_date = Column(Date, nullable=True)
 
     # WhatsApp message ID (wamid) that triggered this document upload.
     # Used for document-level deduplication — prevents phantom uploads

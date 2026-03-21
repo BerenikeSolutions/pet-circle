@@ -1,8 +1,8 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import type { DashboardData, ContactItem, NutritionAnalysis, NudgeItem } from '@/lib/api';
-import { addContact, updateContact, deleteContact, getNutritionAnalysis, getNudges, dismissNudge, uploadDocument } from '@/lib/api';
+import type { DashboardData, ContactItem, DocumentItem, NutritionAnalysis, NudgeItem } from '@/lib/api';
+import { addContact, updateContact, deleteContact, getNutritionAnalysis, getNudges, dismissNudge, uploadDocument, retryExtraction } from '@/lib/api';
 import StatusBadge from '@/components/ui/StatusBadge';
 import CollapsibleCard from '@/components/ui/CollapsibleCard';
 import AddRow from '@/components/ui/AddRow';
@@ -54,6 +54,32 @@ const ROLE_API_MAP: Record<string, string> = {
   Other: 'other',
 };
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
+const DOC_CATEGORIES = ['Vaccination', 'Prescription', 'Diagnostic'] as const;
+
+const DOC_CATEGORY_ICONS: Record<string, string> = {
+  Vaccination: '💉',
+  Prescription: '💊',
+  Diagnostic: '🔬',
+};
+
+const DOC_CATEGORY_COLORS: Record<string, { color: string; bg: string }> = {
+  Vaccination: { color: '#007AFF', bg: '#F0F6FF' },
+  Prescription: { color: '#FF9500', bg: '#FFF6ED' },
+  Diagnostic: { color: '#AF52DE', bg: '#F5F0FF' },
+};
+
+function inferDocCategory(doc: DocumentItem): string {
+  const cat = (doc.document_category || '').trim();
+  if (DOC_CATEGORIES.includes(cat as typeof DOC_CATEGORIES[number])) return cat;
+  const name = `${doc.document_name || ''} ${doc.hospital_name || ''}`.toLowerCase();
+  if (/(vaccin|rabies|booster|dhpp|fvrcp)/.test(name)) return 'Vaccination';
+  if (/(prescription|rx|medicine|medication)/.test(name)) return 'Prescription';
+  if (/(blood|cbc|urine|urinalysis|hematology|lab|diagnostic|xray|x-ray)/.test(name)) return 'Diagnostic';
+  return 'Other';
+}
+
 export default function OverviewTab({ data, token, onTabChange, onCartClick, onUpdated, onRemindersClick }: OverviewTabProps) {
   const [contactSheet, setContactSheet] = useState(false);
   const [editContact, setEditContact] = useState<ContactItem | null>(null);
@@ -63,12 +89,24 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
   const [nudges, setNudges] = useState<NudgeItem[]>([]);
   const [dismissingNudge, setDismissingNudge] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [viewingDoc, setViewingDoc] = useState<DocumentItem | null>(null);
+  const [retryingDoc, setRetryingDoc] = useState<string | null>(null);
 
   // Fetch nutrition analysis and nudges on mount
   useEffect(() => {
     getNutritionAnalysis(token).then(setNutritionData).catch(() => {});
     getNudges(token).then(setNudges).catch(() => {});
   }, [token]);
+
+  // Lock body scroll when document viewer is open
+  useEffect(() => {
+    if (!viewingDoc) return;
+    const original = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const onEsc = (e: KeyboardEvent) => { if (e.key === 'Escape') setViewingDoc(null); };
+    window.addEventListener('keydown', onEsc);
+    return () => { document.body.style.overflow = original; window.removeEventListener('keydown', onEsc); };
+  }, [viewingDoc]);
 
   const handleDismissNudge = useCallback(async (nudgeId: string) => {
     setDismissingNudge(nudgeId);
@@ -96,6 +134,37 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
       e.target.value = '';
     }
   }, [token, onUpdated]);
+
+  const handleRetryExtraction = useCallback(async (docId: string) => {
+    setRetryingDoc(docId);
+    try {
+      await retryExtraction(token, docId);
+      onUpdated?.();
+    } catch (err: any) {
+      alert(err.message || 'Retry failed');
+    } finally {
+      setRetryingDoc(null);
+    }
+  }, [token, onUpdated]);
+
+  // Group documents by category, sorted by event_date (most recent first)
+  const allDocs = data.documents || [];
+  const groupedDocs: Record<string, DocumentItem[]> = {};
+  for (const cat of DOC_CATEGORIES) groupedDocs[cat] = [];
+  groupedDocs['Other'] = [];
+  for (const doc of allDocs) {
+    const cat = inferDocCategory(doc);
+    (groupedDocs[cat] || groupedDocs['Other']).push(doc);
+  }
+  // Sort each category by event_date descending (fallback to uploaded_at)
+  for (const cat of Object.keys(groupedDocs)) {
+    groupedDocs[cat].sort((a, b) => {
+      const da = a.event_date || a.uploaded_at || '';
+      const db2 = b.event_date || b.uploaded_at || '';
+      return db2.localeCompare(da);
+    });
+  }
+  const activeDocCategories = [...DOC_CATEGORIES, 'Other' as const].filter(c => groupedDocs[c]?.length > 0);
 
   const contacts = data.contacts || [];
   const hs = data.health_score;
@@ -492,28 +561,67 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
       <CollapsibleCard
         icon="📁"
         title="Uploaded Documents"
-        subtitle={`${(data.documents || []).length} files`}
+        subtitle={`${allDocs.length} files`}
       >
-        <div className="p-4 space-y-3">
-          {(data.documents && data.documents.length > 0) ? (
-            data.documents.map((doc, i) => (
-              <div key={doc.id || i} className="flex items-center justify-between py-2 border-b border-gray-50 last:border-0">
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-gray-900 truncate">{doc.document_name}</p>
-                  <p className="text-[11px] text-gray-500">
-                    {doc.document_category || 'Uncategorized'} · {formatApiDate(doc.uploaded_at)}
-                  </p>
+        <div className="p-4 space-y-4">
+          {allDocs.length > 0 ? (
+            activeDocCategories.map(cat => {
+              const catStyle = DOC_CATEGORY_COLORS[cat] || { color: '#8E8E93', bg: '#F2F2F7' };
+              const catIcon = DOC_CATEGORY_ICONS[cat] || '📄';
+              return (
+                <div key={cat}>
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-sm">{catIcon}</span>
+                    <span className="text-xs font-bold" style={{ color: catStyle.color }}>{cat}s</span>
+                    <span className="text-[10px] text-gray-400">({groupedDocs[cat].length})</span>
+                  </div>
+                  <div className="space-y-2">
+                    {groupedDocs[cat].map(doc => (
+                      <div
+                        key={doc.id}
+                        className="bg-gray-50 rounded-xl p-3 border border-gray-100"
+                        style={{ borderLeftWidth: 3, borderLeftColor: catStyle.color }}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <button
+                            onClick={() => setViewingDoc(doc)}
+                            className="min-w-0 text-left flex-1"
+                          >
+                            <p className="text-sm font-medium text-gray-900 truncate hover:text-brand transition-colors">
+                              {doc.mime_type === 'application/pdf' ? '📄' : '🖼️'} {doc.document_name || 'Uploaded Document'}
+                            </p>
+                            <p className="text-[11px] text-gray-500 mt-0.5">
+                              {doc.event_date ? formatApiDate(doc.event_date) : (doc.uploaded_at ? formatApiDate(doc.uploaded_at) : 'No date')}
+                              {doc.doctor_name && ` · Dr. ${doc.doctor_name}`}
+                            </p>
+                          </button>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full"
+                              style={{
+                                color: doc.extraction_status === 'success' ? '#34C759' : doc.extraction_status === 'pending' ? '#FF9500' : '#FF3B30',
+                                backgroundColor: doc.extraction_status === 'success' ? '#F0FFF4' : doc.extraction_status === 'pending' ? '#FFF6ED' : '#FFF0F0',
+                              }}
+                            >
+                              {doc.extraction_status === 'success' ? '✓' : doc.extraction_status === 'pending' ? '...' : '✗'}
+                            </span>
+                            {doc.extraction_status === 'failed' && (
+                              <button
+                                onClick={() => handleRetryExtraction(doc.id)}
+                                disabled={retryingDoc === doc.id}
+                                className="text-[10px] font-semibold px-2 py-0.5 rounded-full text-white disabled:opacity-50"
+                                style={{ backgroundColor: '#FF3B30' }}
+                              >
+                                {retryingDoc === doc.id ? '...' : 'Retry'}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full"
-                  style={{
-                    color: doc.extraction_status === 'success' ? '#34C759' : doc.extraction_status === 'pending' ? '#FF9500' : '#FF3B30',
-                    backgroundColor: doc.extraction_status === 'success' ? '#F0FFF4' : doc.extraction_status === 'pending' ? '#FFF6ED' : '#FFF0F0',
-                  }}
-                >
-                  {doc.extraction_status === 'success' ? 'Parsed ✓' : doc.extraction_status === 'pending' ? 'Processing' : 'Failed'}
-                </span>
-              </div>
-            ))
+              );
+            })
           ) : (
             <div className="text-center py-4">
               <p className="text-xs text-gray-500">No documents uploaded yet.</p>
@@ -532,6 +640,46 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
           </label>
         </div>
       </CollapsibleCard>
+
+      {/* Document Viewer Modal */}
+      {viewingDoc && (
+        <div
+          className="fixed inset-0 z-[100] bg-black/75 backdrop-blur-sm flex flex-col"
+          onClick={() => setViewingDoc(null)}
+        >
+          <div
+            className="flex-1 flex flex-col bg-white mx-auto w-full max-w-[430px] safe-area-inset"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b px-4 py-3 shrink-0">
+              <p className="text-sm font-semibold text-gray-900 truncate pr-3">
+                {viewingDoc.document_name || 'Document'}
+              </p>
+              <button
+                onClick={() => setViewingDoc(null)}
+                className="text-xs font-semibold px-3 py-1.5 rounded-full border border-gray-200 text-gray-600 hover:bg-gray-50"
+              >
+                Close
+              </button>
+            </div>
+            <div className="flex-1 min-h-0 overflow-auto p-2">
+              {viewingDoc.mime_type === 'application/pdf' ? (
+                <iframe
+                  src={`${API_BASE}/dashboard/${token}/document/${viewingDoc.id}`}
+                  className="w-full h-full min-h-[75vh] rounded border"
+                  title={viewingDoc.document_name || 'Document'}
+                />
+              ) : (
+                <img
+                  src={`${API_BASE}/dashboard/${token}/document/${viewingDoc.id}`}
+                  alt={viewingDoc.document_name || 'Document'}
+                  className="w-full max-h-[82vh] rounded border object-contain"
+                />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Care Contacts — wired to real API */}
       <CollapsibleCard icon="📞" title="Care Contacts" subtitle={`${contacts.length} saved`}>

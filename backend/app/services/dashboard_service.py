@@ -406,6 +406,7 @@ def get_dashboard_data(db: Session, token: str) -> dict:
             "mime_type": doc.mime_type,
             "extraction_status": doc.extraction_status,
             "uploaded_at": str(doc.created_at) if doc.created_at else None,
+            "event_date": str(doc.event_date) if doc.event_date else None,
         })
 
     # --- Diagnostic values (blood/urine) for dashboard ---
