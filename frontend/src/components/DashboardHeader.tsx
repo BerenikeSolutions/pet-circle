@@ -81,7 +81,7 @@ export default function DashboardHeader({ pet, owner, overdueCount, onCartClick,
           <button
             onClick={() => onActionsClick ? onActionsClick() : onCartClick()}
             className="w-full flex items-center justify-between rounded-xl px-4 py-3 text-white"
-            style={{ border: '1px solid rgba(255,255,255,0.25)', background: 'transparent' }}
+            style={{ border: '2.5px solid rgba(255,255,255,0.5)', background: 'transparent' }}
           >
             <div className="flex items-center gap-2.5">
               <div className="relative">

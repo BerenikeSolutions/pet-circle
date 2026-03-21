@@ -21,7 +21,8 @@ Conversation flow:
    14. Neutered or "skip" → state=awaiting_packaged_food → ask packaged food
   14a. Packaged food or "skip" → state=awaiting_homemade_food → ask homemade food
   14b. Homemade food or "skip" → state=awaiting_supplements → ask supplements
-  14c. Supplements or "skip" → seed preventive records, generate token,
+  14c. Supplements or "skip" → state=awaiting_grooming → ask grooming preferences
+  14d. Grooming or "skip" → seed preventive records, generate token,
        state=awaiting_documents → prompt upload window (5 min)
    15. Upload docs / "skip" / timeout → state=complete → send dashboard link
 
@@ -65,6 +66,7 @@ from app.utils.file_reader import encode_image_base64
 from app.utils.retry import retry_openai_call
 from app.services.preventive_seeder import seed_preventive_master
 from app.services.diet_service import add_diet_item
+from app.services.hygiene_service import add_hygiene_item
 
 
 logger = logging.getLogger(__name__)
@@ -307,6 +309,9 @@ async def handle_onboarding_step(
     elif state == "awaiting_supplements":
         await _step_supplements(db, user, text, send_fn)
 
+    elif state == "awaiting_grooming":
+        await _step_grooming(db, user, text, send_fn)
+
     elif state == "awaiting_documents":
         await _step_awaiting_documents(db, user, text_lower, send_fn)
 
@@ -366,7 +371,7 @@ async def _send_onboarding_resume(db, user, state, send_fn):
             progress_lines.append(f"Neutered: {'Yes' if pet.neutered else 'No'}")
 
         # Show diet progress for states past the diet collection steps.
-        if state in ("awaiting_homemade_food", "awaiting_supplements", "awaiting_documents", "complete"):
+        if state in ("awaiting_homemade_food", "awaiting_supplements", "awaiting_grooming", "awaiting_documents", "complete"):
             from app.models.diet_item import DietItem
             diet_count = db.query(DietItem).filter(DietItem.pet_id == pet.id).count()
             if diet_count > 0:
@@ -429,6 +434,11 @@ def _get_question_for_state(state: str, pet=None) -> str:
         ),
         "awaiting_supplements": (
             f"Any supplements or medications {pet_name} takes regularly? (or type *skip*)"
+        ),
+        "awaiting_grooming": (
+            f"What grooming does {pet_name} get? "
+            f"E.g., haircut, bath, nail trim, ear cleaning. "
+            f"Include how often if you know. (or type *skip*)"
         ),
         "awaiting_documents": (
             f"Upload {pet_name}'s health records — vaccination cards, "
@@ -1254,6 +1264,58 @@ async def _parse_diet_input(text: str) -> list[tuple[str, str]]:
         return [(text.strip(), "")]
 
 
+async def _parse_grooming_input(text: str) -> list[tuple[str, int, str]]:
+    """
+    Use GPT to extract grooming items from free-text input.
+
+    Returns list of (name, freq, unit) tuples for periodic grooming items.
+    """
+    client = _get_openai_onboarding_client()
+    prompt = (
+        "Extract grooming activities from the user's message about their pet. "
+        "Return a JSON object with an 'items' array. Each item has: "
+        "'name' (activity name, e.g. 'Haircut', 'Bath', 'Nail Trim', 'Ear Cleaning'), "
+        "'freq' (integer frequency, default 1), "
+        "'unit' (one of 'day', 'week', 'month', 'year', default 'month'). "
+        "If the user mentions 'every 2 weeks', use freq=2, unit='week'. "
+        "If no frequency is given, use reasonable defaults: bath=2 weeks, haircut=2 months, "
+        "nail trim=1 month, ear cleaning=2 weeks. "
+        "Return ONLY valid JSON, no markdown.\n\n"
+        f"User message: {text}"
+    )
+
+    try:
+        response = await retry_openai_call(
+            client.chat.completions.create,
+            model="gpt-4.1-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=500,
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+            if raw.endswith("```"):
+                raw = raw[:-3]
+            raw = raw.strip()
+        data = json.loads(raw)
+        items = data.get("items", [])
+        result = []
+        for item in items:
+            name = item.get("name", "").strip()
+            if not name:
+                continue
+            freq = int(item.get("freq", 1))
+            unit = item.get("unit", "month")
+            if unit not in ("day", "week", "month", "year"):
+                unit = "month"
+            result.append((name, max(1, freq), unit))
+        return result
+    except Exception as e:
+        logger.warning("Grooming GPT parse failed, using raw text: %s", str(e))
+        return [(text.strip(), 1, "month")]
+
+
 async def _step_packaged_food(db, user, text, send_fn):
     """Collect packaged food items, then ask about homemade food."""
     pet = _get_pending_pet(db, user.id)
@@ -1312,7 +1374,7 @@ async def _step_homemade_food(db, user, text, send_fn):
 
 
 async def _step_supplements(db, user, text, send_fn):
-    """Collect supplements, seed preventive records, generate token, enter upload window."""
+    """Collect supplements, then ask about grooming preferences."""
     pet = _get_pending_pet(db, user.id)
     if not pet:
         user.onboarding_state = "awaiting_pet_name"
@@ -1329,6 +1391,36 @@ async def _step_supplements(db, user, text, send_fn):
                 await add_diet_item(db, pet.id, "supplement", label, detail or None)
             except Exception as e:
                 logger.error("Failed to save supplement item for pet %s: %s", str(pet.id), str(e))
+
+    user.onboarding_state = "awaiting_grooming"
+    db.commit()
+
+    await send_fn(
+        db, mobile,
+        f"What grooming does {pet.name} get? "
+        f"E.g., haircut, bath, nail trim, ear cleaning. "
+        f"Include how often if you know. (or type *skip*)",
+    )
+
+
+async def _step_grooming(db, user, text, send_fn):
+    """Collect grooming preferences, seed preventive records, generate token, enter upload window."""
+    pet = _get_pending_pet(db, user.id)
+    if not pet:
+        user.onboarding_state = "awaiting_pet_name"
+        db.commit()
+        await send_fn(db, user._plaintext_mobile, "Something went wrong. Please send your pet's name again.")
+        return
+
+    mobile = user._plaintext_mobile
+
+    if text.strip().lower() not in _SKIP_INPUTS:
+        grooming_items = await _parse_grooming_input(text)
+        for name, freq, unit in grooming_items:
+            try:
+                await add_hygiene_item(db, pet.id, name, "✂️", "periodic", freq, unit)
+            except Exception as e:
+                logger.error("Failed to save grooming item for pet %s: %s", str(pet.id), str(e))
 
     # --- Seed preventive records ---
     record_count = 0

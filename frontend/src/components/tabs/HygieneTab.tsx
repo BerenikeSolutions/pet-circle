@@ -340,13 +340,6 @@ export default function HygieneTab({ data, token, onUpdated, onCartClick }: Hygi
             setAddSheet(true);
           }} />
         </div>
-        <button
-          onClick={() => onCartClick('c7')}
-          className="w-full mt-3 py-2.5 rounded-xl text-white text-sm font-semibold"
-          style={{ background: 'var(--brand-gradient)' }}
-        >
-          Book Now
-        </button>
       </div>
 
       {/* DateEditSheet */}

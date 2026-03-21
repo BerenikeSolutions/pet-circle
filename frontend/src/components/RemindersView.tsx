@@ -236,25 +236,6 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
           </div>
         </div>
 
-        {/* Engine Rules */}
-        <div className="bg-gray-50 rounded-2xl p-4">
-          <p className="text-xs font-semibold text-gray-600 mb-2">Engine Rules</p>
-          <div className="space-y-1.5">
-            {[
-              ['Daily cron', '8:00 AM IST via GitHub Actions'],
-              ['Deduplication', 'Enforced at DB level'],
-              ['Rate limit', 'Max 20 msgs/min per number'],
-              ['Retry', 'Single retry on API failure'],
-              ['Condition meds', 'Separate refill series per medication'],
-            ].map(([label, val], i) => (
-              <div key={i} className="flex justify-between text-[11px]">
-                <span className="text-gray-500">{label}</span>
-                <span className="text-gray-700 font-medium">{val}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-
         {/* Bottom padding */}
         <div className="h-8" />
       </div>

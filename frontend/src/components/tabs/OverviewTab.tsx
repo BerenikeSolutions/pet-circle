@@ -11,7 +11,6 @@ import {
   filterByKeywords, countOverdue, formatApiDate, getStatusForRecord,
   VACCINE_KW, DEWORMING_KW, FLEA_TICK_KW, CHECKUP_KW,
   WA_REMINDER_COLORS, WA_REMINDER_BG, WA_REMINDER_LABELS,
-  REMINDER_EXPLAINER,
   NUDGE_CATEGORY_ICONS, NUDGE_PRIORITY_COLORS,
 } from '@/lib/dashboard-utils';
 
@@ -377,9 +376,15 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
               <p className="text-xs text-amber-700">
                 {nutritionData.calories.actual}/{nutritionData.calories.target} kcal/day — {nutritionData.overall_label.toLowerCase()}.
               </p>
-              {(nutritionData as any).diet_summary && (
-                <p className="text-xs text-amber-600 mt-1">{(nutritionData as any).diet_summary}</p>
-              )}
+              <p className="text-xs text-amber-600 mt-1">
+                {(nutritionData as any).diet_summary || (
+                  nutritionData.overall_label === 'Good' || nutritionData.overall_label === 'Excellent'
+                    ? 'Calorie intake matches daily energy needs, supporting healthy weight maintenance and sustained energy levels.'
+                    : nutritionData.calories.actual < nutritionData.calories.target
+                      ? 'Calorie intake is below the recommended level, which may lead to energy deficiency, muscle loss, and weakened immunity over time.'
+                      : 'Calorie intake exceeds the recommended level, which can contribute to weight gain, joint stress, and increased health risks.'
+                )}
+              </p>
             </div>
             {nutritionData.improvements.length > 0 && (
               <div className="rounded-xl p-3" style={{ backgroundColor: '#F0F6FF', borderLeft: '3px solid #007AFF' }}>
@@ -426,16 +431,6 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
         headerColor="white"
       >
         <div className="p-4 space-y-3">
-          {/* Explainer */}
-          <div className="bg-gray-50 rounded-xl p-3 space-y-2">
-            <p className="text-xs font-semibold text-gray-700">How reminders work:</p>
-            {REMINDER_EXPLAINER.map(([step, desc], i) => (
-              <div key={i} className="flex gap-2 text-[11px]">
-                <span className="font-semibold text-gray-600 shrink-0">{step}:</span>
-                <span className="text-gray-500">{desc}</span>
-              </div>
-            ))}
-          </div>
           {/* Reminder Items */}
           {apiReminders.length > 0 ? (
             apiReminders.map((rem: any, i: number) => {

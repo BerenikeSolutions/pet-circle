@@ -327,9 +327,15 @@ export default function NutritionTab({ data, token, onCartClick, onUpdated }: Nu
             <p className="text-xs text-amber-700">
               {nd.calories.actual}/{nd.calories.target} kcal/day — {nd.calories.status === 'adequate' ? 'on target' : nd.calories.status === 'low' ? 'slightly below target' : 'below target'}.
             </p>
-            {(nd as any).diet_summary && (
-              <p className="text-xs text-amber-600 mt-1">{(nd as any).diet_summary}</p>
-            )}
+            <p className="text-xs text-amber-600 mt-1">
+              {(nd as any).diet_summary || (
+                nd.calories.status === 'adequate'
+                  ? 'Calorie intake matches daily energy needs, supporting healthy weight maintenance and sustained energy levels.'
+                  : nd.calories.status === 'low'
+                    ? 'Calorie intake is below the recommended level, which may lead to energy deficiency, muscle loss, and weakened immunity over time.'
+                    : 'Calorie intake exceeds the recommended level, which can contribute to weight gain, joint stress, and increased health risks.'
+              )}
+            </p>
           </div>
           {nd.improvements.length > 0 && (
             <div className="rounded-xl p-3" style={{ backgroundColor: '#F0F6FF', borderLeft: '3px solid #007AFF' }}>

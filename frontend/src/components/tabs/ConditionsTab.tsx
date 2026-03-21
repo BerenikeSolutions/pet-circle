@@ -23,7 +23,6 @@ import {
   deleteConditionMonitoring,
 } from '@/lib/api';
 import StatusBadge from '@/components/ui/StatusBadge';
-import CollapsibleCard from '@/components/ui/CollapsibleCard';
 import ReminderBar from '@/components/ui/ReminderBar';
 import AddRow from '@/components/ui/AddRow';
 import BottomSheet from '@/components/ui/BottomSheet';
@@ -118,18 +117,8 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
   const [monForm, setMonForm] = useState({ name: '', frequency: '' });
 
   const conditions = data.conditions || [];
-  const diagnostics = data.diagnostic_results || [];
   const petName = data.pet?.name || 'Pet';
   const hasConditions = conditions.length > 0;
-  const hasDiagnostics = diagnostics.length > 0;
-
-  // Group diagnostics by test_type
-  const paramsByType = diagnostics.reduce((acc, d) => {
-    const key = d.test_type || 'Other';
-    if (!acc[key]) acc[key] = [];
-    acc[key].push(d);
-    return acc;
-  }, {} as Record<string, typeof diagnostics>);
 
   // Load timeline, recommendations, and vet visit from API
   const loadSupplementary = useCallback(async () => {
@@ -264,41 +253,6 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
             onCartClick={onCartClick}
           />
         ))
-      ) : hasDiagnostics ? (
-        Object.entries(paramsByType).map(([type, params]) => (
-          <div key={type} className="bg-white rounded-2xl shadow-sm p-4 space-y-3" style={{ border: '1.5px solid #007AFF' }}>
-            <div className="flex items-center justify-between">
-              <h3 className="font-semibold text-sm flex items-center gap-2">
-                <span>🏥</span> {type.charAt(0).toUpperCase() + type.slice(1)} Results
-              </h3>
-              <StatusBadge status="managed" />
-            </div>
-            <div className="space-y-2">
-              {params.map((p, i) => {
-                const isNormal = p.status_flag === 'normal';
-                return (
-                  <div key={i} className="flex items-center justify-between py-1.5 border-b border-gray-50 last:border-0">
-                    <div>
-                      <p className="text-sm text-gray-800">{p.parameter_name}</p>
-                      <p className="text-[11px] text-gray-500">
-                        {p.value_numeric ?? p.value_text} {p.unit} · Ref: {p.reference_range || '—'}
-                      </p>
-                    </div>
-                    <span
-                      className="text-[10px] font-bold px-2 py-0.5 rounded-full"
-                      style={{
-                        color: isNormal ? '#34C759' : '#FF3B30',
-                        backgroundColor: isNormal ? '#F0FFF4' : '#FFF0F0',
-                      }}
-                    >
-                      {p.status_flag || 'Unknown'}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        ))
       ) : (
         <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 text-center">
           <span className="text-4xl mb-3 block">🎉</span>
@@ -309,42 +263,6 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
         </div>
       )}
 
-      {/* Diagnostic Results (shown alongside conditions when both exist) */}
-      {hasConditions && hasDiagnostics && (
-        <CollapsibleCard icon="🔬" title="Diagnostic Results" subtitle="Lab values and reports">
-          <div className="p-4 space-y-3">
-            {Object.entries(paramsByType).map(([type, params]) => (
-              <div key={type}>
-                <p className="text-[10px] font-bold text-gray-400 uppercase mb-2">{type}</p>
-                <div className="space-y-1">
-                  {params.map((p, i) => {
-                    const isNormal = p.status_flag === 'normal';
-                    return (
-                      <div key={i} className="flex items-center justify-between py-1 border-b border-gray-50 last:border-0">
-                        <div>
-                          <p className="text-sm text-gray-800">{p.parameter_name}</p>
-                          <p className="text-[11px] text-gray-500">
-                            {p.value_numeric ?? p.value_text} {p.unit} · Ref: {p.reference_range || '—'}
-                          </p>
-                        </div>
-                        <span
-                          className="text-[10px] font-bold px-2 py-0.5 rounded-full"
-                          style={{
-                            color: isNormal ? '#34C759' : '#FF3B30',
-                            backgroundColor: isNormal ? '#F0FFF4' : '#FFF0F0',
-                          }}
-                        >
-                          {p.status_flag || 'Unknown'}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            ))}
-          </div>
-        </CollapsibleCard>
-      )}
 
       {/* Add Another Condition — styled button matching JSX */}
       <button
