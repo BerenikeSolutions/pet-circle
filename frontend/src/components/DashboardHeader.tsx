@@ -92,7 +92,7 @@ export default function DashboardHeader({ pet, owner, overdueCount, onCartClick,
               </div>
               <div>
                 <span className="text-sm font-medium block">Actions Due</span>
-                <span className="text-[10px] text-white/60">Medicines · Vet visits · Supplements · Grooming</span>
+                <span className="text-[10px] text-white/60">Medicines · Supplements</span>
               </div>
             </div>
             <span className="text-sm font-semibold shrink-0">Order →</span>
