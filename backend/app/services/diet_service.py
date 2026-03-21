@@ -3,9 +3,11 @@ PetCircle Phase 1 — Diet Service
 
 CRUD operations for pet diet items (packaged food, homemade food, supplements).
 Auto-classifies food type based on brand keyword matching.
+Parses free-text nutrition detail into standardised format.
 """
 
 import logging
+import re
 from sqlalchemy.orm import Session
 
 from app.models.diet_item import DietItem
@@ -18,6 +20,210 @@ PACKAGED_KW = [
     "wet food", "can", "pouch", "whiskas", "iams", "eukanuba",
     "orijen", "acana", "farmina", "science diet", "pro plan",
 ]
+
+# ── Frequency word → multiplier and period ──────────────────────────
+_FREQ_WORDS: dict[str, tuple[int, str]] = {
+    "daily": (1, "day"),
+    "everyday": (1, "day"),
+    "once a day": (1, "day"),
+    "once daily": (1, "day"),
+    "twice a day": (2, "day"),
+    "twice daily": (2, "day"),
+    "two times a day": (2, "day"),
+    "two times per day": (2, "day"),
+    "two times daily": (2, "day"),
+    "thrice a day": (3, "day"),
+    "thrice daily": (3, "day"),
+    "three times a day": (3, "day"),
+    "three times per day": (3, "day"),
+    "three times daily": (3, "day"),
+    "once a week": (1, "week"),
+    "once weekly": (1, "week"),
+    "weekly": (1, "week"),
+    "twice a week": (2, "week"),
+    "twice weekly": (2, "week"),
+    "two times a week": (2, "week"),
+    "two times per week": (2, "week"),
+    "two times weekly": (2, "week"),
+    "thrice a week": (3, "week"),
+    "thrice weekly": (3, "week"),
+    "three times a week": (3, "week"),
+    "three times per week": (3, "week"),
+    "three times weekly": (3, "week"),
+    "four times a week": (4, "week"),
+    "five times a week": (5, "week"),
+    "once a month": (1, "month"),
+    "monthly": (1, "month"),
+    "twice a month": (2, "month"),
+    "alternate days": (1, "alternate day"),
+    "every other day": (1, "alternate day"),
+}
+
+# Regex: "Nx/day", "2x/week", "3x daily" etc.
+_RE_NX = re.compile(
+    r'(\d+)\s*(?:x|times)\s*/?\s*(day|week|month|daily|weekly|monthly)',
+    re.IGNORECASE,
+)
+
+# Regex: quantity like "280g", "100 ml", "50 gm", "2 cups", "1 tablet", "1 scoop"
+_RE_QTY = re.compile(
+    r'(\d+(?:\.\d+)?)\s*(g|gm|gms|grams?|kg|ml|l|ltr|cups?|tablets?|tabs?|scoops?|tsp|tbsp|pieces?|pcs?)\b',
+    re.IGNORECASE,
+)
+
+# Regex: "qty unit x N/period" — already formatted (pass through)
+_RE_ALREADY_FORMATTED = re.compile(
+    r'(\d+(?:\.\d+)?)\s*(g|kg|ml|L|cups?|tablets?|scoops?|tsp|tbsp)\s*x\s*\d+\s*/\s*(day|week|month)',
+    re.IGNORECASE,
+)
+
+# Regex: "qty_unit * N" or "qty_unit x N" (with unit before multiplier) e.g. "280g*2", "100ml x 3"
+_RE_QTY_MULT = re.compile(
+    r'(\d+(?:\.\d+)?)\s*(g|gm|gms|grams?|kg|ml|l|ltr|cups?|tablets?|tabs?|scoops?|tsp|tbsp|pieces?|pcs?)'
+    r'\s*[*×]\s*(\d+)',
+    re.IGNORECASE,
+)
+
+# Regex: bare multiplier like "280*2" (no unit — default to grams)
+_RE_BARE_MULT = re.compile(r'(\d+(?:\.\d+)?)\s*[*×]\s*(\d+)')
+
+# Regex: "Nx/day", "2x/week", "3x daily" etc.
+_RE_NX = re.compile(
+    r'(\d+)\s*(?:x|times)\s*/?\s*(day|week|month|daily|weekly|monthly)',
+    re.IGNORECASE,
+)
+
+# Normalise unit abbreviations
+_UNIT_MAP: dict[str, str] = {
+    "g": "g", "gm": "g", "gms": "g", "gram": "g", "grams": "g",
+    "kg": "kg", "ml": "ml", "l": "L", "ltr": "L",
+    "cup": "cup", "cups": "cups",
+    "tablet": "tablet", "tablets": "tablets", "tab": "tablet", "tabs": "tablets",
+    "scoop": "scoop", "scoops": "scoops",
+    "tsp": "tsp", "tbsp": "tbsp",
+    "piece": "pc", "pieces": "pcs", "pc": "pc", "pcs": "pcs",
+}
+
+# Period word normalisation for "Nx/daily" → "Nx/day"
+_PERIOD_NORM: dict[str, str] = {
+    "daily": "day", "weekly": "week", "monthly": "month",
+    "day": "day", "week": "week", "month": "month",
+}
+
+
+def _fmt_unit(raw_unit: str) -> str:
+    """Normalise a unit string."""
+    return _UNIT_MAP.get(raw_unit.lower(), raw_unit)
+
+
+def _fmt_qty(amount: str, unit: str) -> str:
+    """Format quantity: '100g' (compact) or '1 tablet' (with space)."""
+    if unit in ("g", "kg", "ml", "L"):
+        return f"{amount}{unit}"
+    return f"{amount} {unit}"
+
+
+def _remove_span(text: str, start: int, end: int) -> str:
+    """Remove a span from text."""
+    return text[:start] + text[end:]
+
+
+def _clean_remainder(text: str) -> str:
+    """Strip leading/trailing separators and whitespace."""
+    return re.sub(r'^[\s\-–—.,/]+|[\s\-–—.,/]+$', '', text).strip()
+
+
+def parse_nutrition_detail(raw: str | None) -> str | None:
+    """
+    Parse free-text nutrition detail into a standardised short format.
+
+    Examples:
+        "280*2 - Dry kibble"  → "280g x 2/day . Dry kibble"
+        "100g thrice a week"  → "100g x 3/week"
+        "50g daily"           → "50g . Daily"
+        "two times per week"  → "2x/week"
+        "1 tablet daily"      → "1 tablet . Daily"
+        "280g x 2/day"        → "280g x 2/day" (pass-through)
+
+    Returns the normalised string, or the original if no pattern matches.
+    """
+    if not raw or not raw.strip():
+        return None
+
+    text = raw.strip()
+
+    # Pass-through: already in "QTY x N/period" format
+    if _RE_ALREADY_FORMATTED.search(text):
+        remainder = _clean_remainder(_RE_ALREADY_FORMATTED.sub('', text))
+        formatted = _RE_ALREADY_FORMATTED.search(text).group(0)  # type: ignore[union-attr]
+        if remainder:
+            return f"{formatted} . {remainder}"
+        return formatted
+
+    qty_str: str | None = None
+    freq_str: str | None = None
+    working = text
+
+    # 1. "280g*2" or "100ml×3" — quantity with unit then multiplier
+    qm = _RE_QTY_MULT.search(working)
+    if qm:
+        unit = _fmt_unit(qm.group(2))
+        qty_str = f"{qm.group(1)}{unit} x {qm.group(3)}/day"
+        working = _remove_span(working, qm.start(), qm.end())
+    else:
+        # 2. "280*2" — bare number multiplier (assume grams)
+        bm = _RE_BARE_MULT.search(working)
+        if bm:
+            qty_str = f"{bm.group(1)}g x {bm.group(2)}/day"
+            working = _remove_span(working, bm.start(), bm.end())
+
+    # 3. Extract standalone quantity if not already captured via multiplier
+    if not qty_str:
+        qm2 = _RE_QTY.search(working)
+        if qm2:
+            unit = _fmt_unit(qm2.group(2))
+            qty_str = _fmt_qty(qm2.group(1), unit)
+            working = _remove_span(working, qm2.start(), qm2.end())
+
+    # 4. Extract frequency — word phrases first (longest match), then Nx patterns
+    lower_working = working.lower()
+    for phrase, (count, period) in sorted(_FREQ_WORDS.items(), key=lambda x: -len(x[0])):
+        idx = lower_working.find(phrase)
+        if idx == -1:
+            continue
+        if period == "alternate day":
+            freq_str = "Alternate days"
+        elif count == 1:
+            freq_str = period.capitalize()
+        else:
+            freq_str = f"{count}x/{period}"
+        working = _remove_span(working, idx, idx + len(phrase))
+        break
+
+    if not freq_str:
+        nx = _RE_NX.search(working)
+        if nx:
+            period = _PERIOD_NORM.get(nx.group(2).lower(), nx.group(2).lower())
+            freq_str = f"{nx.group(1)}x/{period}"
+            working = _remove_span(working, nx.start(), nx.end())
+
+    # 5. Collect remaining text
+    remainder = _clean_remainder(working)
+
+    # 6. Build result: "qty_part . freq_part . remainder"
+    parts: list[str] = []
+    if qty_str:
+        parts.append(qty_str)
+    # Add freq only if qty doesn't already contain a "/period" (from multiplier)
+    if freq_str and not (qty_str and "/" in qty_str):
+        parts.append(freq_str)
+    if remainder:
+        parts.append(remainder)
+
+    if not parts:
+        return text
+
+    return " . ".join(parts)
 
 
 def classify_food(label: str, food_type: str) -> tuple[str, str]:
@@ -65,7 +271,7 @@ async def add_diet_item(db: Session, pet_id, food_type: str, label: str, detail:
         type=classified_type,
         icon=icon or default_icon,
         label=label,
-        detail=detail,
+        detail=parse_nutrition_detail(detail),
     )
     db.add(item)
     db.commit()
@@ -92,7 +298,7 @@ async def update_diet_item(db: Session, item_id, pet_id, label: str, detail: str
         raise ValueError("Diet item not found")
 
     item.label = label
-    item.detail = detail
+    item.detail = parse_nutrition_detail(detail)
     # Re-classify based on new label
     new_type, new_icon = classify_food(label, item.type)
     item.type = new_type

@@ -1,8 +1,8 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import type { DashboardData, ContactItem, DocumentItem, NutritionAnalysis, NudgeItem } from '@/lib/api';
-import { addContact, updateContact, deleteContact, getNutritionAnalysis, getNudges, dismissNudge, uploadDocument, retryExtraction } from '@/lib/api';
+import type { DashboardData, ContactItem, DocumentItem, NutritionAnalysis, NudgeItem, BackendDietItem } from '@/lib/api';
+import { addContact, updateContact, deleteContact, getNutritionAnalysis, getNudges, dismissNudge, uploadDocument, retryExtraction, getDietItems } from '@/lib/api';
 import StatusBadge from '@/components/ui/StatusBadge';
 import CollapsibleCard from '@/components/ui/CollapsibleCard';
 import AddRow from '@/components/ui/AddRow';
@@ -86,15 +86,17 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
   const [contactForm, setContactForm] = useState({ type: 'Vet', name: '', clinic: '', phone: '', note: '' });
   const [savingContact, setSavingContact] = useState(false);
   const [nutritionData, setNutritionData] = useState<NutritionAnalysis | null>(null);
+  const [dietItems, setDietItems] = useState<BackendDietItem[]>([]);
   const [nudges, setNudges] = useState<NudgeItem[]>([]);
   const [dismissingNudge, setDismissingNudge] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [viewingDoc, setViewingDoc] = useState<DocumentItem | null>(null);
   const [retryingDoc, setRetryingDoc] = useState<string | null>(null);
 
-  // Fetch nutrition analysis and nudges on mount
+  // Fetch nutrition analysis, diet items, and nudges on mount
   useEffect(() => {
     getNutritionAnalysis(token).then(setNutritionData).catch(() => {});
+    getDietItems(token).then(setDietItems).catch(() => {});
     getNudges(token).then(setNudges).catch(() => {});
   }, [token]);
 
@@ -455,6 +457,24 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
                 )}
               </p>
             </div>
+            {dietItems.length > 0 && (
+              <div className="rounded-xl p-3" style={{ backgroundColor: '#F7F7F8', borderLeft: '3px solid #8E8E93' }}>
+                <p className="text-xs font-semibold text-gray-800 mb-2">Current Diet</p>
+                <div className="space-y-1.5">
+                  {dietItems.map((item) => (
+                    <div key={item.id} className="flex items-start gap-2 text-xs">
+                      <span className="shrink-0">{item.icon}</span>
+                      <div className="min-w-0">
+                        <span className="font-medium text-gray-800">{item.label}</span>
+                        {item.detail && (
+                          <span className="text-gray-500 ml-1">— {item.detail}</span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             {nutritionData.improvements.length > 0 && (
               <div className="rounded-xl p-3" style={{ backgroundColor: '#F0F6FF', borderLeft: '3px solid #007AFF' }}>
                 <p className="text-xs font-semibold text-blue-800 mb-1">What to Improve</p>

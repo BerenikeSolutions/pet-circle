@@ -107,3 +107,6 @@ class User(Base):
     # Relationship to orders — one user can have many orders.
     # foreign_keys specified to avoid ambiguity with active_order_id FK.
     orders = relationship("Order", back_populates="user", foreign_keys="Order.user_id")
+
+    # Custom preventive items added by this user (supplements, vaccines, etc.).
+    custom_preventive_items = relationship("CustomPreventiveItem", back_populates="user")

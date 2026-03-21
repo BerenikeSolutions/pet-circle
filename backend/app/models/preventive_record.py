@@ -42,8 +42,18 @@ class PreventiveRecord(Base):
     pet_id = Column(UUID(as_uuid=True), ForeignKey("pets.id", ondelete="CASCADE"), index=True)
 
     # Foreign key to preventive_master table.
-    # Links this record to a specific preventive item (e.g., Rabies Vaccine).
-    preventive_master_id = Column(UUID(as_uuid=True), ForeignKey("preventive_master.id"))
+    # Links this record to a standard preventive item (e.g., Rabies Vaccine).
+    # Nullable — NULL when this record references a custom_preventive_item instead.
+    preventive_master_id = Column(UUID(as_uuid=True), ForeignKey("preventive_master.id"), nullable=True)
+
+    # Foreign key to custom_preventive_items table.
+    # Links this record to a user-specific custom item (medicine, supplement, vaccine).
+    # Exactly one of preventive_master_id or custom_preventive_item_id must be set.
+    custom_preventive_item_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("custom_preventive_items.id", ondelete="CASCADE"),
+        nullable=True,
+    )
 
     # Date the preventive action was last performed.
     # Nullable for newly onboarded pets that have no prior records yet.
@@ -84,6 +94,10 @@ class PreventiveRecord(Base):
             "pet_id", "preventive_master_id", "last_done_date",
             name="uq_preventive_record_pet_item_date"
         ),
+        UniqueConstraint(
+            "pet_id", "custom_preventive_item_id", "last_done_date",
+            name="uq_preventive_record_pet_custom_item_date"
+        ),
         # Composite index for reminder engine queries filtering by pet + status.
         Index("ix_preventive_record_pet_status", "pet_id", "status"),
     )
@@ -93,8 +107,11 @@ class PreventiveRecord(Base):
     # Back-reference to the pet this record belongs to.
     pet = relationship("Pet", back_populates="preventive_records")
 
-    # Back-reference to the preventive master item.
+    # Back-reference to the preventive master item (standard items).
     preventive_master = relationship("PreventiveMaster", back_populates="preventive_records")
+
+    # Back-reference to a user-specific custom item.
+    custom_preventive_item = relationship("CustomPreventiveItem", back_populates="preventive_records")
 
     # One preventive record can have many reminders (one per next_due_date cycle).
     reminders = relationship("Reminder", back_populates="preventive_record")
