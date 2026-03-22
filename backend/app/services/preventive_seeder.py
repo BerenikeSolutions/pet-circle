@@ -66,11 +66,12 @@ SEED_DATA: list[dict] = [
         "reminder_before_days": 30,
         "overdue_after_days": 7,
     },
-    # --- Core Vaccine (Dogs only) ---
-    # Essential. Covers DHPP (Distemper, Hepatitis, Parvovirus, Parainfluenza).
-    # Annual recurrence. Reminder 30 days before, overdue after 7 days.
+    # --- DHPPi (Dogs only) ---
+    # Essential. Covers Distemper, Hepatitis, Parvovirus, Parainfluenza.
+    # Alternate names: 7-in-1 / 9-in-1 vaccination.
+    # Annual recurrence after completing puppy series. Reminder 30 days before, overdue after 7 days.
     {
-        "item_name": "Core Vaccine",
+        "item_name": "DHPPi",
         "category": "essential",
         "circle": "health",
         "species": "dog",
@@ -388,11 +389,25 @@ SEED_DATA: list[dict] = [
     # OPTIONAL VACCINES
     # =============================
 
-    # --- Bordetella (Dogs only) ---
-    # Optional vaccine for kennel cough. Annual recurrence (365 days).
+    # --- Kennel Cough / Nobivac KC (Dogs only) ---
+    # Optional vaccine covering Bordetella bronchiseptica + Parainfluenza.
+    # Brand: Nobivac KC. Annual recurrence (365 days).
     # Recommended for dogs that board, attend daycare, or visit dog parks.
     {
-        "item_name": "Bordetella",
+        "item_name": "Kennel Cough (Nobivac KC)",
+        "category": "complete",
+        "circle": "health",
+        "species": "dog",
+        "recurrence_days": 365,
+        "medicine_dependent": False,
+        "reminder_before_days": 30,
+        "overdue_after_days": 14,
+    },
+    # --- Canine Coronavirus / CCoV (Dogs only) ---
+    # Optional vaccine. Annual recurrence (365 days).
+    # Protects against canine enteric coronavirus causing gastroenteritis.
+    {
+        "item_name": "Canine Coronavirus (CCoV)",
         "category": "complete",
         "circle": "health",
         "species": "dog",
@@ -447,6 +462,60 @@ SEED_DATA: list[dict] = [
         "circle": "health",
         "species": "cat",
         "recurrence_days": 365,
+        "medicine_dependent": False,
+        "reminder_before_days": 30,
+        "overdue_after_days": 14,
+    },
+
+    # =============================
+    # PUPPY VACCINATION SERIES (Dogs only — Mandatory)
+    # =============================
+    # One-time doses given at specific ages during puppyhood.
+    # recurrence_days=36500 (100 years) marks these as effectively non-recurring.
+    # After completing the series, the annual DHPPi and Rabies Vaccine items take over.
+    # Alternate names for DHPPi: 7-in-1 / 9-in-1 vaccination.
+
+    # --- DHPPi 1st Dose (6–8 weeks) ---
+    {
+        "item_name": "DHPPi 1st Dose",
+        "category": "essential",
+        "circle": "health",
+        "species": "dog",
+        "recurrence_days": 36500,
+        "medicine_dependent": False,
+        "reminder_before_days": 14,
+        "overdue_after_days": 21,
+    },
+    # --- DHPPi 2nd Dose (9–12 weeks) ---
+    {
+        "item_name": "DHPPi 2nd Dose",
+        "category": "essential",
+        "circle": "health",
+        "species": "dog",
+        "recurrence_days": 36500,
+        "medicine_dependent": False,
+        "reminder_before_days": 14,
+        "overdue_after_days": 21,
+    },
+    # --- DHPPi 3rd Dose (12–16 weeks, given together with first Rabies dose) ---
+    {
+        "item_name": "DHPPi 3rd Dose",
+        "category": "essential",
+        "circle": "health",
+        "species": "dog",
+        "recurrence_days": 36500,
+        "medicine_dependent": False,
+        "reminder_before_days": 14,
+        "overdue_after_days": 21,
+    },
+    # --- Puppy Booster (1 year — DHPPi & Rabies combined booster) ---
+    # After this booster the pet transitions to the standard annual DHPPi + Rabies cycle.
+    {
+        "item_name": "Puppy Booster",
+        "category": "essential",
+        "circle": "health",
+        "species": "dog",
+        "recurrence_days": 36500,
         "medicine_dependent": False,
         "reminder_before_days": 30,
         "overdue_after_days": 14,
