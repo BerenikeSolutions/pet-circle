@@ -47,6 +47,8 @@ from app.models.condition import Condition
 from app.models.condition_medication import ConditionMedication
 from app.models.condition_monitoring import ConditionMonitoring
 from app.models.contact import Contact
+from app.models.diet_item import DietItem
+from app.models.conflict_flag import ConflictFlag
 from app.services.gpt_extraction import _infer_document_category, _resolve_document_category
 from app.services.document_upload import download_from_supabase
 from app.services.preventive_calculator import (
@@ -501,6 +503,66 @@ def get_dashboard_data(db: Session, token: str) -> dict:
             "created_at": str(contact.created_at) if contact.created_at else None,
         })
 
+    # --- Load diet items (nutrition tab) ---
+    diet_rows = (
+        db.query(DietItem)
+        .filter(DietItem.pet_id == pet_id)
+        .order_by(DietItem.created_at.asc())
+        .all()
+    )
+    diet_items_data = [
+        {
+            "id": str(d.id),
+            "type": d.type,
+            "icon": d.icon,
+            "label": d.label,
+            "detail": d.detail,
+            "created_at": str(d.created_at) if d.created_at else None,
+        }
+        for d in diet_rows
+    ]
+
+    # --- Load pending conflict flags ---
+    # Fetches conflicts for all preventive records belonging to this pet.
+    # Only 'pending' conflicts are surfaced — resolved/auto-resolved are historical.
+    conflict_record_ids = [
+        rec["id"] for rec in preventive_records if rec.get("id")
+    ]
+    conflict_rows = []
+    if conflict_record_ids:
+        # Get all preventive record UUIDs for this pet to join against
+        pet_rec_rows = (
+            db.query(PreventiveRecord)
+            .filter(PreventiveRecord.pet_id == pet_id)
+            .all()
+        )
+        pet_rec_map = {str(r.id): r for r in pet_rec_rows}
+        cf_rows = (
+            db.query(ConflictFlag)
+            .filter(
+                ConflictFlag.preventive_record_id.in_([r.id for r in pet_rec_rows]),
+                ConflictFlag.status == "pending",
+            )
+            .order_by(ConflictFlag.created_at.desc())
+            .all()
+        )
+        for cf in cf_rows:
+            rec = pet_rec_map.get(str(cf.preventive_record_id))
+            item_name = None
+            if rec:
+                if rec.preventive_master:
+                    item_name = rec.preventive_master.item_name
+                elif rec.custom_preventive_item:
+                    item_name = rec.custom_preventive_item.item_name
+            conflict_rows.append({
+                "id": str(cf.id),
+                "item_name": item_name,
+                "existing_date": str(rec.last_done_date) if rec and rec.last_done_date else None,
+                "new_date": str(cf.new_date),
+                "status": cf.status,
+                "created_at": str(cf.created_at) if cf.created_at else None,
+            })
+
     # --- Build response (no internal IDs exposed) ---
     # photo_url: serve via dashboard endpoint if pet has a photo, else None.
     photo_url = f"/dashboard/{token}/pet-photo" if pet.photo_path else None
@@ -528,6 +590,8 @@ def get_dashboard_data(db: Session, token: str) -> dict:
         "conditions": conditions_data,
         "contacts": contacts_data,
         "health_score": health_score,
+        "nutrition": diet_items_data,
+        "conflict_flags": conflict_rows,
     }
 
 

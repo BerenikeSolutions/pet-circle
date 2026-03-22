@@ -36,13 +36,13 @@ class CartItem(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     pet_id = Column(UUID(as_uuid=True), ForeignKey("pets.id", ondelete="CASCADE"), index=True, nullable=False)
-    product_id = Column(String(100), nullable=False)  # matches cart_item_id in product_catalog or generated IDs
-    icon = Column(String(10), nullable=True)
+    product_id = Column(String(100), nullable=False)  # UUID from product_catalog
+    icon = Column(String(50), nullable=True)
     name = Column(String(200), nullable=False)
     sub = Column(String(200), nullable=True)
     price = Column(Integer, nullable=False)
-    tag = Column(String(30), nullable=True)
-    tag_color = Column(String(10), nullable=True)
+    tag = Column(String(100), nullable=True)
+    tag_color = Column(String(50), nullable=True)
     in_cart = Column(Boolean, nullable=False, default=False)
     quantity = Column(Integer, nullable=False, default=1)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
