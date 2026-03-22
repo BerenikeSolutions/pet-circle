@@ -15,7 +15,7 @@ export const STATUS_CONFIG: Record<string, { color: string; bg: string; label: s
 };
 
 // ─── Keyword Arrays ──────────────────────────────────────────────
-export const VACCINE_KW = ["vaccine", "rabies", "dhpp", "core vaccine", "feline core", "bordetella", "leptospirosis", "canine influenza", "felv", "fiv"];
+export const VACCINE_KW = ["vaccine", "rabies", "dhpp", "core vaccine", "feline core", "bordetella", "leptospirosis", "canine influenza", "felv", "fiv", "puppy booster", "kennel cough"];
 export const DEWORMING_KW = ["deworming", "deworm"];
 export const FLEA_TICK_KW = ["tick", "flea"];
 export const CHECKUP_KW = ["checkup", "annual", "wellness", "blood test", "preventive blood"];
@@ -175,6 +175,107 @@ export function ageFromDob(dob: string | null): string {
   if (months < 0) { years--; months += 12; }
   if (years > 0) return `${years} yr${years > 1 ? 's' : ''}`;
   return `${months} month${months !== 1 ? 's' : ''}`;
+}
+
+// ─── Location Helpers ────────────────────────────────────────────
+
+/** Map Indian pincode prefix (3 digits) to city name. */
+const PINCODE_CITY_MAP: Record<string, string> = {
+  '110': 'Delhi', '111': 'Delhi',
+  '201': 'Noida', '202': 'Ghaziabad',
+  '122': 'Gurugram', '123': 'Gurugram', '121': 'Faridabad',
+  '400': 'Mumbai', '401': 'Mumbai', '402': 'Mumbai',
+  '410': 'Navi Mumbai',
+  '411': 'Pune', '412': 'Pune', '413': 'Pune', '414': 'Pune',
+  '403': 'Goa',
+  '560': 'Bengaluru', '561': 'Bengaluru', '562': 'Bengaluru',
+  '600': 'Chennai', '601': 'Chennai', '602': 'Chennai', '603': 'Chennai',
+  '500': 'Hyderabad', '501': 'Hyderabad', '502': 'Hyderabad', '503': 'Hyderabad',
+  '700': 'Kolkata', '711': 'Howrah', '712': 'Hooghly',
+  '380': 'Ahmedabad', '382': 'Ahmedabad', '383': 'Ahmedabad',
+  '395': 'Surat', '394': 'Surat', '396': 'Surat',
+  '641': 'Coimbatore', '642': 'Coimbatore',
+  '302': 'Jaipur', '303': 'Jaipur',
+  '226': 'Lucknow', '227': 'Lucknow',
+  '208': 'Kanpur', '209': 'Kanpur',
+  '440': 'Nagpur', '441': 'Nagpur',
+  '452': 'Indore', '453': 'Indore',
+  '462': 'Bhopal', '463': 'Bhopal',
+  '800': 'Patna', '801': 'Patna',
+  '682': 'Kochi', '683': 'Kochi', '684': 'Kochi',
+  '160': 'Chandigarh',
+  '530': 'Visakhapatnam', '531': 'Visakhapatnam',
+  '520': 'Vijayawada', '521': 'Vijayawada',
+  '625': 'Madurai',
+  '620': 'Tiruchirappalli', '621': 'Tiruchirappalli',
+  '628': 'Tirunelveli',
+  '575': 'Mangalore', '576': 'Mangalore',
+  '570': 'Mysuru', '571': 'Mysuru',
+  '695': 'Thiruvananthapuram',
+  '673': 'Kozhikode',
+  '143': 'Amritsar',
+  '141': 'Ludhiana', '142': 'Ludhiana',
+  '221': 'Varanasi',
+  '211': 'Prayagraj',
+  '282': 'Agra',
+  '248': 'Dehradun',
+  '144': 'Jalandhar',
+  '324': 'Kota',
+  '342': 'Jodhpur',
+  '313': 'Udaipur',
+  '450': 'Bhopal',
+  '492': 'Raipur',
+  '360': 'Rajkot',
+  '390': 'Vadodara', '391': 'Vadodara',
+  '365': 'Bhavnagar',
+  '361': 'Jamnagar',
+};
+
+/** Derive city name from a 6-digit Indian pincode. Returns null if unknown. */
+export function pincodeToCity(pincode: string | null | undefined): string | null {
+  if (!pincode || pincode.length < 3) return null;
+  const prefix = pincode.slice(0, 3);
+  return PINCODE_CITY_MAP[prefix] || null;
+}
+
+// ─── Pet Age Helpers ─────────────────────────────────────────────
+
+/** Returns age of pet in days from DOB string. Returns null if DOB is missing/invalid. */
+export function ageInDaysFromDob(dob: string | null): number | null {
+  if (!dob) return null;
+  const birth = new Date(dob);
+  if (isNaN(birth.getTime())) return null;
+  return Math.floor((Date.now() - birth.getTime()) / 86400000);
+}
+
+/**
+ * Puppy vaccine names and the minimum dog age (in days) at which they become relevant.
+ * Dogs older than 365 days (1 year) should not see any of these.
+ */
+const PUPPY_VAX_MIN_AGE_DAYS: Record<string, number> = {
+  'dhppi 1st dose': 42,   // 6 weeks
+  'dhppi 2nd dose': 63,   // 9 weeks
+  'dhppi 3rd dose': 84,   // 12 weeks
+  'puppy booster':  90,   // show from 3 months as an upcoming item
+};
+
+/**
+ * Filter vaccines by the dog's age.
+ * - For non-dogs: no filtering.
+ * - For dogs ≥ 1 year: hide all puppy-dose vaccines.
+ * - For dogs < 1 year: show only doses the dog is old enough to receive.
+ */
+export function filterVaccinesByAge(vaccines: PreventiveRecord[], dob: string | null, species: string): PreventiveRecord[] {
+  if (species?.toLowerCase() !== 'dog') return vaccines;
+  const ageDays = ageInDaysFromDob(dob);
+  if (ageDays === null) return vaccines;
+  return vaccines.filter(v => {
+    const name = v.item_name.toLowerCase();
+    const minAge = PUPPY_VAX_MIN_AGE_DAYS[name];
+    if (minAge === undefined) return true;   // not a puppy-specific vaccine — always show
+    if (ageDays >= 365) return false;         // dog is over 1 year — hide all puppy doses
+    return ageDays >= minAge;                 // show only if dog is old enough for this dose
+  });
 }
 
 // ─── Record Helpers ──────────────────────────────────────────────

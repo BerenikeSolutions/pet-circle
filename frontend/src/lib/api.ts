@@ -25,6 +25,7 @@ export interface PetProfile {
 
 export interface OwnerInfo {
   full_name: string | null;
+  pincode: string | null;
 }
 
 export interface PreventiveRecord {

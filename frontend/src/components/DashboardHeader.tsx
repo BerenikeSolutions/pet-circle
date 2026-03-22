@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import type { PetProfile, OwnerInfo } from '@/lib/api';
-import { ageFromDob } from '@/lib/dashboard-utils';
+import { ageFromDob, pincodeToCity } from '@/lib/dashboard-utils';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -20,7 +20,8 @@ export default function DashboardHeader({ pet, owner, overdueCount, onCartClick,
   const photoUrl = photoPreview || (pet.photo_url ? `${API_BASE}${pet.photo_url}` : null);
   const initials = pet.name?.slice(0, 2).toUpperCase() || '??';
   const age = ageFromDob(pet.dob);
-  const species = pet.species ? pet.species.charAt(0).toUpperCase() + pet.species.slice(1) : '';
+  const city = pincodeToCity(owner.pincode);
+  const locationOrSpecies = city || (pet.species ? pet.species.charAt(0).toUpperCase() + pet.species.slice(1) : '');
 
   const handlePhotoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -68,7 +69,7 @@ export default function DashboardHeader({ pet, owner, overdueCount, onCartClick,
           <div className="text-white min-w-0">
             <h1 className="font-display text-2xl font-bold truncate">{pet.name}</h1>
             <p className="text-white/80 text-sm">
-              {pet.breed} · {age} · {species}
+              {pet.breed} · {age} · {locationOrSpecies}
             </p>
             <p className="text-white/60 text-xs mt-0.5">
               Parent: {owner.full_name}

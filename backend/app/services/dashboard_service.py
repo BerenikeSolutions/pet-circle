@@ -53,6 +53,7 @@ from app.services.preventive_calculator import (
     compute_next_due_date,
     compute_status,
 )
+from app.core.encryption import decrypt_field
 
 
 logger = logging.getLogger(__name__)
@@ -518,6 +519,7 @@ def get_dashboard_data(db: Session, token: str) -> dict:
         },
         "owner": {
             "full_name": user.full_name if user else None,
+            "pincode": decrypt_field(user.pincode) if (user and user.pincode) else None,
         },
         "preventive_records": preventive_records,
         "reminders": reminder_data,

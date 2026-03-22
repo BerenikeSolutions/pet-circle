@@ -14,7 +14,7 @@ import VaxFreqModal from '@/components/ui/VaxFreqModal';
 import DateEditSheet from '@/components/ui/DateEditSheet';
 import Ring from '@/components/ui/Ring';
 import {
-  filterByKeywords, getStatusForRecord, formatApiDate,
+  filterByKeywords, filterVaccinesByAge, getStatusForRecord, formatApiDate,
   VACCINE_KW, DEWORMING_KW, FLEA_TICK_KW, CHECKUP_KW,
   freqToDays, daysToFreq, VAX_FREQ_LABELS,
 } from '@/lib/dashboard-utils';
@@ -39,7 +39,8 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
   const [weightLoading, setWeightLoading] = useState(true);
 
   const records = data.preventive_records || [];
-  const vaccines = filterByKeywords(records, VACCINE_KW);
+  const allVaccines = filterByKeywords(records, VACCINE_KW);
+  const vaccines = filterVaccinesByAge(allVaccines, data.pet.dob, data.pet.species);
   const deworming = filterByKeywords(records, DEWORMING_KW);
   const fleaTick = filterByKeywords(records, FLEA_TICK_KW);
   const checkups = filterByKeywords(records, CHECKUP_KW);
