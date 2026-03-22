@@ -9,24 +9,27 @@ import type {
   TimelineEvent,
   ConditionRecommendation,
   LastVetVisit,
+  VetQuestion,
 } from '@/lib/api';
 import {
   addCondition,
   deleteCondition,
-  updateCondition,
-  getConditionTimeline,
-  getConditionRecommendations,
-  getLastVetVisit,
   addConditionMedication,
   deleteConditionMedication,
   addConditionMonitoring,
   deleteConditionMonitoring,
+  getConditionTimeline,
+  getConditionRecommendations,
+  getLastVetVisit,
+  getHealthSummary,
+  getVetQuestions,
+  regenerateVetQuestions,
 } from '@/lib/api';
 import StatusBadge from '@/components/ui/StatusBadge';
 import ReminderBar from '@/components/ui/ReminderBar';
 import AddRow from '@/components/ui/AddRow';
 import BottomSheet from '@/components/ui/BottomSheet';
-import { formatApiDate, STATUS_CONFIG } from '@/lib/dashboard-utils';
+import { formatApiDate } from '@/lib/dashboard-utils';
 
 interface ConditionsTabProps {
   data: DashboardData;
@@ -34,11 +37,9 @@ interface ConditionsTabProps {
   onCartClick: (itemId?: string) => void;
 }
 
-/** Compute refill status from a date string */
 function getRefillStatus(refillDueDate: string | null): string {
   if (!refillDueDate) return 'ok';
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
   const due = new Date(refillDueDate);
   if (isNaN(due.getTime())) return 'ok';
   const diff = Math.ceil((due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
@@ -47,11 +48,9 @@ function getRefillStatus(refillDueDate: string | null): string {
   return 'ok';
 }
 
-/** Compute monitoring status from next_due_date */
-function getMonitoringStatus(nextDueDate: string | null): string {
+function getMonitoringStatus(nextDueDate: string | null): 'overdue' | 'upcoming' | 'done' {
   if (!nextDueDate) return 'upcoming';
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
   const due = new Date(nextDueDate);
   if (isNaN(due.getTime())) return 'upcoming';
   const diff = Math.ceil((due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
@@ -60,11 +59,9 @@ function getMonitoringStatus(nextDueDate: string | null): string {
   return 'done';
 }
 
-/** Format a date relative to today */
 function getDateRelative(dateStr: string | null): string | null {
   if (!dateStr) return null;
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
   const d = new Date(dateStr);
   if (isNaN(d.getTime())) return null;
   const diff = Math.ceil((today.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
@@ -74,33 +71,656 @@ function getDateRelative(dateStr: string | null): string | null {
   return 'Today';
 }
 
-const TAG_COLORS: Record<string, string> = {
-  Diagnosis: '#007AFF',
-  'Vet Visit': '#34C759',
-  Treatment: '#FF9500',
-  Grooming: '#8E44AD',
-  Overdue: '#FF3B30',
-  Upcoming: '#FF9500',
-};
+const PRIORITY_COLOR: Record<string, string> = { urgent: '#FF3B30', high: '#FF9500', medium: '#007AFF' };
+const PRIORITY_BG: Record<string, string>    = { urgent: '#FFF0F0', high: '#FFF6ED', medium: '#F0F6FF' };
+const PRIORITY_LABEL: Record<string, string> = { urgent: 'URGENT', high: 'RECOMMENDED', medium: 'SUGGESTED' };
 
-const PRIORITY_COLORS: Record<string, string> = {
-  urgent: '#FF3B30',
-  high: '#FF9500',
-  medium: '#007AFF',
-};
+/* ─────────────────────────────────────────────────────────────────
+   Health Score Card
+───────────────────────────────────────────────────────────────── */
+function HealthScoreCard({
+  score, label, activeCount, summary, conditions,
+}: {
+  score: number; label: string; activeCount: number; summary: string; conditions: ConditionItem[];
+}) {
+  const isGood = score >= 50;
+  const ringColor = isGood ? '#34C759' : '#D44800';
+  const r = 30, circ = 2 * Math.PI * r;
+  const dash = (score / 100) * circ;
 
-const PRIORITY_BG: Record<string, string> = {
-  urgent: '#FFF0F0',
-  high: '#FFF6ED',
-  medium: '#F0F6FF',
-};
+  return (
+    <div style={{
+      background: 'white', borderRadius: 20, padding: 20,
+      border: '1.5px solid #F2F2F7', boxShadow: '0 2px 12px rgba(0,0,0,0.06)',
+      marginBottom: 12,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 14 }}>
+        {/* SVG ring */}
+        <div style={{ position: 'relative', width: 80, height: 80, flexShrink: 0 }}>
+          <svg width={80} height={80} style={{ transform: 'rotate(-90deg)' }}>
+            <circle cx={40} cy={40} r={r} fill="none" stroke="#F2F2F7" strokeWidth={8} />
+            <circle
+              cx={40} cy={40} r={r} fill="none"
+              stroke={ringColor} strokeWidth={8}
+              strokeLinecap="round"
+              strokeDasharray={`${dash} ${circ - dash}`}
+            />
+          </svg>
+          <div style={{
+            position: 'absolute', inset: 0, display: 'flex',
+            flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <span style={{ fontFamily: 'Fraunces, serif', fontSize: 20, fontWeight: 700, color: ringColor, lineHeight: 1 }}>
+              {score}
+            </span>
+            <span style={{ fontSize: 9, color: '#8E8E93', lineHeight: 1.2 }}>/100</span>
+          </div>
+        </div>
 
-const PRIORITY_LABEL: Record<string, string> = {
-  urgent: 'URGENT',
-  high: 'RECOMMENDED',
-  medium: 'SUGGESTED',
-};
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+            <span style={{ fontWeight: 700, fontSize: 16, color: '#1C1C1E' }}>{label}</span>
+            <span style={{
+              fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20,
+              background: isGood ? '#E8FAF0' : '#FFF5F0',
+              color: isGood ? '#34C759' : '#D44800',
+            }}>
+              {activeCount} OPEN {activeCount === 1 ? 'CONDITION' : 'CONDITIONS'}
+            </span>
+          </div>
+          <p style={{ fontSize: 12, color: '#3C3C43', lineHeight: 1.5, margin: 0 }}>
+            {summary || 'Loading health summary…'}
+          </p>
+        </div>
+      </div>
 
+      {/* Status pills */}
+      {conditions.length > 0 && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {conditions.map((c) => (
+            <span key={c.id} style={{
+              fontSize: 11, fontWeight: 600, padding: '3px 10px', borderRadius: 20,
+              background: c.condition_type === 'chronic' ? '#FFF5F0' : c.condition_type === 'episodic' ? '#FFF6ED' : '#E8FAF0',
+              color: c.condition_type === 'chronic' ? '#D44800' : c.condition_type === 'episodic' ? '#FF9500' : '#34C759',
+            }}>
+              {c.icon || '🏥'} {c.name}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Med Row
+───────────────────────────────────────────────────────────────── */
+function MedRow({ med, onDelete }: { med: ConditionMedicationItem; onDelete: () => void }) {
+  const [reminderOn, setReminderOn] = useState(false);
+  const [rFreq, setRFreq] = useState(1);
+  const [rUnit, setRUnit] = useState('day');
+  const refillStatus = getRefillStatus(med.refill_due_date);
+
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+        <div style={{
+          width: 36, height: 36, borderRadius: 10, background: '#F0F6FF',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0,
+        }}>💊</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 13, color: '#1C1C1E' }}>{med.name}</div>
+              <div style={{ fontSize: 11, color: '#8E8E93', marginTop: 1 }}>
+                {[med.dose, med.frequency, med.route].filter(Boolean).join(' · ')}
+              </div>
+              {med.refill_due_date && (
+                <div style={{ fontSize: 11, color: refillStatus === 'urgent' ? '#FF3B30' : '#FF9500', marginTop: 2 }}>
+                  Refill due: {formatApiDate(med.refill_due_date)}
+                </div>
+              )}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <StatusBadge
+                status={med.status === 'active' ? (refillStatus === 'ok' ? 'done' : refillStatus) : 'resolved'}
+                label={med.status === 'active' ? 'ACTIVE' : 'STOPPED'}
+              />
+              <button onClick={onDelete} style={{ color: '#C7C7CC', fontSize: 14, background: 'none', border: 'none', cursor: 'pointer' }}>✕</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div style={{ marginLeft: 46 }}>
+        <ReminderBar
+          enabled={reminderOn} onToggle={setReminderOn}
+          freq={rFreq} unit={rUnit}
+          onFreqChange={(f, u) => { setRFreq(f); setRUnit(u); }}
+        />
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Monitor Row
+───────────────────────────────────────────────────────────────── */
+function MonitorRow({ mon, onDelete }: { mon: ConditionMonitoringItem; onDelete: () => void }) {
+  const status = getMonitoringStatus(mon.next_due_date);
+  const lastDone = getDateRelative(mon.last_done_date);
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 10 }}>
+      <div style={{
+        width: 36, height: 36, borderRadius: 10, background: '#FFF6ED',
+        display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0,
+      }}>🩺</div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <div>
+            <div style={{ fontWeight: 600, fontSize: 13, color: '#1C1C1E' }}>{mon.name}</div>
+            <div style={{ fontSize: 11, color: '#8E8E93', marginTop: 1 }}>
+              {mon.frequency || 'As needed'}
+              {lastDone ? ` · Last: ${lastDone}` : ' · Never done'}
+            </div>
+            {mon.next_due_date && (
+              <div style={{ fontSize: 11, color: status === 'overdue' ? '#FF3B30' : '#FF9500', marginTop: 2 }}>
+                {status === 'overdue' ? 'Overdue: ' : 'Due: '}{formatApiDate(mon.next_due_date)}
+              </div>
+            )}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <StatusBadge
+              status={status}
+              label={status === 'overdue' ? 'OVERDUE' : status === 'done' ? 'DONE' : 'DUE SOON'}
+            />
+            <button onClick={onDelete} style={{ color: '#C7C7CC', fontSize: 14, background: 'none', border: 'none', cursor: 'pointer' }}>✕</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Condition Card
+───────────────────────────────────────────────────────────────── */
+function ConditionCard({
+  condition, onDelete, onAddMed, onDeleteMed, onAddMon, onDeleteMon,
+}: {
+  condition: ConditionItem;
+  onDelete: () => void;
+  onAddMed: () => void;
+  onDeleteMed: (id: string) => void;
+  onAddMon: () => void;
+  onDeleteMon: (id: string) => void;
+}) {
+  const hasOverdueMon = condition.monitoring?.some(m => getMonitoringStatus(m.next_due_date) === 'overdue');
+  const hasNoMeds = condition.condition_type === 'chronic' && condition.medications.length === 0;
+  const overdueMons = condition.monitoring?.filter(m => getMonitoringStatus(m.next_due_date) === 'overdue') || [];
+
+  const badgeLabelMap: Record<string, string> = { chronic: 'MANAGED', episodic: 'EPISODIC', resolved: 'RESOLVED' };
+  const statusMap: Record<string, string> = { chronic: 'managed', episodic: 'upcoming', resolved: 'done' };
+
+  return (
+    <div style={{
+      background: 'white', borderRadius: 20, padding: '16px 16px 8px',
+      border: '1.5px solid #E5E5EA', boxShadow: '0 2px 8px rgba(0,0,0,0.05)',
+      marginBottom: 0,
+    }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+        <div style={{
+          width: 44, height: 44, borderRadius: 12, background: '#F0F6FF',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0,
+        }}>
+          {condition.icon || '🏥'}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 700, fontSize: 15, color: '#1C1C1E' }}>{condition.name}</div>
+          <div style={{ fontSize: 11, color: '#8E8E93' }}>
+            {condition.diagnosed_at ? `Diagnosed ${formatApiDate(condition.diagnosed_at)}` : ''}
+            {condition.managed_by ? ` · ${condition.managed_by}` : ''}
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+          <StatusBadge
+            status={statusMap[condition.condition_type] || 'managed'}
+            label={badgeLabelMap[condition.condition_type] || condition.condition_type.toUpperCase()}
+          />
+          <button onClick={onDelete} style={{ color: '#C7C7CC', fontSize: 14, background: 'none', border: 'none', cursor: 'pointer' }} title="Remove">✕</button>
+        </div>
+      </div>
+
+      {/* Alert boxes */}
+      {hasOverdueMon && (
+        <div style={{
+          display: 'flex', alignItems: 'flex-start', gap: 8,
+          background: '#FFFBEB', border: '1px solid #FCD34D', borderRadius: 10,
+          padding: '8px 12px', marginBottom: 10, fontSize: 12, color: '#92400E',
+        }}>
+          <span>⚠️</span>
+          <span>
+            {overdueMons.length === 1
+              ? `${overdueMons[0].name} monitoring is overdue. Schedule a check-up soon.`
+              : `${overdueMons.length} monitoring items are overdue.`}
+          </span>
+        </div>
+      )}
+      {hasNoMeds && !hasOverdueMon && (
+        <div style={{
+          display: 'flex', alignItems: 'flex-start', gap: 8,
+          background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 10,
+          padding: '8px 12px', marginBottom: 10, fontSize: 12, color: '#1D4ED8',
+        }}>
+          <span>ℹ️</span>
+          <span>No medications recorded for this chronic condition. Ask your vet if management is needed.</span>
+        </div>
+      )}
+
+      {/* Medications */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 6,
+        borderLeft: '3px solid #007AFF', paddingLeft: 8,
+        marginBottom: 10,
+      }}>
+        <span style={{ fontSize: 10, fontWeight: 700, color: '#007AFF', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+          Vet Prescribed · Medications
+        </span>
+      </div>
+      {condition.medications.length > 0 ? (
+        condition.medications.map((med) => (
+          <MedRow key={med.id} med={med} onDelete={() => onDeleteMed(med.id)} />
+        ))
+      ) : (
+        <div style={{ fontSize: 12, color: '#C7C7CC', marginBottom: 10, paddingLeft: 4 }}>No medications recorded</div>
+      )}
+      <AddRow label="Add Medication" onClick={onAddMed} />
+
+      {/* Monitoring */}
+      {condition.monitoring && condition.monitoring.length > 0 && (
+        <>
+          <div style={{ height: 1, background: '#F2F2F7', margin: '12px 0' }} />
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 6,
+            borderLeft: '3px solid #FF9500', paddingLeft: 8,
+            marginBottom: 10,
+          }}>
+            <span style={{ fontSize: 10, fontWeight: 700, color: '#FF9500', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+              Vet Prescribed · Monitoring
+            </span>
+          </div>
+          {condition.monitoring.map((mon) => (
+            <MonitorRow key={mon.id} mon={mon} onDelete={() => onDeleteMon(mon.id)} />
+          ))}
+          {overdueMons.length > 0 && (
+            <button style={{
+              width: '100%', padding: '10px', background: '#FFF6ED',
+              border: '1px solid #FF9500', borderRadius: 10,
+              fontSize: 12, fontWeight: 600, color: '#FF9500', cursor: 'pointer', marginBottom: 4,
+            }}>
+              📅 Book Follow-up Tests
+            </button>
+          )}
+        </>
+      )}
+      <AddRow label="Add Monitoring" onClick={onAddMon} />
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Last Vet Visit Card
+───────────────────────────────────────────────────────────────── */
+function LastVetVisitCard({ vetVisit }: { vetVisit: LastVetVisit | null }) {
+  if (!vetVisit) return null;
+  return (
+    <div style={{
+      background: 'white', borderRadius: 16, padding: 16,
+      border: '1.5px solid #E5E5EA', boxShadow: '0 1px 4px rgba(0,0,0,0.04)',
+    }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: '#8E8E93', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
+        Last Vet Visit
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div style={{
+          width: 40, height: 40, borderRadius: 10, background: '#E8FAF0',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20,
+        }}>🏥</div>
+        <div>
+          <div style={{ fontWeight: 600, fontSize: 14, color: '#1C1C1E' }}>
+            {vetVisit.clinic_name || 'Vet Clinic'}
+          </div>
+          <div style={{ fontSize: 12, color: '#8E8E93' }}>
+            {vetVisit.last_visit_date ? formatApiDate(vetVisit.last_visit_date) : ''}
+            {vetVisit.vet_name ? ` · ${vetVisit.vet_name}` : ''}
+          </div>
+          {vetVisit.notes && (
+            <div style={{ fontSize: 11, color: '#3C3C43', marginTop: 4 }}>{vetVisit.notes}</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Ask The Vet Section
+───────────────────────────────────────────────────────────────── */
+function AskTheVetSection({
+  questions, loading, onRegenerate,
+}: {
+  questions: VetQuestion[];
+  loading: boolean;
+  onRegenerate: () => void;
+}) {
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+
+  const toggle = (i: number) => {
+    setExpanded(prev => {
+      const next = new Set(prev);
+      next.has(i) ? next.delete(i) : next.add(i);
+      return next;
+    });
+  };
+
+  return (
+    <div style={{
+      background: 'white', borderRadius: 20, padding: 16,
+      border: '1.5px solid #E5E5EA', boxShadow: '0 2px 8px rgba(0,0,0,0.05)',
+    }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{
+            width: 32, height: 32, borderRadius: 8, background: '#E8FAF0',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16,
+          }}>🩺</div>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 14, color: '#1C1C1E' }}>Ask the Vet</div>
+            <div style={{ fontSize: 11, color: '#8E8E93' }}>AI-generated questions for your next visit</div>
+          </div>
+        </div>
+        <button
+          onClick={onRegenerate}
+          disabled={loading}
+          style={{
+            width: 30, height: 30, borderRadius: 8, background: '#F2F2F7',
+            border: 'none', cursor: loading ? 'default' : 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 14, opacity: loading ? 0.5 : 1,
+          }}
+          title="Regenerate questions"
+        >
+          {loading ? '⏳' : '🔄'}
+        </button>
+      </div>
+
+      {loading && questions.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: '16px 0', color: '#8E8E93', fontSize: 12 }}>
+          Generating questions…
+        </div>
+      ) : questions.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: '16px 0', color: '#8E8E93', fontSize: 12 }}>
+          No questions generated yet. Tap 🔄 to generate.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {questions.map((q, i) => {
+            const isOpen = expanded.has(i);
+            const col = PRIORITY_COLOR[q.priority] || '#007AFF';
+            const bg = PRIORITY_BG[q.priority] || '#F0F6FF';
+            const lbl = PRIORITY_LABEL[q.priority] || 'SUGGESTED';
+            return (
+              <div
+                key={i}
+                onClick={() => toggle(i)}
+                style={{
+                  border: `1px solid ${col}22`, borderRadius: 12,
+                  background: isOpen ? bg : 'white', cursor: 'pointer',
+                  overflow: 'hidden',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '10px 12px' }}>
+                  <span style={{ fontSize: 18, flexShrink: 0 }}>{q.icon || '🩺'}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
+                      <span style={{
+                        fontSize: 9, fontWeight: 700, padding: '2px 7px', borderRadius: 20,
+                        background: col, color: 'white',
+                      }}>{lbl}</span>
+                    </div>
+                    <div style={{ fontWeight: 600, fontSize: 13, color: '#1C1C1E', lineHeight: 1.4 }}>{q.q}</div>
+                  </div>
+                  <span style={{ color: '#C7C7CC', fontSize: 12, flexShrink: 0, marginTop: 2 }}>
+                    {isOpen ? '▲' : '▼'}
+                  </span>
+                </div>
+                {isOpen && (
+                  <div style={{
+                    padding: '0 12px 12px 12px',
+                    fontSize: 12, color: '#3C3C43', lineHeight: 1.6,
+                    borderTop: `1px solid ${col}22`,
+                    paddingTop: 8,
+                  }}>
+                    {q.context}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Conditions Chronology (zayn two-column layout)
+───────────────────────────────────────────────────────────────── */
+function ConditionsChronology({
+  timeline, total,
+}: {
+  timeline: TimelineEvent[];
+  total: number;
+}) {
+  const [isFull, setIsFull] = useState(false);
+
+  const visibleEvents = isFull ? timeline : timeline.slice(0, 1);
+  const hasMore = timeline.length > 1;
+
+  const formatDate = (d: string | undefined) => {
+    if (!d) return '';
+    const dt = new Date(d);
+    if (isNaN(dt.getTime())) return d;
+    return dt.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: '2-digit' });
+  };
+
+  return (
+    <div style={{
+      background: 'white', borderRadius: 20, overflow: 'hidden',
+      border: '1.5px solid #E5E5EA', boxShadow: '0 2px 8px rgba(0,0,0,0.05)',
+    }}>
+      {/* Header */}
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '14px 16px',
+        borderBottom: '1px solid #F2F2F7',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div style={{
+            width: 30, height: 30, borderRadius: 8, background: '#FFF5F0',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14,
+          }}>📅</div>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 14, color: '#1C1C1E' }}>Health Management Timeline</div>
+            <div style={{ fontSize: 11, color: '#8E8E93' }}>{total || timeline.length} events recorded</div>
+          </div>
+        </div>
+        {isFull && (
+          <button
+            onClick={() => setIsFull(false)}
+            style={{
+              fontSize: 11, fontWeight: 600, color: '#8E8E93',
+              background: 'none', border: 'none', cursor: 'pointer',
+            }}
+          >
+            ↑ Collapse
+          </button>
+        )}
+      </div>
+
+      {/* Events */}
+      {timeline.length === 0 ? (
+        <div style={{ padding: 24, textAlign: 'center', color: '#C7C7CC', fontSize: 12 }}>
+          No events recorded yet.
+        </div>
+      ) : (
+        <div style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {visibleEvents.map((ev, idx) => {
+            const labelColor = ev.label_color || '#007AFF';
+            const labelBg = `${labelColor}12`;
+            const border = ev.border || labelColor;
+
+            return (
+              <div key={idx} style={{ display: 'flex', gap: 12 }}>
+                {/* Left column — 80px label box */}
+                <div style={{
+                  width: 80, flexShrink: 0,
+                  background: labelBg, border: `1px solid ${border}30`,
+                  borderRadius: 12, padding: '10px 6px',
+                  display: 'flex', flexDirection: 'column',
+                  alignItems: 'center', justifyContent: 'center',
+                  gap: 3, textAlign: 'center',
+                }}>
+                  <span style={{ fontSize: 18 }}>{ev.icon || '📋'}</span>
+                  <span style={{
+                    fontSize: 9, fontWeight: 700, color: labelColor,
+                    textTransform: 'uppercase', letterSpacing: 0.3, lineHeight: 1.2,
+                  }}>
+                    {ev.tag || ev.type}
+                  </span>
+                  {ev.sublabel && (
+                    <span style={{ fontSize: 9, color: '#8E8E93', lineHeight: 1.2 }}>{ev.sublabel}</span>
+                  )}
+                  <span style={{ fontSize: 9, color: '#8E8E93', marginTop: 2 }}>
+                    {formatDate(ev.date)}
+                  </span>
+                </div>
+
+                {/* Right column — white card */}
+                <div style={{
+                  flex: 1, minWidth: 0,
+                  background: 'white', border: '1px solid #E5E5EA',
+                  borderRadius: 12, padding: '10px 12px',
+                }}>
+                  <div style={{ fontWeight: 600, fontSize: 13, color: '#1C1C1E', marginBottom: 3 }}>
+                    {ev.title}
+                  </div>
+                  {ev.source_text && (
+                    <div style={{ fontSize: 11, color: '#8E8E93', marginBottom: 6 }}>{ev.source_text}</div>
+                  )}
+                  {/* Pills */}
+                  {ev.pills && ev.pills.length > 0 && (
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                      {ev.pills.map((pill, pi) => (
+                        <span key={pi} style={{
+                          fontSize: 10, fontWeight: 600,
+                          padding: '2px 8px', borderRadius: 20,
+                          background: pill.bg || '#F2F2F7',
+                          color: pill.c || '#3C3C43',
+                        }}>
+                          {pill.t}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {/* Fallback: notes */}
+                  {(!ev.pills || ev.pills.length === 0) && ev.detail && (
+                    <div style={{ fontSize: 11, color: '#3C3C43', lineHeight: 1.5 }}>{ev.detail}</div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* See All / Expand button */}
+      {hasMore && !isFull && (
+        <div style={{ padding: '0 16px 16px' }}>
+          <button
+            onClick={() => setIsFull(true)}
+            style={{
+              width: '100%', padding: '12px',
+              background: '#D44800', border: 'none', borderRadius: 12,
+              fontSize: 13, fontWeight: 700, color: 'white', cursor: 'pointer',
+              letterSpacing: 0.2,
+            }}
+          >
+            See all {total || timeline.length} events ↓
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   PDF Card
+───────────────────────────────────────────────────────────────── */
+function ConditionsPdfCard({
+  petName, pdfState, onGenerate, onReset,
+}: {
+  petName: string;
+  pdfState: 'idle' | 'generating' | 'done';
+  onGenerate: () => void;
+  onReset: () => void;
+}) {
+  return (
+    <div style={{
+      background: 'white', borderRadius: 16, padding: 16,
+      border: '1.5px solid #E5E5EA', textAlign: 'center',
+    }}>
+      <div style={{ fontSize: 24, marginBottom: 6 }}>📋</div>
+      <div style={{ fontWeight: 700, fontSize: 14, color: '#1C1C1E', marginBottom: 4 }}>
+        Complete Health Analysis
+      </div>
+      <div style={{ fontSize: 12, color: '#8E8E93', marginBottom: 14 }}>
+        Download {petName}&apos;s full health report with conditions, medications, and timeline.
+      </div>
+      {pdfState === 'done' ? (
+        <button
+          onClick={onReset}
+          style={{
+            width: '100%', padding: '11px', borderRadius: 12,
+            background: '#E8FAF0', border: 'none', fontSize: 13,
+            fontWeight: 600, color: '#34C759', cursor: 'pointer',
+          }}
+        >
+          ✓ Report Generated!
+        </button>
+      ) : (
+        <button
+          onClick={onGenerate}
+          disabled={pdfState === 'generating'}
+          style={{
+            width: '100%', padding: '11px', borderRadius: 12,
+            background: 'var(--brand-gradient)', border: 'none', fontSize: 13,
+            fontWeight: 600, color: 'white', cursor: pdfState === 'generating' ? 'default' : 'pointer',
+            opacity: pdfState === 'generating' ? 0.7 : 1,
+          }}
+        >
+          {pdfState === 'generating' ? '⏳ Generating…' : '⬇ Download PDF Report'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   Main Export
+───────────────────────────────────────────────────────────────── */
 export default function ConditionsTab({ data, token, onCartClick }: ConditionsTabProps) {
   const [addSheet, setAddSheet] = useState(false);
   const [conditionForm, setConditionForm] = useState({
@@ -108,9 +728,15 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
   });
   const [saving, setSaving] = useState(false);
   const [pdfState, setPdfState] = useState<'idle' | 'generating' | 'done'>('idle');
+
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
-  const [recommendations, setRecommendations] = useState<ConditionRecommendation[]>([]);
+  const [timelineTotal, setTimelineTotal] = useState(0);
   const [vetVisit, setVetVisit] = useState<LastVetVisit | null>(null);
+
+  const [healthSummary, setHealthSummary] = useState('');
+  const [vetQuestions, setVetQuestions] = useState<VetQuestion[]>([]);
+  const [vetQLoading, setVetQLoading] = useState(false);
+
   const [addMedSheet, setAddMedSheet] = useState<string | null>(null);
   const [medForm, setMedForm] = useState({ name: '', dose: '', frequency: '', route: '' });
   const [addMonSheet, setAddMonSheet] = useState<string | null>(null);
@@ -118,27 +744,36 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
 
   const conditions = data.conditions || [];
   const petName = data.pet?.name || 'Pet';
-  const hasConditions = conditions.length > 0;
+  const healthScore = data.health_score || { score: 0, label: 'Unknown', breakdown: [], draggers: [] };
+  const activeCount = conditions.filter(c => c.condition_type !== 'resolved').length;
 
-  // Load timeline, recommendations, and vet visit from API
-  const loadSupplementary = useCallback(async () => {
-    try {
-      const [timelineRes, recsRes, vetRes] = await Promise.allSettled([
-        getConditionTimeline(token),
-        getConditionRecommendations(token),
-        getLastVetVisit(token),
-      ]);
-      if (timelineRes.status === 'fulfilled') setTimeline(timelineRes.value.events || []);
-      if (recsRes.status === 'fulfilled') setRecommendations(recsRes.value.recommendations || []);
-      if (vetRes.status === 'fulfilled') setVetVisit(vetRes.value);
-    } catch {
-      // Supplementary data — don't block
+  const loadData = useCallback(async () => {
+    const [timelineRes, vetRes, summaryRes, qRes] = await Promise.allSettled([
+      getConditionTimeline(token),
+      getLastVetVisit(token),
+      getHealthSummary(token),
+      getVetQuestions(token),
+    ]);
+    if (timelineRes.status === 'fulfilled') {
+      setTimeline(timelineRes.value.events || []);
+      setTimelineTotal(timelineRes.value.total || (timelineRes.value.events || []).length);
     }
+    if (vetRes.status === 'fulfilled') setVetVisit(vetRes.value);
+    if (summaryRes.status === 'fulfilled') setHealthSummary(summaryRes.value.summary || '');
+    if (qRes.status === 'fulfilled') setVetQuestions(qRes.value);
   }, [token]);
 
-  useEffect(() => {
-    loadSupplementary();
-  }, [loadSupplementary]);
+  useEffect(() => { loadData(); }, [loadData]);
+
+  const handleRegenerate = async () => {
+    setVetQLoading(true);
+    try {
+      const q = await regenerateVetQuestions(token);
+      setVetQuestions(q);
+    } finally {
+      setVetQLoading(false);
+    }
+  };
 
   const handleAddCondition = async () => {
     if (!conditionForm.name.trim()) return;
@@ -158,9 +793,7 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
       window.location.reload();
     } catch (e) {
       alert(e instanceof Error ? e.message : 'Failed to add condition');
-    } finally {
-      setSaving(false);
-    }
+    } finally { setSaving(false); }
   };
 
   const handleDeleteCondition = async (conditionId: string) => {
@@ -168,9 +801,7 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
     try {
       await deleteCondition(token, conditionId);
       window.location.reload();
-    } catch (e) {
-      alert(e instanceof Error ? e.message : 'Failed to remove condition');
-    }
+    } catch (e) { alert(e instanceof Error ? e.message : 'Failed to remove condition'); }
   };
 
   const handleAddMed = async () => {
@@ -186,21 +817,14 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
       setMedForm({ name: '', dose: '', frequency: '', route: '' });
       setAddMedSheet(null);
       window.location.reload();
-    } catch (e) {
-      alert(e instanceof Error ? e.message : 'Failed to add medication');
-    } finally {
-      setSaving(false);
-    }
+    } catch (e) { alert(e instanceof Error ? e.message : 'Failed to add medication'); }
+    finally { setSaving(false); }
   };
 
   const handleDeleteMed = async (medId: string) => {
     if (!confirm('Remove this medication?')) return;
-    try {
-      await deleteConditionMedication(token, medId);
-      window.location.reload();
-    } catch (e) {
-      alert(e instanceof Error ? e.message : 'Failed to remove medication');
-    }
+    try { await deleteConditionMedication(token, medId); window.location.reload(); }
+    catch (e) { alert(e instanceof Error ? e.message : 'Failed to remove medication'); }
   };
 
   const handleAddMon = async () => {
@@ -214,21 +838,14 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
       setMonForm({ name: '', frequency: '' });
       setAddMonSheet(null);
       window.location.reload();
-    } catch (e) {
-      alert(e instanceof Error ? e.message : 'Failed to add monitoring');
-    } finally {
-      setSaving(false);
-    }
+    } catch (e) { alert(e instanceof Error ? e.message : 'Failed to add monitoring'); }
+    finally { setSaving(false); }
   };
 
   const handleDeleteMon = async (monId: string) => {
     if (!confirm('Remove this monitoring item?')) return;
-    try {
-      await deleteConditionMonitoring(token, monId);
-      window.location.reload();
-    } catch (e) {
-      alert(e instanceof Error ? e.message : 'Failed to remove monitoring');
-    }
+    try { await deleteConditionMonitoring(token, monId); window.location.reload(); }
+    catch (e) { alert(e instanceof Error ? e.message : 'Failed to remove monitoring'); }
   };
 
   const handleGeneratePdf = async () => {
@@ -244,68 +861,90 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
   };
 
   return (
-    <div className="space-y-3" style={{ animation: 'slideUp 0.4s ease' }}>
-      {/* Condition Cards */}
-      {hasConditions ? (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12, animation: 'slideUp 0.4s ease' }}>
+
+      {/* 1. Health Score Card */}
+      <HealthScoreCard
+        score={healthScore.score}
+        label={healthScore.label}
+        activeCount={activeCount}
+        summary={healthSummary}
+        conditions={conditions.filter(c => c.condition_type !== 'resolved')}
+      />
+
+      {/* 2. "Ongoing Conditions" heading */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '0 2px' }}>
+        <span style={{ fontWeight: 700, fontSize: 15, color: '#1C1C1E' }}>Ongoing Conditions</span>
+        <div style={{ flex: 1, height: 1, background: '#E5E5EA' }} />
+        <span style={{
+          fontSize: 10, fontWeight: 700, padding: '3px 10px', borderRadius: 20,
+          background: '#FFF5F0', color: '#D44800',
+        }}>
+          {activeCount} Active
+        </span>
+      </div>
+
+      {/* 3. Condition Cards */}
+      {conditions.length > 0 ? (
         conditions.map((condition) => (
           <ConditionCard
             key={condition.id}
             condition={condition}
-            recommendations={recommendations}
             onDelete={() => handleDeleteCondition(condition.id)}
             onAddMed={() => setAddMedSheet(condition.id)}
             onDeleteMed={handleDeleteMed}
-            onCartClick={onCartClick}
+            onAddMon={() => setAddMonSheet(condition.id)}
+            onDeleteMon={handleDeleteMon}
           />
         ))
       ) : (
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 text-center">
-          <span className="text-4xl mb-3 block">🎉</span>
-          <h3 className="font-semibold text-sm text-gray-900 mb-1">No Conditions Recorded</h3>
-          <p className="text-xs text-gray-500">
+        <div style={{
+          background: 'white', borderRadius: 20, padding: 24, textAlign: 'center',
+          border: '1.5px solid #E5E5EA',
+        }}>
+          <span style={{ fontSize: 36, display: 'block', marginBottom: 8 }}>🎉</span>
+          <div style={{ fontWeight: 600, fontSize: 14, color: '#1C1C1E', marginBottom: 4 }}>No Conditions Recorded</div>
+          <div style={{ fontSize: 12, color: '#8E8E93', lineHeight: 1.5 }}>
             When your vet identifies a condition, it will appear here with medication tracking, monitoring schedules, and management chronology.
-          </p>
+          </div>
         </div>
       )}
 
-
-      {/* Add Another Condition — styled button matching JSX */}
+      {/* 4. Add Another Condition */}
       <button
         onClick={() => setAddSheet(true)}
-        className="w-full text-left"
         style={{
-          background: 'white',
-          border: '1.5px dashed #C7C7CC',
-          borderRadius: 14,
-          padding: 16,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 12,
-          cursor: 'pointer',
+          width: '100%', background: 'white', border: '1.5px dashed #C7C7CC',
+          borderRadius: 14, padding: 16, display: 'flex', alignItems: 'center',
+          gap: 12, cursor: 'pointer', textAlign: 'left',
         }}
       >
         <div style={{
-          width: 40, height: 40, borderRadius: 12,
-          background: '#F2F2F7', display: 'flex', alignItems: 'center',
-          justifyContent: 'center', fontSize: 20,
-        }}>
-          ➕
-        </div>
+          width: 40, height: 40, borderRadius: 12, background: '#F2F2F7',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20,
+        }}>➕</div>
         <div>
           <div style={{ fontWeight: 600, fontSize: 14, color: '#333' }}>Add Another Condition</div>
           <div style={{ fontSize: 12, color: '#8E8E93' }}>Diabetes, allergies, skin conditions & more</div>
         </div>
       </button>
 
-      {/* Last Vet Visit */}
+      {/* 5. Last Vet Visit */}
       <LastVetVisitCard vetVisit={vetVisit} />
 
-      {/* Management Chronology */}
-      {(timeline.length > 0 || hasConditions) && (
-        <ConditionsChronology timeline={timeline} conditions={conditions} />
+      {/* 6. Ask the Vet */}
+      <AskTheVetSection
+        questions={vetQuestions}
+        loading={vetQLoading}
+        onRegenerate={handleRegenerate}
+      />
+
+      {/* 7. Health Management Timeline */}
+      {(timeline.length > 0 || conditions.length > 0) && (
+        <ConditionsChronology timeline={timeline} total={timelineTotal} />
       )}
 
-      {/* Complete Health Analysis PDF */}
+      {/* 8. PDF Card */}
       <ConditionsPdfCard
         petName={petName}
         pdfState={pdfState}
@@ -313,101 +952,59 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
         onReset={() => setPdfState('idle')}
       />
 
-      {/* Add Condition Sheet */}
+      {/* ─── Sheets ─── */}
       <BottomSheet open={addSheet} onClose={() => setAddSheet(false)} title="Add Condition">
         <div className="space-y-3">
-          <div>
-            <label className="text-xs font-semibold text-gray-500 mb-1 block">Name</label>
-            <input
-              type="text"
-              value={conditionForm.name}
-              onChange={(e) => setConditionForm({ ...conditionForm, name: e.target.value })}
-              placeholder="e.g. Hip Dysplasia"
-              className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-brand"
-            />
-          </div>
-          <div>
-            <label className="text-xs font-semibold text-gray-500 mb-1 block">Diagnosis</label>
-            <input
-              type="text"
-              value={conditionForm.diagnosis}
-              onChange={(e) => setConditionForm({ ...conditionForm, diagnosis: e.target.value })}
-              placeholder="Brief diagnosis description"
-              className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-brand"
-            />
-          </div>
+          {[
+            { key: 'name', label: 'Name', placeholder: 'e.g. Hip Dysplasia' },
+            { key: 'diagnosis', label: 'Diagnosis', placeholder: 'Brief diagnosis description' },
+            { key: 'since', label: 'Diagnosed Since', placeholder: 'DD/MM/YYYY' },
+            { key: 'managed_by', label: 'Managing Vet', placeholder: 'e.g. Dr. Meera Nair, Bandra' },
+            { key: 'icon', label: 'Icon', placeholder: 'e.g. 🦴' },
+          ].map(field => (
+            <div key={field.key}>
+              <label className="text-xs font-semibold text-gray-500 mb-1 block">{field.label}</label>
+              <input
+                type="text"
+                value={(conditionForm as Record<string, string>)[field.key]}
+                onChange={(e) => setConditionForm({ ...conditionForm, [field.key]: e.target.value })}
+                placeholder={field.placeholder}
+                className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-brand"
+                maxLength={field.key === 'icon' ? 4 : undefined}
+              />
+            </div>
+          ))}
           <div>
             <label className="text-xs font-semibold text-gray-500 mb-1 block">Type</label>
             <div className="flex gap-2">
               {(['chronic', 'episodic', 'resolved'] as const).map(t => (
-                <button
-                  key={t}
-                  onClick={() => setConditionForm({ ...conditionForm, condition_type: t })}
+                <button key={t} onClick={() => setConditionForm({ ...conditionForm, condition_type: t })}
                   className="flex-1 py-2 rounded-xl text-xs font-semibold border transition-colors"
                   style={{
                     borderColor: conditionForm.condition_type === t ? '#D44800' : '#E5E7EB',
                     backgroundColor: conditionForm.condition_type === t ? '#FFF5F0' : 'white',
                     color: conditionForm.condition_type === t ? '#D44800' : '#6B7280',
-                  }}
-                >
+                  }}>
                   {t.charAt(0).toUpperCase() + t.slice(1)}
                 </button>
               ))}
             </div>
           </div>
           <div>
-            <label className="text-xs font-semibold text-gray-500 mb-1 block">Diagnosed Since</label>
-            <input
-              type="text"
-              value={conditionForm.since}
-              onChange={(e) => setConditionForm({ ...conditionForm, since: e.target.value })}
-              placeholder="DD/MM/YYYY"
-              className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-brand"
-            />
-          </div>
-          <div>
-            <label className="text-xs font-semibold text-gray-500 mb-1 block">Managing Vet</label>
-            <input
-              type="text"
-              value={conditionForm.managed_by}
-              onChange={(e) => setConditionForm({ ...conditionForm, managed_by: e.target.value })}
-              placeholder="e.g. Dr. Meera Nair, Bandra"
-              className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-brand"
-            />
-          </div>
-          <div>
-            <label className="text-xs font-semibold text-gray-500 mb-1 block">Icon</label>
-            <input
-              type="text"
-              value={conditionForm.icon}
-              onChange={(e) => setConditionForm({ ...conditionForm, icon: e.target.value })}
-              placeholder="e.g. 🦴"
-              className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-brand"
-              maxLength={4}
-            />
-          </div>
-          <div>
             <label className="text-xs font-semibold text-gray-500 mb-1 block">Notes</label>
-            <textarea
-              value={conditionForm.notes}
+            <textarea value={conditionForm.notes}
               onChange={(e) => setConditionForm({ ...conditionForm, notes: e.target.value })}
-              placeholder="Additional notes..."
-              rows={2}
-              className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-brand resize-none"
-            />
+              placeholder="Additional notes..." rows={2}
+              className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-brand resize-none" />
           </div>
-          <button
-            onClick={handleAddCondition}
-            disabled={saving || !conditionForm.name.trim()}
+          <button onClick={handleAddCondition} disabled={saving || !conditionForm.name.trim()}
             className="w-full py-3 rounded-xl text-white text-sm font-semibold disabled:opacity-50"
-            style={{ background: 'var(--brand-gradient)' }}
-          >
-            {saving ? 'Adding...' : 'Add Condition'}
+            style={{ background: 'var(--brand-gradient)' }}>
+            {saving ? 'Adding…' : 'Add Condition'}
           </button>
         </div>
       </BottomSheet>
 
-      {/* Add Medication Sheet */}
       <BottomSheet open={!!addMedSheet} onClose={() => setAddMedSheet(null)} title="Add Medication">
         <div className="space-y-3">
           {[
@@ -418,699 +1015,43 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
           ].map(field => (
             <div key={field.key}>
               <label className="text-xs font-semibold text-gray-500 mb-1 block">{field.label}</label>
-              <input
-                type="text"
-                value={(medForm as Record<string, string>)[field.key]}
+              <input type="text" value={(medForm as Record<string, string>)[field.key]}
                 onChange={(e) => setMedForm({ ...medForm, [field.key]: e.target.value })}
                 placeholder={field.placeholder}
-                className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-brand"
-              />
+                className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-brand" />
             </div>
           ))}
-          <button
-            onClick={handleAddMed}
-            disabled={saving || !medForm.name.trim()}
+          <button onClick={handleAddMed} disabled={saving || !medForm.name.trim()}
             className="w-full py-3 rounded-xl text-white text-sm font-semibold disabled:opacity-50"
-            style={{ background: 'var(--brand-gradient)' }}
-          >
-            {saving ? 'Adding...' : 'Add Medication'}
+            style={{ background: 'var(--brand-gradient)' }}>
+            {saving ? 'Adding…' : 'Add Medication'}
           </button>
         </div>
       </BottomSheet>
 
-      {/* Add Monitoring Sheet */}
       <BottomSheet open={!!addMonSheet} onClose={() => setAddMonSheet(null)} title="Add Monitoring">
         <div className="space-y-3">
           <div>
             <label className="text-xs font-semibold text-gray-500 mb-1 block">Check Name</label>
-            <input
-              type="text"
-              value={monForm.name}
+            <input type="text" value={monForm.name}
               onChange={(e) => setMonForm({ ...monForm, name: e.target.value })}
               placeholder="e.g. Blood Work"
-              className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-brand"
-            />
+              className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-brand" />
           </div>
           <div>
             <label className="text-xs font-semibold text-gray-500 mb-1 block">Frequency</label>
-            <input
-              type="text"
-              value={monForm.frequency}
+            <input type="text" value={monForm.frequency}
               onChange={(e) => setMonForm({ ...monForm, frequency: e.target.value })}
               placeholder="e.g. Every 6 months"
-              className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-brand"
-            />
+              className="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-brand" />
           </div>
-          <button
-            onClick={handleAddMon}
-            disabled={saving || !monForm.name.trim()}
+          <button onClick={handleAddMon} disabled={saving || !monForm.name.trim()}
             className="w-full py-3 rounded-xl text-white text-sm font-semibold disabled:opacity-50"
-            style={{ background: 'var(--brand-gradient)' }}
-          >
-            {saving ? 'Adding...' : 'Add Monitoring'}
+            style={{ background: 'var(--brand-gradient)' }}>
+            {saving ? 'Adding…' : 'Add Monitoring'}
           </button>
         </div>
       </BottomSheet>
-    </div>
-  );
-}
-
-/* ───────────────────────────────────────────────────────────── */
-/*  Condition Card — matches JSX renderConditionsTab exactly    */
-/* ───────────────────────────────────────────────────────────── */
-
-function ConditionCard({
-  condition,
-  recommendations,
-  onDelete,
-  onAddMed,
-  onDeleteMed,
-  onCartClick,
-}: {
-  condition: ConditionItem;
-  recommendations: ConditionRecommendation[];
-  onDelete: () => void;
-  onAddMed: () => void;
-  onDeleteMed: (id: string) => void;
-  onCartClick: (itemId?: string) => void;
-}) {
-  const statusMap: Record<string, string> = {
-    chronic: 'managed',
-    episodic: 'upcoming',
-    resolved: 'done',
-  };
-
-  const badgeLabelMap: Record<string, string> = {
-    chronic: 'MANAGED',
-    episodic: 'EPISODIC',
-    resolved: 'RESOLVED',
-  };
-
-  const hasUrgentMeds = condition.medications.some(
-    m => m.status === 'active' && getRefillStatus(m.refill_due_date) !== 'ok'
-  );
-
-  // Filter recommendations relevant to this condition
-  const condRecs = recommendations.filter(
-    r => r.title.toLowerCase().includes(condition.name.toLowerCase()) ||
-         r.reason.toLowerCase().includes(condition.name.toLowerCase())
-  );
-
-  return (
-    <div
-      className="bg-white rounded-2xl p-4"
-      style={{
-        border: '1.5px solid #007AFF',
-        boxShadow: '0 2px 12px rgba(0,122,255,0.1)',
-      }}
-    >
-      {/* Header with icon box */}
-      <div className="flex items-center gap-2.5 mb-3">
-        <div
-          style={{
-            width: 44, height: 44, borderRadius: 12,
-            background: '#F0F6FF', display: 'flex',
-            alignItems: 'center', justifyContent: 'center', fontSize: 22,
-          }}
-        >
-          {condition.icon || '🏥'}
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="font-bold text-[15px]">{condition.name}</div>
-          <div className="text-xs text-[#8E8E93]">
-            {condition.diagnosed_at ? `Diagnosed ${formatApiDate(condition.diagnosed_at)}` : ''}
-            {condition.managed_by ? ` · ${condition.managed_by}` : ''}
-          </div>
-        </div>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <StatusBadge
-            status={statusMap[condition.condition_type] || 'managed'}
-            label={badgeLabelMap[condition.condition_type] || condition.condition_type.toUpperCase()}
-          />
-          <button onClick={onDelete} className="text-gray-400 hover:text-red-500 text-xs" title="Remove">✕</button>
-        </div>
-      </div>
-
-      {/* Current Medications */}
-      <div style={{ fontSize: 11, fontWeight: 700, color: '#8E8E93', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 }}>
-        Current medications
-      </div>
-      {condition.medications.length > 0 ? (
-        condition.medications.map((med) => (
-          <MedRow
-            key={med.id}
-            med={med}
-            onDelete={() => onDeleteMed(med.id)}
-            onOrder={() => onCartClick()}
-          />
-        ))
-      ) : (
-        <p className="text-xs text-gray-400 mb-2">No medications added</p>
-      )}
-      <AddRow label="Add medication" onClick={onAddMed} />
-
-      {/* Order Medications button if any urgent/upcoming */}
-      {hasUrgentMeds && (
-        <button
-          onClick={() => onCartClick()}
-          style={{
-            width: '100%', marginTop: 10, background: '#D44800',
-            color: 'white', border: 'none', borderRadius: 10,
-            padding: '10px', fontSize: 13, fontWeight: 700, cursor: 'pointer',
-          }}
-        >
-          🔄 Order Medications
-        </button>
-      )}
-
-
-      {/* PetCircle Recommendations */}
-      {condRecs.length > 0 && (
-        <div style={{ marginTop: 14 }}>
-          <div className="flex items-center gap-1.5 mb-2.5">
-            <div style={{
-              width: 20, height: 20, borderRadius: 6, background: '#D44800',
-              display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11,
-            }}>
-              🐾
-            </div>
-            <div style={{ fontSize: 11, fontWeight: 700, color: '#D44800', textTransform: 'uppercase', letterSpacing: 0.6 }}>
-              PetCircle Recommendations
-            </div>
-          </div>
-          <div className="flex flex-col gap-2">
-            {condRecs.map((rec, k) => {
-              const pColor = PRIORITY_COLORS[rec.priority] || '#007AFF';
-              const pBg = PRIORITY_BG[rec.priority] || '#F0F6FF';
-              const pLabel = PRIORITY_LABEL[rec.priority] || 'INFO';
-              return (
-                <div
-                  key={k}
-                  style={{
-                    background: pBg,
-                    border: `1px solid ${pColor}22`,
-                    borderRadius: 10,
-                    padding: '10px 12px',
-                  }}
-                >
-                  <div className="flex items-start gap-2.5">
-                    <div style={{ fontSize: 18, flexShrink: 0, marginTop: 1 }}>{rec.icon}</div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
-                        <div style={{ fontWeight: 600, fontSize: 13, color: '#1A1A1A' }}>{rec.title}</div>
-                        <div style={{
-                          background: pColor + '22', color: pColor,
-                          borderRadius: 20, padding: '1px 7px', fontSize: 10, fontWeight: 700, flexShrink: 0,
-                        }}>
-                          {pLabel}
-                        </div>
-                      </div>
-                      <div style={{ fontSize: 11, color: '#555', lineHeight: 1.45, marginBottom: rec.cart_id ? 8 : 0 }}>
-                        {rec.reason}
-                      </div>
-                      {rec.cart_id && (
-                        <button
-                          onClick={() => onCartClick(rec.cart_id!)}
-                          style={{
-                            background: pColor, color: 'white', border: 'none',
-                            borderRadius: 8, padding: '6px 12px', fontSize: 11, fontWeight: 700, cursor: 'pointer',
-                          }}
-                        >
-                          Order Now →
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {condition.notes && (
-        <div style={{ marginTop: 12, background: '#F0F6FF', borderRadius: 10, padding: '10px 12px', fontSize: 12, color: '#007AFF', lineHeight: 1.5 }}>
-          📋 Vet Notes: {condition.notes}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ───────────────────────────────────────────────────────────── */
-/*  Med Row — refill due date + status badge matching JSX       */
-/* ───────────────────────────────────────────────────────────── */
-
-function MedRow({
-  med,
-  onDelete,
-  onOrder,
-}: {
-  med: ConditionMedicationItem;
-  onDelete: () => void;
-  onOrder: () => void;
-}) {
-  const [reminderOn, setReminderOn] = useState(true);
-  const [freq, setFreq] = useState(1);
-  const [unit, setUnit] = useState('month');
-
-  const refillStatus = getRefillStatus(med.refill_due_date);
-  const st = STATUS_CONFIG[refillStatus] || STATUS_CONFIG.upcoming;
-  const isUrgent = refillStatus === 'urgent';
-
-  return (
-    <div style={{
-      background: isUrgent ? '#FFF0F0' : '#F7F4F0',
-      borderRadius: 10, padding: '10px 12px', marginBottom: 6,
-    }}>
-      <div className="flex items-center gap-2.5">
-        <div style={{ fontSize: 16 }}>💊</div>
-        <div className="flex-1 min-w-0">
-          <div style={{ fontWeight: 600, fontSize: 13 }}>{med.name}</div>
-          <div style={{ fontSize: 11, color: '#8E8E93' }}>{med.dose || med.frequency || ''}</div>
-        </div>
-        <div style={{ textAlign: 'right' }}>
-          {med.refill_due_date && (
-            <div style={{ fontSize: 10, color: st.color, fontWeight: 700 }}>
-              Refill {formatApiDate(med.refill_due_date)}
-            </div>
-          )}
-          <StatusBadge status={refillStatus === 'ok' ? (med.status === 'active' ? 'done' : 'missing') : refillStatus} label={refillStatus === 'ok' ? (med.status === 'active' ? 'Active' : 'Stopped') : st.label} />
-        </div>
-        <button onClick={onDelete} className="text-gray-300 hover:text-red-500 text-xs ml-1" title="Remove">✕</button>
-      </div>
-      <ReminderBar enabled={reminderOn} onToggle={setReminderOn} freq={freq} unit={unit} onFreqChange={(f, u) => { setFreq(f); setUnit(u); }} />
-    </div>
-  );
-}
-
-/* ───────────────────────────────────────────────────────────── */
-/*  Monitor Row — nextDue date + status badge matching JSX      */
-/* ───────────────────────────────────────────────────────────── */
-
-function MonitorRow({
-  mon,
-  isFirst,
-  onDelete,
-}: {
-  mon: ConditionMonitoringItem;
-  isFirst: boolean;
-  onDelete: () => void;
-}) {
-  const [reminderOn, setReminderOn] = useState(true);
-  const [freq, setFreq] = useState(6);
-  const [unit, setUnit] = useState('month');
-
-  const monStatus = getMonitoringStatus(mon.next_due_date);
-  const st = STATUS_CONFIG[monStatus] || STATUS_CONFIG.upcoming;
-
-  return (
-    <div style={{
-      borderTop: isFirst ? 'none' : '1px solid #F0EDE8',
-      paddingTop: isFirst ? 0 : 8,
-      marginTop: isFirst ? 0 : 8,
-    }}>
-      <div className="flex items-center gap-2.5 py-2">
-        <div style={{ fontSize: 16 }}>🩺</div>
-        <div className="flex-1 text-[13px] font-medium">{mon.name}</div>
-        <div style={{ textAlign: 'right' }}>
-          {mon.next_due_date && (
-            <div style={{ fontSize: 11, color: '#8E8E93' }}>{formatApiDate(mon.next_due_date)}</div>
-          )}
-          <StatusBadge status={monStatus} label={st.label} />
-        </div>
-        <button onClick={onDelete} className="text-gray-300 hover:text-red-500 text-xs ml-1" title="Remove">✕</button>
-      </div>
-      <ReminderBar enabled={reminderOn} onToggle={setReminderOn} freq={freq} unit={unit} onFreqChange={(f, u) => { setFreq(f); setUnit(u); }} />
-    </div>
-  );
-}
-
-/* ───────────────────────────────────────────────────────────── */
-/*  Last Vet Visit — rich card matching JSX                     */
-/* ───────────────────────────────────────────────────────────── */
-
-function LastVetVisitCard({ vetVisit }: { vetVisit: LastVetVisit | null }) {
-  if (!vetVisit) return null;
-
-  const statusColors: Record<string, { color: string; bg: string; label: string }> = {
-    overdue: { color: '#FF3B30', bg: '#FFF0F0', label: 'Overdue' },
-    due_soon: { color: '#FF9500', bg: '#FFF6ED', label: 'Due Soon' },
-    on_track: { color: '#34C759', bg: '#F0FFF4', label: 'On Track' },
-  };
-
-  const st = vetVisit.status ? statusColors[vetVisit.status] : null;
-
-  return (
-    <div style={{
-      background: 'white', borderRadius: 16, padding: 16,
-      border: '1.5px solid #34C75933',
-      boxShadow: '0 1px 6px rgba(0,0,0,0.06)',
-    }}>
-      {/* Header */}
-      <div className="flex items-center gap-3 mb-3">
-        <div style={{
-          width: 44, height: 44, borderRadius: 12,
-          background: '#F0FFF4', display: 'flex',
-          alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0,
-        }}>
-          🩺
-        </div>
-        <div className="flex-1">
-          <div style={{ fontWeight: 700, fontSize: 15 }}>Last Vet Visit</div>
-          <div style={{ fontSize: 11, color: '#AEAEB2', marginTop: 1 }}>Managing vet · condition follow-up</div>
-        </div>
-        {st && (
-          <div style={{
-            background: st.bg, color: st.color,
-            borderRadius: 20, padding: '4px 11px',
-            fontSize: 11, fontWeight: 700,
-          }}>
-            {st.label}
-          </div>
-        )}
-      </div>
-
-      <div className="flex flex-col gap-2">
-        {/* Vet info */}
-        {vetVisit.vet_name && (
-          <div style={{
-            display: 'flex', gap: 12, padding: '10px 12px',
-            background: '#FAFAF9', borderRadius: 10, border: '1px solid #F0EDE8',
-          }}>
-            <div style={{
-              width: 38, height: 38, borderRadius: 10,
-              background: '#F0FFF4', display: 'flex',
-              alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0,
-            }}>
-              👩‍⚕️
-            </div>
-            <div className="flex-1 min-w-0">
-              <div style={{ fontWeight: 600, fontSize: 13, color: '#1A1A1A' }}>{vetVisit.vet_name}</div>
-              {vetVisit.clinic_name && (
-                <div style={{ fontSize: 11, color: '#8E8E93', marginTop: 1 }}>
-                  {vetVisit.clinic_name}{vetVisit.address ? ` · ${vetVisit.address}` : ''}
-                </div>
-              )}
-              {vetVisit.managing_condition && (
-                <div style={{ fontSize: 11, color: '#8E8E93', marginTop: 1 }}>
-                  {vetVisit.managing_condition} — managing since {vetVisit.managing_since ? formatApiDate(vetVisit.managing_since) : 'unknown'}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Date cards */}
-        {(vetVisit.last_visit_date || vetVisit.next_due_date) && (
-          <div className="flex gap-2">
-            {vetVisit.last_visit_date && (
-              <div className="flex-1" style={{ background: '#F7F4F0', borderRadius: 10, padding: '9px 12px' }}>
-                <div style={{ fontSize: 10, fontWeight: 700, color: '#8E8E93', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 3 }}>
-                  Last Visit
-                </div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: '#1A1A1A' }}>
-                  {formatApiDate(vetVisit.last_visit_date)}
-                </div>
-                {(() => {
-                  const rel = getDateRelative(vetVisit.last_visit_date);
-                  return rel ? (
-                    <div style={{ fontSize: 11, color: '#FF9500', fontWeight: 600, marginTop: 2 }}>
-                      {rel}
-                    </div>
-                  ) : null;
-                })()}
-              </div>
-            )}
-            {vetVisit.next_due_date && (
-              <div
-                className="flex-1"
-                style={{
-                  background: vetVisit.status === 'overdue' ? '#FFF0F0' : '#FFF6ED',
-                  borderRadius: 10,
-                  border: `1px solid ${vetVisit.status === 'overdue' ? '#FF3B3033' : '#FF950033'}`,
-                  padding: '9px 12px',
-                }}
-              >
-                <div style={{ fontSize: 10, fontWeight: 700, color: '#8E8E93', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 3 }}>
-                  Next Due
-                </div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: '#1A1A1A' }}>
-                  {formatApiDate(vetVisit.next_due_date)}
-                </div>
-                {vetVisit.status && (
-                  <div style={{
-                    fontSize: 11, fontWeight: 600, marginTop: 2,
-                    color: vetVisit.status === 'overdue' ? '#FF3B30' : vetVisit.status === 'due_soon' ? '#FF9500' : '#34C759',
-                  }}>
-                    {vetVisit.status === 'overdue' ? 'Overdue' : vetVisit.status === 'due_soon' ? 'Due Soon' : 'On Track'}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Vet Notes */}
-        {vetVisit.notes && (
-          <div style={{ background: '#F0F6FF', borderRadius: 10, padding: '10px 12px', fontSize: 12, color: '#007AFF', lineHeight: 1.5 }}>
-            📋 Vet Notes: {vetVisit.notes}
-          </div>
-        )}
-
-        {/* Empty state */}
-        {!vetVisit.vet_name && !vetVisit.last_visit_date && (
-          <p className="text-sm text-gray-500">No vet visit records available</p>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ───────────────────────────────────────────────────────────── */
-/*  Management History — vertical timeline matching JSX         */
-/* ───────────────────────────────────────────────────────────── */
-
-function ConditionsChronology({
-  timeline,
-  conditions,
-}: {
-  timeline: TimelineEvent[];
-  conditions: ConditionItem[];
-}) {
-  const [open, setOpen] = useState(false);
-
-  // Fallback timeline from conditions if API returns empty
-  const displayTimeline = timeline.length > 0
-    ? timeline
-    : conditions
-        .filter(c => c.diagnosed_at)
-        .sort((a, b) => (b.diagnosed_at || '').localeCompare(a.diagnosed_at || ''))
-        .map(c => ({
-          date: c.diagnosed_at!,
-          type: 'diagnostic',
-          icon: c.icon || '🩺',
-          title: `${c.name} diagnosed`,
-          detail: c.diagnosis || c.condition_type,
-          tag: 'Diagnosis',
-        }));
-
-  if (displayTimeline.length === 0) return null;
-
-  return (
-    <div style={{
-      background: 'white', borderRadius: 16, overflow: 'hidden',
-      border: '1.5px solid #8E8E9333',
-      boxShadow: '0 1px 6px rgba(0,0,0,0.06)',
-    }}>
-      <div
-        onClick={() => setOpen(o => !o)}
-        style={{
-          padding: '14px 16px', display: 'flex', alignItems: 'center',
-          gap: 12, cursor: 'pointer',
-        }}
-      >
-        <div style={{
-          width: 44, height: 44, borderRadius: 12,
-          background: '#F7F4F0', display: 'flex',
-          alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0,
-        }}>
-          📅
-        </div>
-        <div className="flex-1">
-          <div style={{ fontWeight: 700, fontSize: 15 }}>Management History</div>
-          <div style={{ fontSize: 11, color: '#AEAEB2', marginTop: 1 }}>
-            Vet visits · diagnostics · treatments · last 2 years
-          </div>
-        </div>
-        <div style={{
-          fontSize: 13, color: '#C7C7CC',
-          transform: open ? 'rotate(180deg)' : 'none',
-          transition: 'transform 0.2s',
-        }}>
-          ▾
-        </div>
-      </div>
-
-      {open && (
-        <div style={{ borderTop: '1px solid #F0EDE8', padding: '4px 16px 16px' }}>
-          {displayTimeline.map((ev, i) => {
-            const tagColor = TAG_COLORS[ev.tag] || '#8E8E93';
-            return (
-              <div key={i} style={{ display: 'flex', gap: 12, paddingTop: 14, position: 'relative' }}>
-                {/* Vertical line */}
-                {i < displayTimeline.length - 1 && (
-                  <div style={{
-                    position: 'absolute', left: 15, top: 30, bottom: -14,
-                    width: 2, background: '#F0EDE8',
-                  }} />
-                )}
-                {/* Circle */}
-                <div style={{
-                  width: 30, height: 30, borderRadius: '50%',
-                  background: tagColor + '18',
-                  border: `2px solid ${tagColor}44`,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: 14, flexShrink: 0, zIndex: 1,
-                }}>
-                  {ev.icon}
-                </div>
-                {/* Content */}
-                <div className="flex-1">
-                  <div className="flex items-center gap-1.5 mb-0.5 flex-wrap">
-                    <div style={{ fontWeight: 600, fontSize: 13, color: '#1A1A1A' }}>{ev.title}</div>
-                    <div style={{
-                      background: tagColor + '18', color: tagColor,
-                      borderRadius: 20, padding: '1px 7px', fontSize: 10, fontWeight: 700,
-                    }}>
-                      {ev.tag}
-                    </div>
-                  </div>
-                  <div style={{ fontSize: 11, color: '#8E8E93', marginBottom: 2 }}>
-                    {formatApiDate(ev.date)}
-                  </div>
-                  {ev.detail && (
-                    <div style={{ fontSize: 12, color: '#555', lineHeight: 1.4 }}>{ev.detail}</div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ───────────────────────────────────────────────────────────── */
-/*  Complete Health Analysis PDF — 2-column grid, dark button   */
-/* ───────────────────────────────────────────────────────────── */
-
-function ConditionsPdfCard({
-  petName,
-  pdfState,
-  onGenerate,
-  onReset,
-}: {
-  petName: string;
-  pdfState: 'idle' | 'generating' | 'done';
-  onGenerate: () => void;
-  onReset: () => void;
-}) {
-  const pdfItems = [
-    { icon: '🩺', label: 'Vet visits & exams' },
-    { icon: '🔬', label: 'Diagnostics & imaging' },
-    { icon: '💊', label: 'Medications & dosage' },
-    { icon: '🦴', label: 'Conditions & diagnosis' },
-    { icon: '📅', label: 'Treatment chronology' },
-    { icon: '⚖️', label: 'Weight history' },
-  ];
-
-  return (
-    <div style={{
-      background: 'white', borderRadius: 16, padding: 16,
-      border: '1.5px solid #1A1A1A22',
-      boxShadow: '0 1px 6px rgba(0,0,0,0.06)',
-    }}>
-      {/* Header */}
-      <div className="flex items-center gap-3 mb-3">
-        <div style={{
-          width: 44, height: 44, borderRadius: 12,
-          background: '#F7F4F0', display: 'flex',
-          alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0,
-        }}>
-          📄
-        </div>
-        <div className="flex-1">
-          <div style={{ fontWeight: 700, fontSize: 15 }}>Complete Health Analysis</div>
-          <div style={{ fontSize: 11, color: '#AEAEB2', marginTop: 1 }}>
-            Download full PDF record for vet or insurance
-          </div>
-        </div>
-      </div>
-
-      {/* 2-column grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5, marginBottom: 14 }}>
-        {pdfItems.map((r) => (
-          <div
-            key={r.label}
-            style={{
-              display: 'flex', alignItems: 'center', gap: 6,
-              padding: '5px 8px', background: '#F7F4F0', borderRadius: 8,
-            }}
-          >
-            <span style={{ fontSize: 13 }}>{r.icon}</span>
-            <span style={{ fontSize: 11, color: '#555', fontWeight: 500 }}>{r.label}</span>
-          </div>
-        ))}
-      </div>
-
-      {pdfState === 'done' ? (
-        <div style={{
-          background: '#F0FFF4', border: '1px solid #34C75944',
-          borderRadius: 12, padding: '12px 14px',
-          display: 'flex', alignItems: 'center', gap: 10,
-        }}>
-          <span style={{ fontSize: 20 }}>✅</span>
-          <div className="flex-1">
-            <div style={{ fontWeight: 700, fontSize: 13, color: '#1A6B2A' }}>
-              {petName}_Complete_Health.pdf ready
-            </div>
-            <div style={{ fontSize: 11, color: '#34C759', marginTop: 2 }}>
-              Saved to your downloads
-            </div>
-          </div>
-          <button
-            onClick={onReset}
-            style={{ background: 'none', border: 'none', color: '#AEAEB2', fontSize: 11, cursor: 'pointer', padding: 0 }}
-          >
-            ↺
-          </button>
-        </div>
-      ) : (
-        <button
-          onClick={onGenerate}
-          disabled={pdfState === 'generating'}
-          style={{
-            width: '100%',
-            background: pdfState === 'generating' ? '#F2EDE8' : '#1A1A1A',
-            color: pdfState === 'generating' ? '#D44800' : 'white',
-            border: 'none', borderRadius: 12, padding: 12,
-            fontSize: 14, fontWeight: 700,
-            cursor: pdfState === 'generating' ? 'default' : 'pointer',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-            transition: 'all 0.2s',
-          }}
-        >
-          {pdfState === 'generating' ? (
-            <>
-              <span style={{ animation: 'pulse 1s infinite' }}>⏳</span> Generating…
-            </>
-          ) : (
-            <>📥 Download PDF</>
-          )}
-        </button>
-      )}
     </div>
   );
 }

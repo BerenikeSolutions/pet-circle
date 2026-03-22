@@ -5,6 +5,7 @@ import type { DashboardData, WeightEntry, WeightHistoryResponse } from '@/lib/ap
 import {
   updatePreventiveDate, updateWeight, updatePreventiveFrequency,
   getWeightHistory, addWeightEntry, updateMedicineName, addToCart,
+  updateMonitoringDate,
 } from '@/lib/api';
 import StatusBadge from '@/components/ui/StatusBadge';
 import CareCard from '@/components/ui/CareCard';
@@ -26,14 +27,50 @@ interface HealthTabProps {
   onCartClick: (itemId?: string) => void;
 }
 
+// ─── Status colour helpers ───────────────────────────────────────────────────
+const STATUS_COLOR: Record<string, string> = {
+  done: '#34C759', up_to_date: '#34C759',
+  upcoming: '#FF9500',
+  overdue: '#FF3B30',
+  missing: '#8E8E93',
+};
+const STATUS_BG: Record<string, string> = {
+  done: '#F0FFF4', up_to_date: '#F0FFF4',
+  upcoming: '#FFF6ED',
+  overdue: '#FFF0F0',
+  missing: '#F2F2F7',
+};
+const STATUS_LABEL: Record<string, string> = {
+  done: 'Done', up_to_date: 'Done',
+  upcoming: 'Due Soon',
+  overdue: 'Overdue',
+  missing: 'No Record',
+};
+
+function getColor(status: string) { return STATUS_COLOR[status] || '#8E8E93'; }
+function getBg(status: string) { return STATUS_BG[status] || '#F2F2F7'; }
+function getLabel(status: string) { return STATUS_LABEL[status] || 'No Record'; }
+
+// ─── Monitoring item status ───────────────────────────────────────────────────
+function monStatus(nextDue: string | null, lastDone: string | null): string {
+  if (!lastDone && !nextDue) return 'missing';
+  if (!nextDue) return lastDone ? 'done' : 'missing';
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const due = new Date(nextDue);
+  if (isNaN(due.getTime())) return 'missing';
+  const diff = Math.ceil((due.getTime() - today.getTime()) / 86400000);
+  return diff < 0 ? 'overdue' : diff <= 30 ? 'upcoming' : 'done';
+}
+
 export default function HealthTab({ data, token, onUpdated, onCartClick }: HealthTabProps) {
   const [editingVax, setEditingVax] = useState<string | null>(null);
   const [editingCheckup, setEditingCheckup] = useState<string | null>(null);
+  const [editingMonId, setEditingMonId] = useState<string | null>(null);
+
   const [weightInput, setWeightInput] = useState('');
   const [weightSaving, setWeightSaving] = useState(false);
   const [weightMsg, setWeightMsg] = useState('');
 
-  // Real weight history from API
   const [weightHistory, setWeightHistory] = useState<WeightEntry[]>([]);
   const [idealRange, setIdealRange] = useState<{ min: number; max: number } | null>(null);
   const [weightLoading, setWeightLoading] = useState(true);
@@ -44,11 +81,12 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
   const deworming = filterByKeywords(records, DEWORMING_KW);
   const fleaTick = filterByKeywords(records, FLEA_TICK_KW);
   const checkups = filterByKeywords(records, CHECKUP_KW);
-
   const mandatoryVax = vaccines.filter(v => v.category === 'essential');
   const optionalVax = vaccines.filter(v => v.category !== 'essential');
 
-  // Base items — always shown, PetCircle Recommended
+  const pet = data.pet;
+
+  // ── Base checkup items ────────────────────────────────────────────────────
   const BASE_CHECKUP_NAMES = ['Vet Visit', 'Blood Work'];
   const baseCheckupItems = BASE_CHECKUP_NAMES.map(name => ({
     key: name,
@@ -57,55 +95,90 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
     record: checkups.find(c => c.item_name.toLowerCase().includes(name.toLowerCase())),
   }));
 
-  // Condition monitoring items — Vet Prescribed, pulled from conditions
-  const conditionMonItems = (data.conditions || []).flatMap(cond =>
-    cond.monitoring.map(mon => ({
-      key: `${cond.id}_${mon.id}`,
-      name: mon.name,
-      source: 'vet' as const,
+  // ── Condition monitoring items grouped by condition ───────────────────────
+  type MonBundle = {
+    conditionId: string;
+    conditionName: string;
+    conditionIcon: string;
+    items: Array<{
+      key: string;
+      name: string;
+      monitoringItem: NonNullable<typeof data.conditions>[0]['monitoring'][0];
+    }>;
+  };
+
+  const conditionBundles: MonBundle[] = (data.conditions || [])
+    .filter(cond => cond.is_active && cond.monitoring.length > 0)
+    .map(cond => ({
+      conditionId: cond.id,
       conditionName: cond.name,
-      monitoringItem: mon,
-    }))
-  );
+      conditionIcon: cond.icon || '🩺',
+      items: cond.monitoring.map(mon => ({
+        key: `${cond.id}_${mon.id}`,
+        name: mon.name,
+        monitoringItem: mon,
+      })),
+    }));
 
-  const allCheckupItems = [...baseCheckupItems, ...conditionMonItems];
-  const completedCheckups = allCheckupItems.filter(item =>
-    'record' in item
-      ? !!(item.record && (item.record.status === 'up_to_date' || item.record.status === 'done'))
-      : !!item.monitoringItem.last_done_date
-  ).length;
+  // ── Progress counts (flat list for total) ────────────────────────────────
+  const allCheckupFlat = [
+    ...baseCheckupItems.map(item => ({
+      isDone: !!(item.record && (item.record.status === 'up_to_date' || item.record.status === 'done')),
+    })),
+    ...conditionBundles.flatMap(b => b.items.map(it => ({
+      isDone: !!it.monitoringItem.last_done_date,
+    }))),
+  ];
+  const totalItems = allCheckupFlat.length;
+  const completedItems = allCheckupFlat.filter(i => i.isDone).length;
+  const pct = totalItems > 0 ? Math.round((completedItems / totalItems) * 100) : 0;
+  const barColor = pct === 100 ? '#34C759' : pct >= 50 ? '#FF9500' : '#FF3B30';
 
-  const pet = data.pet;
-
-  // Load real weight history
+  // ── Weight history ─────────────────────────────────────────────────────────
   const loadWeightHistory = useCallback(async () => {
     try {
       const resp: WeightHistoryResponse = await getWeightHistory(token);
       setWeightHistory(resp.entries);
       setIdealRange(resp.ideal_range);
-    } catch {
-      // Fallback: empty list
-    } finally {
+    } catch { /* ignore */ } finally {
       setWeightLoading(false);
     }
   }, [token]);
 
-  useEffect(() => {
-    loadWeightHistory();
-  }, [loadWeightHistory]);
+  useEffect(() => { loadWeightHistory(); }, [loadWeightHistory]);
 
-  // If no weight history entries but pet has an onboarding weight, show it as synthetic entry
   const effectiveHistory = weightHistory.length === 0 && pet.weight
     ? [{ id: 'onboarding', weight: pet.weight, recorded_at: new Date().toISOString().split('T')[0], note: 'Onboarding weight' } as WeightEntry]
     : weightHistory;
 
-  // Weight history sorted oldest-first for sparkline
   const sortedHistory = [...effectiveHistory].sort((a, b) =>
-    (a.recorded_at || '').localeCompare(b.recorded_at || '')
+    (a.recorded_at || '').localeCompare(b.recorded_at || ''),
   );
-  const sparklineData = sortedHistory.slice(-6);
-  const maxWeight = Math.max(...sparklineData.map(w => w.weight), 1);
+  const chartEntries = sortedHistory.slice(-6);
+  const maxWeight = Math.max(...chartEntries.map(w => w.weight), 1);
 
+  // ── Chart math (zayn style, relative baseline) ──────────────────────────
+  const chartMin = idealRange ? Math.max(0, idealRange.min - 5) : Math.max(0, maxWeight * 0.85);
+  const chartMax = idealRange ? idealRange.max + 5 : maxWeight * 1.1;
+  const chartH = 80;
+  const barHeightPx = (w: number) => {
+    const range = chartMax - chartMin;
+    if (range <= 0) return 10;
+    return Math.max(6, Math.round(((w - chartMin) / range) * chartH));
+  };
+
+  // Ideal range band positioning (top/height in px within chartH)
+  const idealBandTop = idealRange
+    ? chartH - barHeightPx(Math.min(idealRange.max, chartMax))
+    : null;
+  const idealBandBottom = idealRange
+    ? chartH - barHeightPx(Math.max(idealRange.min, chartMin))
+    : null;
+  const idealBandHeight = idealBandTop !== null && idealBandBottom !== null
+    ? Math.max(0, idealBandBottom - idealBandTop)
+    : 0;
+
+  // ── Event handlers ────────────────────────────────────────────────────────
   const handleDateSave = async (itemName: string, dateStr: string) => {
     await updatePreventiveDate(token, itemName, dateStr);
     onUpdated();
@@ -113,12 +186,7 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
 
   const handleFreqChange = async (itemName: string, freq: number, unit: string) => {
     const days = freqToDays(freq, unit);
-    try {
-      await updatePreventiveFrequency(token, itemName, days);
-      onUpdated();
-    } catch {
-      // Silently fail — local state already updated in UI
-    }
+    try { await updatePreventiveFrequency(token, itemName, days); onUpdated(); } catch { /* silent */ }
   };
 
   const handleMedicineSave = async (itemName: string, medicineName: string) => {
@@ -131,30 +199,29 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
       try {
         const productId = `med_${medicineName.toLowerCase().replace(/\s+/g, '_')}`;
         await addToCart(token, {
-          product_id: productId,
-          name: medicineName,
-          price: 0,
+          product_id: productId, name: medicineName, price: 0,
           icon: category === 'deworming' ? '🪱' : '🐛',
           sub: category === 'deworming' ? 'Deworming medicine' : 'Flea & Tick treatment',
-          tag: 'Reorder',
-          tag_color: '#D44800',
+          tag: 'Reorder', tag_color: '#D44800',
         });
         onCartClick(productId);
-      } catch {
-        onCartClick(fallbackId);
-      }
-    } else {
-      onCartClick(fallbackId);
-    }
+      } catch { onCartClick(fallbackId); }
+    } else { onCartClick(fallbackId); }
+  };
+
+  const handleMonitoringLog = async (monId: string, dateStr: string) => {
+    try {
+      await updateMonitoringDate(token, monId, dateStr);
+      onUpdated();
+    } catch { /* silent */ }
   };
 
   const handleWeightSave = async () => {
     const w = parseFloat(weightInput);
     if (!w || w < 0.01 || w > 999.99) {
-      const rangeHint = idealRange
+      setWeightMsg(idealRange
         ? `Expected range for ${pet.breed || pet.species}: ${idealRange.min}–${idealRange.max} kg`
-        : `Enter valid weight for your ${pet.species || 'pet'} (0.01–999.99 kg)`;
-      setWeightMsg(rangeHint);
+        : `Enter valid weight (0.01–999.99 kg)`);
       return;
     }
     setWeightSaving(true);
@@ -166,13 +233,10 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
       setWeightInput('');
       loadWeightHistory();
       onUpdated();
-    } catch {
-      setWeightMsg('Failed to save');
-    } finally {
-      setWeightSaving(false);
-    }
+    } catch { setWeightMsg('Failed to save'); } finally { setWeightSaving(false); }
   };
 
+  // ── VaxRow sub-component ──────────────────────────────────────────────────
   const VaxRow = ({ vax, isOptional }: { vax: typeof records[0]; isOptional: boolean }) => {
     const status = getStatusForRecord(vax);
     const initialFreq = daysToFreq(vax.custom_recurrence_days ?? vax.recurrence_days);
@@ -180,8 +244,6 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
     const [freq, setFreq] = useState(initialFreq.freq);
     const [freqUnit, setFreqUnit] = useState(initialFreq.unit);
     const [showVaxFreq, setShowVaxFreq] = useState(false);
-
-    // For optional vaccines, derive current months from days
     const currentDays = vax.custom_recurrence_days ?? vax.recurrence_days;
     const currentMonths = Math.round(currentDays / 30) || 12;
     const vaxFreqLabel = VAX_FREQ_LABELS[currentMonths] || `Every ${currentMonths} months`;
@@ -190,7 +252,7 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
       <div className="py-3 border-b border-gray-50 last:border-0">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: status === 'overdue' ? '#FF3B30' : status === 'upcoming' ? '#FF9500' : '#34C759' }} />
+            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: getColor(status) }} />
             <div>
               <p className="text-sm font-medium text-gray-900">{vax.item_name}</p>
               <p className="text-[11px] text-gray-500">
@@ -219,9 +281,7 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
               open={showVaxFreq}
               onClose={() => setShowVaxFreq(false)}
               currentMonths={currentMonths}
-              onSave={(months) => {
-                handleFreqChange(vax.item_name, months, 'month');
-              }}
+              onSave={(months) => { handleFreqChange(vax.item_name, months, 'month'); }}
             />
           </div>
         )}
@@ -229,9 +289,128 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
     );
   };
 
+  // ── BundleSubItem — owns its own reminder state ───────────────────────────
+  type SubItemProps = {
+    item: {
+      key: string;
+      name: string;
+      source: 'petcircle' | 'vet';
+      status: string;
+      lastDone: string | null;
+      nextDue: string | null;
+      note?: string;
+      onLog: () => void;
+    };
+  };
+  const BundleSubItem = ({ item }: SubItemProps) => {
+    const [reminderOn, setReminderOn] = useState(true);
+    const [rFreq, setRFreq] = useState(1);
+    const [rUnit, setRUnit] = useState('month');
+    const c = getColor(item.status);
+    const bg = getBg(item.status);
+    const lbl = getLabel(item.status);
+    return (
+      <div style={{ borderTop: '1px solid #F0EDE8', padding: '9px 12px 0' }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+          <div style={{ width: 2, alignSelf: 'stretch', background: c + '44', borderRadius: 2, flexShrink: 0, marginTop: 3, marginLeft: 6 }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap', marginBottom: 3 }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: '#1A1A1A' }}>{item.name}</span>
+              {item.source === 'petcircle' ? (
+                <span style={{ background: '#FFF3EE', color: '#D44800', borderRadius: 20, padding: '1px 7px', fontSize: 9, fontWeight: 700 }}>🐾 PetCircle</span>
+              ) : (
+                <span style={{ background: '#F0F6FF', color: '#007AFF', borderRadius: 20, padding: '1px 7px', fontSize: 9, fontWeight: 700 }}>Vet Prescribed</span>
+              )}
+            </div>
+            <div style={{ fontSize: 10.5, color: '#AEAEB2', lineHeight: 1.4, marginBottom: 4 }}>
+              {item.lastDone
+                ? `Last: ${formatApiDate(item.lastDone)}${item.nextDue ? ' · Next: ' + formatApiDate(item.nextDue) : ''}`
+                : (item.note || 'No record')}
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+              <div style={{ background: bg, color: c, borderRadius: 20, padding: '2px 8px', fontSize: 10, fontWeight: 700 }}>{lbl}</div>
+              <button
+                onClick={item.onLog}
+                style={{ background: '#F2EDE8', border: 'none', borderRadius: 7, padding: '3px 7px', fontSize: 10, color: '#555', cursor: 'pointer', fontWeight: 600 }}
+              >
+                ✎ Log
+              </button>
+            </div>
+          </div>
+        </div>
+        <div style={{ marginLeft: 16, marginBottom: 8 }}>
+          <ReminderBar
+            enabled={reminderOn} onToggle={setReminderOn}
+            freq={rFreq} unit={rUnit}
+            onFreqChange={(f, u) => { setRFreq(f); setRUnit(u); }}
+          />
+        </div>
+      </div>
+    );
+  };
+
+  // ── Bundle sub-component ──────────────────────────────────────────────────
+  const CheckupBundle = ({
+    bundleIcon,
+    bundleLabel,
+    actionLabel,
+    items,
+  }: {
+    bundleIcon: string;
+    bundleLabel: string;
+    actionLabel: string;
+    items: Array<{
+      key: string;
+      name: string;
+      source: 'petcircle' | 'vet';
+      status: string;
+      lastDone: string | null;
+      nextDue: string | null;
+      note?: string;
+      onLog: () => void;
+    }>;
+  }) => {
+    const bundleDone = items.filter(i => i.status === 'done' || i.status === 'up_to_date').length;
+    const bundleTotal = items.length;
+    const allDone = bundleDone === bundleTotal;
+    const anyDone = bundleDone > 0;
+    const bColor = allDone ? '#34C759' : anyDone ? '#FF9500' : '#8E8E93';
+    const bBg = allDone ? '#F0FFF4' : anyDone ? '#FFF6ED' : '#F2F2F7';
+    const bLbl = allDone ? 'Done' : anyDone ? 'In Progress' : 'No Record';
+
+    return (
+      <div style={{ border: `1.5px solid ${bColor}33`, borderRadius: 12, overflow: 'hidden', background: 'white', marginBottom: 10 }}>
+        {/* Bundle header */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', background: bBg + '88' }}>
+          <div style={{ width: 34, height: 34, borderRadius: 10, background: bBg, border: `1.5px solid ${bColor}44`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, flexShrink: 0 }}>
+            {bundleIcon}
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 700, fontSize: 13, color: '#1A1A1A' }}>{bundleLabel}</div>
+            <div style={{ fontSize: 10.5, color: '#8E8E93', marginTop: 1 }}>{actionLabel}</div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+            <div style={{ background: bBg, color: bColor, borderRadius: 20, padding: '3px 9px', fontSize: 10, fontWeight: 700 }}>{bLbl}</div>
+            {bundleTotal > 1 && (
+              <div style={{ background: '#F2F2F7', color: '#8E8E93', borderRadius: 20, padding: '2px 8px', fontSize: 10, fontWeight: 600 }}>
+                {bundleTotal} items
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Sub-items */}
+        {items.map((item) => (
+          <BundleSubItem key={item.key} item={item} />
+        ))}
+      </div>
+    );
+  };
+
+  // ─────────────────────────────────────────────────────────────────────────
   return (
     <div className="space-y-4">
-      {/* Vaccinations */}
+      {/* ── Vaccinations ───────────────────────────────────────────────────── */}
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
         <h3 className="font-semibold text-sm flex items-center gap-2 mb-3">
           <span>💉</span> Vaccinations
@@ -262,7 +441,7 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
         )}
       </div>
 
-      {/* Deworming */}
+      {/* ── Deworming ──────────────────────────────────────────────────────── */}
       {deworming.length > 0 ? deworming.map(d => (
         <CareCard
           key={d.item_name}
@@ -288,7 +467,7 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
         />
       )}
 
-      {/* Flea & Tick */}
+      {/* ── Flea & Tick ────────────────────────────────────────────────────── */}
       {fleaTick.length > 0 ? fleaTick.map(f => (
         <CareCard
           key={f.item_name}
@@ -314,230 +493,234 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
         />
       )}
 
-      {/* Preventive Checkup */}
+      {/* ── Preventive Check-up Plan ────────────────────────────────────────── */}
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
-        <h3 className="font-semibold text-sm flex items-center gap-2 mb-3">
-          <span>🩺</span> Preventive Checkup
-        </h3>
-        <div className="mb-3">
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-xs text-gray-500">{completedCheckups}/{allCheckupItems.length} completed</span>
-            <span className="text-xs font-semibold" style={{ color: completedCheckups >= allCheckupItems.length ? '#34C759' : '#FF9500' }}>
-              {allCheckupItems.length > 0 ? Math.round((completedCheckups / allCheckupItems.length) * 100) : 0}%
-            </span>
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 10 }}>
+          <div style={{ width: 44, height: 44, borderRadius: 12, background: '#F2F2F7', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0 }}>🩺</div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>Preventive Check-up Plan</div>
+            <div style={{ fontSize: 11, color: '#AEAEB2', marginTop: 1 }}>
+              Personalised · PetCircle recommended + vet prescribed
+            </div>
           </div>
-          <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-            <div className="h-full rounded-full" style={{ width: `${allCheckupItems.length > 0 ? (completedCheckups / allCheckupItems.length) * 100 : 0}%`, background: 'var(--brand-gradient)' }} />
+          <div style={{
+            background: pct === 100 ? '#F0FFF4' : pct === 0 ? '#F2F2F7' : '#FFF6ED',
+            color: pct === 100 ? '#34C759' : pct === 0 ? '#8E8E93' : '#FF9500',
+            borderRadius: 20, padding: '4px 11px', fontSize: 11, fontWeight: 700,
+          }}>
+            {pct === 100 ? 'Up to Date' : pct === 0 ? 'No Record' : 'In Progress'}
           </div>
         </div>
-        {allCheckupItems.map((item) => {
-          if (item.source === 'petcircle') {
+
+        {/* Progress bar */}
+        <div style={{ marginBottom: 14 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#8E8E93', marginBottom: 4 }}>
+            <span>{completedItems}/{totalItems} completed</span>
+            <span style={{ fontWeight: 700, color: barColor }}>{pct}%</span>
+          </div>
+          <div style={{ height: 6, borderRadius: 3, background: '#F2F2F7', overflow: 'hidden' }}>
+            <div style={{ height: '100%', borderRadius: 3, background: barColor, width: `${pct}%`, transition: 'width 0.5s ease' }} />
+          </div>
+        </div>
+
+        {/* Vet Visit bundle (PetCircle base items) */}
+        <CheckupBundle
+          bundleIcon="🩺"
+          bundleLabel="Vet Visit"
+          actionLabel="Annual wellness exam"
+          items={baseCheckupItems.map(item => {
             const status = item.record ? getStatusForRecord(item.record) : 'missing';
-            const isDone = status === 'up_to_date' || status === 'done';
-            return (
-              <div key={item.key} className="py-2 border-b border-gray-50 last:border-0">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 flex-1 min-w-0">
-                    <div className="w-5 h-5 rounded-full border-2 flex-shrink-0 flex items-center justify-center"
-                      style={{ borderColor: isDone ? '#34C759' : '#E5E5EA' }}
-                    >
-                      {isDone && <span className="text-green-500 text-xs">✓</span>}
-                    </div>
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="text-sm text-gray-800">{item.name}</span>
-                        <span style={{ background: '#FFF3EE', color: '#D44800', borderRadius: 20, padding: '1px 7px', fontSize: 9, fontWeight: 700, flexShrink: 0 }}>
-                          🐾 PetCircle
-                        </span>
-                      </div>
-                      {item.record?.last_done_date && (
-                        <p className="text-[10px] text-gray-400 mt-0.5">Last: {formatApiDate(item.record.last_done_date)}</p>
-                      )}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 flex-shrink-0">
-                    <StatusBadge status={status} />
-                    <button
-                      onClick={() => setEditingCheckup(item.record?.item_name || item.name)}
-                      className="text-xs text-brand font-semibold"
-                    >
-                      Log
-                    </button>
-                  </div>
-                </div>
-              </div>
-            );
-          } else {
-            // Vet-prescribed condition monitoring item
-            const mon = item.monitoringItem;
-            const monStatus = (() => {
-              if (!mon.next_due_date) return 'upcoming';
-              const today = new Date(); today.setHours(0, 0, 0, 0);
-              const due = new Date(mon.next_due_date);
-              if (isNaN(due.getTime())) return 'upcoming';
-              const diff = Math.ceil((due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
-              return diff < 0 ? 'overdue' : diff <= 30 ? 'upcoming' : 'done';
-            })();
-            const isDone = !!mon.last_done_date;
-            return (
-              <div key={item.key} className="py-2 border-b border-gray-50 last:border-0">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 flex-1 min-w-0">
-                    <div className="w-5 h-5 rounded-full border-2 flex-shrink-0 flex items-center justify-center"
-                      style={{ borderColor: isDone ? '#34C759' : '#E5E5EA' }}
-                    >
-                      {isDone && <span className="text-green-500 text-xs">✓</span>}
-                    </div>
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="text-sm text-gray-800">{mon.name}</span>
-                        <span style={{ background: '#F0F6FF', color: '#007AFF', borderRadius: 20, padding: '1px 7px', fontSize: 9, fontWeight: 700, flexShrink: 0 }}>
-                          Vet Prescribed
-                        </span>
-                      </div>
-                      <p className="text-[10px] text-gray-400 mt-0.5">{item.conditionName}</p>
-                      {mon.last_done_date && (
-                        <p className="text-[10px] text-gray-400">Last: {formatApiDate(mon.last_done_date)}</p>
-                      )}
-                    </div>
-                  </div>
-                  <div className="flex-shrink-0">
-                    <StatusBadge status={monStatus} />
-                  </div>
-                </div>
-              </div>
-            );
-          }
-        })}
+            return {
+              key: item.key,
+              name: item.name,
+              source: 'petcircle' as const,
+              status,
+              lastDone: item.record?.last_done_date || null,
+              nextDue: item.record?.next_due_date || null,
+              onLog: () => setEditingCheckup(item.record?.item_name || item.name),
+            };
+          })}
+        />
+
+        {/* Per-condition monitoring bundles */}
+        {conditionBundles.map(bundle => (
+          <CheckupBundle
+            key={bundle.conditionId}
+            bundleIcon={bundle.conditionIcon}
+            bundleLabel={bundle.conditionName}
+            actionLabel="Vet-prescribed monitoring"
+            items={bundle.items.map(it => {
+              const st = monStatus(it.monitoringItem.next_due_date, it.monitoringItem.last_done_date);
+              return {
+                key: it.key,
+                name: it.name,
+                source: 'vet' as const,
+                status: st,
+                lastDone: it.monitoringItem.last_done_date,
+                nextDue: it.monitoringItem.next_due_date,
+                onLog: () => setEditingMonId(it.monitoringItem.id),
+              };
+            })}
+          />
+        ))}
+
+        {/* Book Now CTA */}
+        {(baseCheckupItems.some(i => {
+          const s = i.record ? getStatusForRecord(i.record) : 'missing';
+          return s === 'overdue';
+        }) || conditionBundles.some(b => b.items.some(it =>
+          monStatus(it.monitoringItem.next_due_date, it.monitoringItem.last_done_date) === 'overdue'
+        ))) && (
+          <button
+            onClick={() => onCartClick('c14')}
+            style={{ width: '100%', background: '#D44800', color: 'white', border: 'none', borderRadius: 10, padding: '10px', fontSize: 13, fontWeight: 700, cursor: 'pointer', marginTop: 4 }}
+          >
+            Book Now
+          </button>
+        )}
       </div>
 
-      {/* Weight Log */}
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
-        <h3 className="font-semibold text-sm flex items-center gap-2 mb-3">
-          <span className="w-8 h-8 rounded-full flex items-center justify-center text-base" style={{ backgroundColor: '#F0F6FF' }}>⚖️</span>
-          <div>
-            <span>Weight Log</span>
+      {/* ── Weight Log ─────────────────────────────────────────────────────── */}
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4"
+        style={{ borderColor: '#007AFF33' }}>
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+          <div style={{ width: 44, height: 44, borderRadius: 12, background: '#F0F6FF', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0 }}>⚖️</div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>Weight Log</div>
             {idealRange && (
-              <p className="text-[10px] text-gray-400 font-normal">Ideal range for {pet.breed}: {idealRange.min}–{idealRange.max} kg</p>
+              <div style={{ fontSize: 11, color: '#AEAEB2', marginTop: 1 }}>
+                Ideal range for {pet.breed}: {idealRange.min}–{idealRange.max} kg
+              </div>
             )}
           </div>
-        </h3>
-
-        {/* Current weight + trend */}
-        <div className="flex items-center gap-3 mb-3">
-          <Ring percentage={pet.weight ? Math.min((pet.weight / (idealRange?.max || 40)) * 100, 100) : 0} size={60} strokeWidth={6} color="#D44800">
-            <span className="text-xs font-bold">{pet.weight || '—'}</span>
-          </Ring>
-          <div>
-            <div className="flex items-baseline gap-2">
-              <p className="text-2xl font-bold text-gray-900">{pet.weight ? `${pet.weight} kg` : 'Not set'}</p>
+          {pet.weight && (
+            <div style={{ textAlign: 'right' }}>
+              <div style={{ fontWeight: 800, fontSize: 20, color: '#1A1A1A', lineHeight: 1 }}>
+                {pet.weight} <span style={{ fontSize: 12, fontWeight: 500, color: '#8E8E93' }}>kg</span>
+              </div>
               {(() => {
-                if (weightHistory.length < 2 || !pet.weight) return null;
-                const prev = weightHistory[1]?.weight;
-                if (!prev) return null;
-                const diff = Math.round((pet.weight - prev) * 10) / 10;
-                if (diff === 0) return <span className="text-xs text-blue-500 font-medium">→ stable</span>;
-                const isUp = diff > 0;
+                if (effectiveHistory.length < 2) return null;
+                const latest = effectiveHistory[0];
+                const prev = effectiveHistory[1];
+                if (!latest || !prev) return null;
+                const diff = Math.round((latest.weight - prev.weight) * 10) / 10;
+                if (diff === 0) return <div style={{ fontSize: 11, fontWeight: 700, color: '#007AFF' }}>→ stable</div>;
                 return (
-                  <span className={`text-xs font-medium ${isUp ? 'text-amber-500' : 'text-green-500'}`}>
-                    {isUp ? '↑' : '↓'} {Math.abs(diff)} kg since last
-                  </span>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: diff > 0 ? '#FF9500' : '#34C759' }}>
+                    {diff > 0 ? '↑' : '↓'} {Math.abs(diff)} kg since last
+                  </div>
                 );
               })()}
             </div>
-            <p className="text-[11px] text-gray-500">Current weight</p>
-          </div>
+          )}
         </div>
 
-        {/* In-range status banner */}
+        {/* Status pill */}
         {pet.weight && idealRange && (
-          <div
-            className="rounded-xl px-3 py-2 mb-3 text-xs font-medium"
-            style={
-              pet.weight >= idealRange.min && pet.weight <= idealRange.max
-                ? { backgroundColor: '#F0FFF4', color: '#15803d' }
-                : { backgroundColor: '#FFF6ED', color: '#92400e' }
-            }
-          >
+          <div style={{
+            background: pet.weight >= idealRange.min && pet.weight <= idealRange.max ? '#F0FFF4' : '#FFF6ED',
+            border: `1px solid ${pet.weight >= idealRange.min && pet.weight <= idealRange.max ? '#34C75944' : '#FF950044'}`,
+            borderRadius: 8, padding: '6px 10px', marginBottom: 16,
+            fontSize: 11, fontWeight: 600,
+            color: pet.weight >= idealRange.min && pet.weight <= idealRange.max ? '#1A6B2A' : '#8B5E00',
+          }}>
             {pet.weight >= idealRange.min && pet.weight <= idealRange.max
               ? `✅ Weight is within healthy range for ${pet.breed}`
               : pet.weight > idealRange.max
-                ? `⚠️ Weight slightly above ideal — monitor closely`
-                : `⚠️ Weight slightly below ideal — monitor closely`}
+                ? '⚠️ Weight slightly above ideal — monitor closely'
+                : '⚠️ Weight slightly below ideal — monitor closely'}
           </div>
         )}
 
-        {/* Sparkline with labels */}
-        {sparklineData.length >= 1 && (
-          <div className="mb-3">
-            <svg viewBox={`0 0 ${Math.max(sparklineData.length, 2) * 50} 90`} className="w-full h-20">
-              {sparklineData.map((w, i) => {
-                const maxBarH = 40;
-                const minBarH = 6;
-                const h = Math.max((w.weight / maxWeight) * maxBarH, minBarH);
-                const barBase = 70;
-                const year = w.recorded_at ? new Date(w.recorded_at).getFullYear().toString().slice(-2) : '';
-                return (
-                  <g key={i}>
-                    {/* Weight label above bar */}
-                    <text
-                      x={i * 50 + 25}
-                      y={barBase - h - 4}
-                      textAnchor="middle"
-                      fontSize="8"
-                      fill="#666"
-                      fontWeight="500"
-                    >
-                      {w.weight}
-                    </text>
-                    <rect
-                      x={i * 50 + 10}
-                      y={barBase - h}
-                      width={30}
-                      height={h}
-                      rx={4}
-                      fill={i === sparklineData.length - 1 ? '#007AFF' : '#FFD5C2'}
-                    />
-                    {/* Year label below bar */}
-                    {year && (
-                      <text
-                        x={i * 50 + 25}
-                        y={83}
-                        textAnchor="middle"
-                        fontSize="8"
-                        fill="#999"
-                      >
-                        {`'${year}`}
-                      </text>
-                    )}
-                  </g>
-                );
-              })}
-            </svg>
-          </div>
+        {/* Bar chart (zayn style) */}
+        {chartEntries.length >= 1 && (
+          <>
+            <div style={{ position: 'relative', marginBottom: 4 }}>
+              {/* Ideal range band */}
+              {idealRange && idealBandTop !== null && idealBandHeight > 0 && (
+                <div style={{
+                  position: 'absolute', left: 32, right: 0,
+                  top: idealBandTop, height: idealBandHeight,
+                  background: 'rgba(52,199,89,0.08)',
+                  borderTop: '1px dashed #34C75966',
+                  borderBottom: '1px dashed #34C75966',
+                  pointerEvents: 'none', zIndex: 0,
+                }} />
+              )}
+
+              {/* Y-axis + bars */}
+              <div style={{ display: 'flex', alignItems: 'flex-end', height: chartH, paddingLeft: 32, position: 'relative', zIndex: 1 }}>
+                {chartEntries.map((e, i) => {
+                  const h = barHeightPx(e.weight);
+                  const isLast = i === chartEntries.length - 1;
+                  return (
+                    <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-end', height: '100%' }}>
+                      <div style={{ fontSize: 10, fontWeight: 700, color: isLast ? '#007AFF' : '#8E8E93', marginBottom: 2 }}>{e.weight}</div>
+                      <div style={{
+                        width: '60%', height: h,
+                        borderRadius: '4px 4px 0 0',
+                        background: isLast ? '#007AFF' : '#007AFF55',
+                        transition: 'height 0.5s ease',
+                      }} />
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Y-axis labels */}
+              <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 28, display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                {[chartMax, (chartMax + chartMin) / 2, chartMin].map((v, i) => (
+                  <div key={i} style={{ fontSize: 8, color: '#C7C7CC', textAlign: 'right', paddingRight: 4, lineHeight: 1 }}>
+                    {Math.round(v)}
+                  </div>
+                ))}
+              </div>
+
+              {/* Baseline */}
+              <div style={{ height: 1, background: '#E8E4DF', marginLeft: 32 }} />
+            </div>
+
+            {/* X-axis date labels */}
+            <div style={{ display: 'flex', paddingLeft: 32, marginBottom: 10 }}>
+              {chartEntries.map((e, i) => (
+                <div key={i} style={{ flex: 1, textAlign: 'center', fontSize: 9, color: '#AEAEB2', marginTop: 3 }}>
+                  {e.recorded_at
+                    ? new Date(e.recorded_at + 'T00:00:00').toLocaleDateString('en-IN', { month: 'short', year: '2-digit' })
+                    : ''}
+                </div>
+              ))}
+            </div>
+
+            {/* Ideal range legend */}
+            {idealRange && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 14 }}>
+                <div style={{ width: 12, height: 8, background: 'rgba(52,199,89,0.15)', border: '1px dashed #34C75966', borderRadius: 2 }} />
+                <div style={{ fontSize: 10, color: '#8E8E93' }}>Ideal range: {idealRange.min}–{idealRange.max} kg</div>
+              </div>
+            )}
+          </>
         )}
 
-        {/* Log table with notes + Latest badge */}
+        {/* Log table */}
         {weightLoading ? (
           <p className="text-xs text-gray-400 py-2 text-center">Loading history...</p>
         ) : (
-          <div className="space-y-0 mb-3 border border-gray-100 rounded-xl overflow-hidden">
-            {effectiveHistory.slice(0, 5).map((w, idx) => (
-              <div
-                key={w.id}
-                className="flex items-center justify-between text-xs px-3 py-2 border-b border-gray-50 last:border-0"
-                style={idx === 0 ? { backgroundColor: '#F0F6FF' } : {}}
-              >
-                <div className="flex items-center gap-2">
-                  <span className="text-gray-500">{w.recorded_at ? formatApiDate(w.recorded_at) : '—'}</span>
-                  {idx === 0 && (
-                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-600">Latest</span>
-                  )}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 }}>
+            {[...effectiveHistory].reverse().slice(0, 5).map((e, i) => (
+              <div key={e.id} style={{
+                display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px',
+                background: i === 0 ? '#F0F6FF' : '#FAFAF9',
+                borderRadius: 8,
+                border: i === 0 ? '1px solid #007AFF22' : '1px solid #F0EDE8',
+              }}>
+                <div style={{ fontSize: 11, color: '#8E8E93', width: 80, flexShrink: 0, fontWeight: 600 }}>
+                  {e.recorded_at ? formatApiDate(e.recorded_at) : '—'}
                 </div>
-                <div className="flex items-center gap-3">
-                  {w.note && <span className="text-[10px] text-gray-400 truncate max-w-[120px]">{w.note}</span>}
-                  <span className="font-medium text-gray-800 shrink-0">{w.weight} kg</span>
-                </div>
+                <div style={{ fontWeight: 700, fontSize: 13, color: '#1A1A1A', flexShrink: 0 }}>{e.weight} kg</div>
+                {e.note && <div style={{ fontSize: 11, color: '#AEAEB2', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.note}</div>}
+                {i === 0 && <div style={{ fontSize: 10, fontWeight: 700, color: '#007AFF', flexShrink: 0 }}>Latest</div>}
               </div>
             ))}
             {effectiveHistory.length === 0 && (
@@ -546,11 +729,10 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
           </div>
         )}
 
-        {/* Log weight */}
+        {/* Log weight input */}
         <div className="flex gap-2">
           <input
-            type="number"
-            step="0.1"
+            type="number" step="0.1"
             value={weightInput}
             onChange={(e) => setWeightInput(e.target.value)}
             placeholder="Enter weight (kg)"
@@ -568,7 +750,7 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
         {weightMsg && <p className="text-xs text-gray-500 mt-1">{weightMsg}</p>}
       </div>
 
-      {/* Date Edit Sheets */}
+      {/* ── Date Edit Sheets ────────────────────────────────────────────────── */}
       {editingVax && (
         <DateEditSheet
           open={!!editingVax}
@@ -591,6 +773,25 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
           onSave={(d) => handleDateSave(editingCheckup, d)}
         />
       )}
+      {editingMonId && (() => {
+        // Find the monitoring item across all condition bundles
+        let monName = '';
+        for (const b of conditionBundles) {
+          const found = b.items.find(it => it.monitoringItem.id === editingMonId);
+          if (found) { monName = found.name; break; }
+        }
+        return (
+          <DateEditSheet
+            open={!!editingMonId}
+            onClose={() => setEditingMonId(null)}
+            title={`Log ${monName}`}
+            subtitle="When was this last done?"
+            currentDate={null}
+            recurrenceDays={180}
+            onSave={(d) => handleMonitoringLog(editingMonId, d)}
+          />
+        );
+      })()}
     </div>
   );
 }

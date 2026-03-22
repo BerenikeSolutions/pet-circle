@@ -55,6 +55,7 @@ from app.services.diet_service import get_diet_items, add_diet_item, update_diet
 from app.services.hygiene_service import get_hygiene_preferences, upsert_hygiene_preference, update_hygiene_date, add_hygiene_item, delete_hygiene_item
 from app.services.nutrition_service import analyze_nutrition
 from app.services.nudge_engine import generate_nudges
+from app.services.ai_insights_service import get_or_generate_insight
 from app.services.cart_service import get_cart, toggle_cart_item, update_quantity, initialize_cart, place_order, add_to_cart, remove_from_cart, get_recommendations
 from app.services.condition_service import (
     get_condition_timeline,
@@ -1393,6 +1394,102 @@ def dashboard_last_vet_visit(
     except Exception as e:
         logger.error("Last vet visit error: %s", str(e), exc_info=True)
         raise HTTPException(status_code=503, detail="Could not load vet visit info.")
+
+
+# --- AI Insights: Health Summary ---
+
+@router.get("/{token}/health-summary")
+async def dashboard_health_summary(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Return a GPT-generated 1-2 sentence health insight for the Conditions tab.
+
+    Cached for 7 days per pet. Generates on first call.
+    Returns: {"summary": "<text>"}
+    """
+    try:
+        data = get_dashboard_data(db, token)
+        dt = validate_dashboard_token(db, token)
+        return await get_or_generate_insight(
+            db=db,
+            pet_id=dt.pet_id,
+            insight_type="health_summary",
+            pet=data["pet"],
+            conditions=data["conditions"],
+            health_score=data["health_score"],
+            force=False,
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Health summary error: %s", str(e), exc_info=True)
+        return {"summary": "Health summary is currently unavailable."}
+
+
+# --- AI Insights: Vet Questions ---
+
+@router.get("/{token}/vet-questions")
+async def dashboard_vet_questions(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Return GPT-generated "Ask the Vet" questions for the Conditions tab.
+
+    Cached for 7 days per pet. Generates on first call.
+    Returns: list of {priority, icon, q, context}
+    """
+    try:
+        data = get_dashboard_data(db, token)
+        dt = validate_dashboard_token(db, token)
+        result = await get_or_generate_insight(
+            db=db,
+            pet_id=dt.pet_id,
+            insight_type="vet_questions",
+            pet=data["pet"],
+            conditions=data["conditions"],
+            health_score=data["health_score"],
+            force=False,
+        )
+        return result if isinstance(result, list) else []
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Vet questions error: %s", str(e), exc_info=True)
+        return []
+
+
+@router.post("/{token}/vet-questions/regenerate")
+async def dashboard_regenerate_vet_questions(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Force-regenerate GPT vet questions and update the DB cache.
+
+    Triggered by the "Regenerate" button in the dashboard.
+    Returns: list of {priority, icon, q, context}
+    """
+    try:
+        data = get_dashboard_data(db, token)
+        dt = validate_dashboard_token(db, token)
+        result = await get_or_generate_insight(
+            db=db,
+            pet_id=dt.pet_id,
+            insight_type="vet_questions",
+            pet=data["pet"],
+            conditions=data["conditions"],
+            health_score=data["health_score"],
+            force=True,
+        )
+        return result if isinstance(result, list) else []
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Regenerate vet questions error: %s", str(e), exc_info=True)
+        return []
 
 
 # --- Nudges ---

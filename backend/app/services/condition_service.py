@@ -36,14 +36,36 @@ async def get_condition_timeline(db: Session, pet_id: UUID) -> dict:
     Combines:
         - Condition diagnosis events
         - Medication start dates
+        - Monitoring check events (done and upcoming)
         - Preventive record events (deworming, vaccines, etc.)
 
+    Each event now includes extra fields for the zayn-style two-column
+    timeline card UI:
+        label_color  — hex color string driven by event type
+        border       — same as label_color (used for card border)
+        sublabel     — short secondary label (e.g. "Episode 1", "Prescribed")
+        source_text  — formatted attribution line
+        pills        — list of {t, c, bg} key-finding chips
+
     Returns:
-        {"events": [{"date": str, "type": str, "icon": str, "title": str, "detail": str, "tag": str}]}
+        {"events": [...], "total": int}
     """
+    # Color palette for event types
+    COLORS = {
+        "diagnosis": "#FF3B30",
+        "treatment":  "#007AFF",
+        "vet_visit":  "#34C759",
+        "monitoring": "#FF9500",
+        "vaccine":    "#8E44AD",
+        "preventive": "#8E8E93",
+    }
+
+    def _make_pill(text: str, color: str, bg: str) -> dict:
+        return {"t": text, "c": color, "bg": bg}
+
     events = []
 
-    # Condition diagnosis events
+    # ── Condition diagnosis + medication + monitoring events ──────────────────
     conditions = (
         db.query(Condition)
         .filter(Condition.pet_id == pet_id, Condition.is_active == True)
@@ -51,91 +73,136 @@ async def get_condition_timeline(db: Session, pet_id: UUID) -> dict:
     )
 
     for cond in conditions:
-        event_date = str(cond.diagnosed_at) if cond.diagnosed_at else str(cond.created_at.date()) if cond.created_at else None
+        color = COLORS["diagnosis"]
+        event_date = str(cond.diagnosed_at) if cond.diagnosed_at else (
+            str(cond.created_at.date()) if cond.created_at else None
+        )
         if event_date:
-            # Build detail with managing vet info
-            detail_parts = []
+            pills = []
+            if cond.condition_type:
+                pills.append(_make_pill(cond.condition_type.capitalize(), "#8E8E93", "#F2F2F7"))
             if cond.diagnosis:
-                detail_parts.append(cond.diagnosis)
-            if cond.managed_by:
-                detail_parts.append(cond.managed_by)
+                pills.append(_make_pill(cond.diagnosis[:60], color, color + "12"))
             events.append({
                 "date": event_date,
                 "type": "diagnostic",
                 "icon": cond.icon or "🏥",
                 "title": f"{cond.name} diagnosed",
-                "detail": ". ".join(detail_parts) if detail_parts else cond.condition_type,
+                "detail": cond.diagnosis or cond.condition_type,
                 "tag": "Diagnosis",
+                "label_color": color,
+                "border": color,
+                "sublabel": "Diagnosed",
+                "source_text": cond.managed_by or "",
+                "pills": pills,
             })
 
-        # Medication start events — tagged as Treatment
+        # Medication events
         for med in cond.medications:
-            med_date = str(med.started_at) if med.started_at else str(med.created_at.date()) if med.created_at else None
+            med_date = str(med.started_at) if getattr(med, "started_at", None) else (
+                str(med.created_at.date()) if med.created_at else None
+            )
             if med_date:
+                mcolor = COLORS["treatment"]
+                dose_info = f"{med.dose or ''} {med.frequency or ''}".strip()
+                pills = [_make_pill(med.name, mcolor, mcolor + "12")]
+                if dose_info:
+                    pills.append(_make_pill(dose_info, "#8E8E93", "#F2F2F7"))
                 events.append({
                     "date": med_date,
                     "type": "treatment",
                     "icon": "💊",
                     "title": f"Started {med.name}",
-                    "detail": f"{med.dose or ''} {med.frequency or ''}".strip() or None,
+                    "detail": dose_info or None,
                     "tag": "Treatment",
+                    "label_color": mcolor,
+                    "border": mcolor,
+                    "sublabel": "Prescribed",
+                    "source_text": cond.managed_by or "",
+                    "pills": pills,
                 })
 
-        # Monitoring events — upcoming or overdue checks
+        # Monitoring events — last_done and upcoming/overdue
+        today = date.today()
         for mon in cond.monitoring:
-            if mon.next_due_date:
-                today = date.today()
-                if mon.next_due_date < today:
-                    tag = "Overdue"
-                elif mon.next_due_date <= today + timedelta(days=30):
-                    tag = "Upcoming"
-                else:
-                    tag = "Upcoming"
+            # Last done event
+            if mon.last_done_date:
+                mcolor = COLORS["vet_visit"]
+                pills = [_make_pill(f"Done: {mon.last_done_date}", mcolor, "#F0FFF4")]
+                if mon.next_due_date:
+                    pills.append(_make_pill(f"Next: {mon.next_due_date}", "#8E8E93", "#F2F2F7"))
+                events.append({
+                    "date": str(mon.last_done_date),
+                    "type": "monitoring",
+                    "icon": "🩺",
+                    "title": mon.name,
+                    "detail": f"Follow-up for {cond.name}",
+                    "tag": "Vet Visit",
+                    "label_color": mcolor,
+                    "border": mcolor,
+                    "sublabel": "Completed",
+                    "source_text": cond.managed_by or "",
+                    "pills": pills,
+                })
+            # Upcoming / overdue event (next_due_date only when not done)
+            elif mon.next_due_date:
+                is_overdue = mon.next_due_date < today
+                tag = "Overdue" if is_overdue else "Upcoming"
+                mcolor = "#FF3B30" if is_overdue else COLORS["monitoring"]
+                pills = [_make_pill(
+                    f"{'Overdue since' if is_overdue else 'Due'}: {mon.next_due_date}",
+                    mcolor, mcolor + "12",
+                )]
                 events.append({
                     "date": str(mon.next_due_date),
-                    "type": "diagnostic",
+                    "type": "monitoring",
                     "icon": "🩺",
                     "title": f"{mon.name} due",
-                    "detail": f"Scheduled follow-up for {cond.name}. {'Not yet completed.' if mon.next_due_date < today else ''}".strip(),
+                    "detail": f"Scheduled follow-up for {cond.name}.",
                     "tag": tag,
+                    "label_color": mcolor,
+                    "border": mcolor,
+                    "sublabel": tag,
+                    "source_text": cond.managed_by or "",
+                    "pills": pills,
                 })
 
-    # Preventive record events (vaccines, deworming, etc.)
+    # ── Preventive record events ──────────────────────────────────────────────
     preventive_rows = (
         db.query(PreventiveRecord)
         .filter(PreventiveRecord.pet_id == pet_id, PreventiveRecord.last_done_date != None)
         .all()
     )
 
+    cat_icon = {"vaccination": "💉", "deworming": "🪱", "flea_tick": "🐛"}
+    cat_color = {"vaccination": COLORS["vaccine"], "deworming": COLORS["treatment"], "flea_tick": COLORS["treatment"]}
+    cat_tag = {"vaccination": "Vet Visit", "deworming": "Treatment", "flea_tick": "Treatment"}
+
     for rec in preventive_rows:
         item_name = rec.preventive_master.item_name if rec.preventive_master else "Preventive"
         category = rec.preventive_master.category if rec.preventive_master else "other"
-
-        icon_map = {
-            "vaccination": "💉",
-            "deworming": "🪱",
-            "flea_tick": "🐛",
-        }
-
-        # Map preventive categories to timeline tags
-        tag_map = {
-            "vaccination": "Vet Visit",
-            "deworming": "Treatment",
-            "flea_tick": "Treatment",
-        }
+        rcolor = cat_color.get(category, COLORS["preventive"])
+        pills = [_make_pill(rec.status.replace("_", " ").title() if rec.status else "Done", rcolor, rcolor + "12")]
+        if rec.next_due_date:
+            pills.append(_make_pill(f"Next: {rec.next_due_date}", "#8E8E93", "#F2F2F7"))
         events.append({
             "date": str(rec.last_done_date),
             "type": "vet" if category == "vaccination" else "preventive",
-            "icon": icon_map.get(category, "✅"),
+            "icon": cat_icon.get(category, "✅"),
             "title": item_name,
             "detail": f"Status: {rec.status}" if rec.status else None,
-            "tag": tag_map.get(category, "Treatment"),
+            "tag": cat_tag.get(category, "Treatment"),
+            "label_color": rcolor,
+            "border": rcolor,
+            "sublabel": category.replace("_", " ").title() if category else "",
+            "source_text": "",
+            "pills": pills,
         })
 
     # Sort chronologically (most recent first)
     events.sort(key=lambda e: e["date"], reverse=True)
 
-    return {"events": events}
+    return {"events": events, "total": len(events)}
 
 
 def update_condition(db: Session, pet_id: UUID, condition_id: UUID, updates: dict) -> dict:
@@ -288,10 +355,23 @@ def update_condition_monitoring(db: Session, pet_id: UUID, monitoring_id: UUID, 
     if not mon:
         raise ValueError("Monitoring item not found")
 
-    allowed_fields = {"name", "frequency"}
-    for key, value in updates.items():
-        if key in allowed_fields:
-            setattr(mon, key, value)
+    # Simple text fields
+    for key in ("name", "frequency"):
+        if key in updates and updates[key] is not None:
+            setattr(mon, key, updates[key])
+
+    # Date fields — parse string → date object
+    for date_field in ("last_done_date", "next_due_date"):
+        if date_field in updates and updates[date_field] is not None:
+            raw = updates[date_field]
+            if isinstance(raw, str):
+                try:
+                    from app.utils.date_utils import parse_date
+                    setattr(mon, date_field, parse_date(raw))
+                except (ValueError, ImportError):
+                    logger.warning("Could not parse %s value '%s'", date_field, raw)
+            else:
+                setattr(mon, date_field, raw)
 
     db.commit()
     return {"status": "updated", "monitoring_id": str(mon.id)}

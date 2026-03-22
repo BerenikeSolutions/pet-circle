@@ -1071,6 +1071,12 @@ export async function deleteCondition(
 
 // --- Condition Timeline & Management ---
 
+export interface TimelinePill {
+  t: string;
+  c: string;
+  bg: string;
+}
+
 export interface TimelineEvent {
   date: string;
   type: string;
@@ -1078,11 +1084,24 @@ export interface TimelineEvent {
   title: string;
   detail: string | null;
   tag: string;
+  // Enriched fields for zayn-style two-column timeline card
+  label_color?: string;
+  border?: string;
+  sublabel?: string;
+  source_text?: string;
+  pills?: TimelinePill[];
+}
+
+export interface VetQuestion {
+  priority: 'urgent' | 'high' | 'medium';
+  icon: string;
+  q: string;
+  context: string;
 }
 
 export async function getConditionTimeline(
   token: string
-): Promise<{ events: TimelineEvent[] }> {
+): Promise<{ events: TimelineEvent[]; total?: number }> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 15000);
   try {
@@ -1278,6 +1297,90 @@ export async function deleteConditionMonitoring(
   } catch (e: any) {
     if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
     throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/** Log a monitoring item's last done date (used by the "Log" button in the checkup plan). */
+export async function updateMonitoringDate(
+  token: string,
+  monitoringId: string,
+  lastDoneDate: string,
+): Promise<{ status: string; monitoring_id: string }> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/monitoring/${monitoringId}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ last_done_date: lastDoneDate }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// --- AI Insights ---
+
+/** Fetch GPT-generated health summary (cached 7 days). */
+export async function getHealthSummary(
+  token: string,
+): Promise<{ summary: string }> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/health-summary`, {
+      signal: controller.signal,
+    });
+    if (!res.ok) return { summary: "" };
+    return res.json();
+  } catch {
+    return { summary: "" };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/** Fetch GPT-generated vet consultation questions (cached 7 days). */
+export async function getVetQuestions(token: string): Promise<VetQuestion[]> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/vet-questions`, {
+      signal: controller.signal,
+    });
+    if (!res.ok) return [];
+    return res.json();
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/** Force-regenerate vet questions and update the DB cache. */
+export async function regenerateVetQuestions(token: string): Promise<VetQuestion[]> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/vet-questions/regenerate`, {
+      method: "POST",
+      signal: controller.signal,
+    });
+    if (!res.ok) return [];
+    return res.json();
+  } catch {
+    return [];
   } finally {
     clearTimeout(timeoutId);
   }
