@@ -3,7 +3,7 @@ PetCircle Phase 1 — AI Insights Service
 
 Generates and caches GPT-driven insights shown on the Conditions dashboard tab:
 
-    1. health_summary  — 1-2 sentence plain-text health insight displayed at the
+    1. health_summary  — 3-4 sentence rich health narrative displayed at the
                          top of the Conditions tab alongside the health score ring.
     2. vet_questions   — Prioritised list of questions the pet owner should raise
                          at the next vet visit, shown in the "Ask the Vet" section.
@@ -62,21 +62,26 @@ def _get_openai_client():
 
 async def _generate_health_summary_gpt(pet_context: str) -> dict:
     """
-    Call GPT to produce a 1-2 sentence health insight for the pet.
+    Call GPT to produce a rich 3-4 sentence health narrative for the pet.
 
     Args:
         pet_context: Structured text description of the pet's health status.
 
     Returns:
-        {"summary": "<one-to-two sentence insight>"}
+        {"summary": "<rich 3-4 sentence narrative>"}
     """
     client = _get_openai_client()
 
     system_prompt = (
-        "You are a veterinary health assistant. "
-        "Given a pet's profile and active health conditions, write a concise "
-        "1-2 sentence health insight that summarises the overall health picture. "
-        "Be factual, compassionate, and avoid alarming language. "
+        "You are a veterinary health assistant writing for a pet owner's dashboard. "
+        "Given a pet's profile, active health conditions, and health score, write a "
+        "rich 3-4 sentence health narrative. Structure it as follows:\n"
+        "1. Overall health standing — reference the score and label naturally.\n"
+        "2. Key active conditions and what they mean for the pet's daily life.\n"
+        "3. What is going well (e.g. vaccines up to date, medications being managed).\n"
+        "4. What the owner should focus on next (e.g. overdue monitoring, refill due, "
+        "missing record to add).\n"
+        "Tone: warm, factual, parent-friendly. Never alarming. "
         "Respond with ONLY valid JSON: {\"summary\": \"<text>\"}. "
         "Do not include any explanation outside the JSON object."
     )
@@ -87,7 +92,7 @@ async def _generate_health_summary_gpt(pet_context: str) -> dict:
         response = await client.chat.completions.create(
             model=OPENAI_QUERY_MODEL,
             temperature=0,
-            max_tokens=200,
+            max_tokens=500,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system_prompt},
