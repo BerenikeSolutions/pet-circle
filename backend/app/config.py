@@ -86,6 +86,12 @@ class Settings(BaseSettings):
     # Frontend URL for CORS allow-origin (e.g., https://petcircle.vercel.app).
     FRONTEND_URL: str
 
+    # --- Razorpay ---
+    # Live/test keys from Razorpay dashboard → Settings → API Keys.
+    # Optional at startup — payment endpoints will raise 503 if missing.
+    RAZORPAY_KEY_ID: str | None = None
+    RAZORPAY_KEY_SECRET: str | None = None
+
     # --- Order Notifications ---
     # WhatsApp phone number to notify when a new order is placed.
     # Format: country code + number, no + prefix (e.g., "919095705762").

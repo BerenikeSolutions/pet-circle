@@ -57,6 +57,7 @@ from app.services.nutrition_service import analyze_nutrition
 from app.services.nudge_engine import generate_nudges
 from app.services.ai_insights_service import get_or_generate_insight
 from app.services.cart_service import get_cart, toggle_cart_item, update_quantity, initialize_cart, place_order, add_to_cart, remove_from_cart, get_recommendations
+from app.services.razorpay_service import create_razorpay_payment, verify_razorpay_payment
 from app.services.condition_service import (
     get_condition_timeline,
     get_condition_recommendations,
@@ -1639,7 +1640,7 @@ async def dashboard_place_order(
     body: PlaceOrderRequest,
     db: Session = Depends(get_db),
 ):
-    """Place an order from cart items."""
+    """Place a COD order. For UPI/card/netbanking use /create-payment instead."""
     try:
         dt = validate_dashboard_token(db, token)
         return await place_order(db, dt.pet_id, dt.user_id, body.payment_method, body.address, body.coupon)
@@ -1648,6 +1649,86 @@ async def dashboard_place_order(
     except Exception as e:
         logger.error("Place order error: %s", str(e), exc_info=True)
         raise HTTPException(status_code=503, detail="Could not place order.")
+
+
+class CreatePaymentRequest(BaseModel):
+    payment_method: str = Field(..., pattern=r"^(upi|card|netbanking)$")
+    address: Optional[dict] = None
+    coupon: Optional[str] = None
+    coupon_discount_percent: int = Field(default=0, ge=0, le=100)
+
+
+class VerifyPaymentRequest(BaseModel):
+    order_db_id: str = Field(..., min_length=1)
+    razorpay_order_id: str = Field(..., min_length=1)
+    razorpay_payment_id: str = Field(..., min_length=1)
+    razorpay_signature: str = Field(..., min_length=1)
+
+
+@router.post("/{token}/create-payment")
+async def dashboard_create_payment(
+    token: str,
+    body: CreatePaymentRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Create a Razorpay order for UPI / card / netbanking payments.
+
+    Returns razorpay_order_id, amount (paise), currency, key_id.
+    Frontend opens Razorpay checkout with these details.
+    On payment success, call /verify-payment to confirm.
+    """
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await create_razorpay_payment(
+            db,
+            pet_id=dt.pet_id,
+            user_id=dt.user_id,
+            payment_method=body.payment_method,
+            address=body.address,
+            coupon=body.coupon,
+            coupon_discount_percent=body.coupon_discount_percent,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        logger.error("Razorpay config error: %s", str(e))
+        raise HTTPException(status_code=503, detail="Payment gateway not configured.")
+    except Exception as e:
+        logger.error("Create payment error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not initiate payment.")
+
+
+@router.post("/{token}/verify-payment")
+async def dashboard_verify_payment(
+    token: str,
+    body: VerifyPaymentRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Verify Razorpay payment signature and confirm the order.
+
+    Called by frontend after Razorpay checkout succeeds.
+    Verifies the HMAC-SHA256 signature, marks order as paid, clears cart.
+    """
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await verify_razorpay_payment(
+            db,
+            pet_id=dt.pet_id,
+            order_db_id=body.order_db_id,
+            razorpay_order_id=body.razorpay_order_id,
+            razorpay_payment_id=body.razorpay_payment_id,
+            razorpay_signature=body.razorpay_signature,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        logger.error("Razorpay verify config error: %s", str(e))
+        raise HTTPException(status_code=503, detail="Payment gateway not configured.")
+    except Exception as e:
+        logger.error("Verify payment error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Payment verification failed.")
 
 
 class AddToCartRequest(BaseModel):

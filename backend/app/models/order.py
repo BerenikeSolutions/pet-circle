@@ -64,6 +64,14 @@ class Order(Base):
     # Admin notes — free text added by admin when processing the order.
     admin_notes = Column(String(2000), nullable=True)
 
+    # Razorpay payment fields — populated for online payments (UPI/card/netbanking).
+    # razorpay_order_id: created before payment (order_xxx).
+    # razorpay_payment_id: confirmed after payment success (pay_xxx).
+    # payment_status: pending | awaiting_payment | paid | failed | cod
+    razorpay_order_id = Column(String(100), nullable=True, index=True)
+    razorpay_payment_id = Column(String(100), nullable=True)
+    payment_status = Column(String(20), nullable=False, default="pending")
+
     # Timestamps managed by PostgreSQL DEFAULT NOW().
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

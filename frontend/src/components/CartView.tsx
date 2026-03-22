@@ -1,10 +1,11 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import type { DashboardData, CartItemData, CartRecommendation, PlaceOrderResponse } from '@/lib/api';
+import type { DashboardData, CartItemData, CartRecommendation, PlaceOrderResponse, VerifyPaymentResponse } from '@/lib/api';
 import {
   getCart, toggleCartItem, updateCartQuantity, addToCart,
   getCartRecommendations, applyCoupon, placeOrder,
+  createPayment, verifyPayment,
 } from '@/lib/api';
 import { PAYMENT_METHODS, NET_BANKS, FREE_DELIVERY_THRESHOLD, DELIVERY_FEE } from '@/lib/dashboard-utils';
 
@@ -49,7 +50,7 @@ export default function CartView({ data, token, pinnedItemId, onBack }: CartView
   const [cardExp, setCardExp] = useState('');
   const [cardCvv, setCardCvv] = useState('');
   const [netBank, setNetBank] = useState('');
-  const [orderResult, setOrderResult] = useState<PlaceOrderResponse | null>(null);
+  const [orderResult, setOrderResult] = useState<PlaceOrderResponse | VerifyPaymentResponse | null>(null);
   const [placing, setPlacing] = useState(false);
 
   // Address state
@@ -174,21 +175,83 @@ export default function CartView({ data, token, pinnedItemId, onBack }: CartView
 
   const handlePlaceOrder = useCallback(async () => {
     setPlacing(true);
+    const method = payMethod === 'net' ? 'netbanking' : payMethod;
+    const addrPayload = selectedAddr ? { name: selectedAddr.name, line: selectedAddr.line, tag: selectedAddr.tag } : undefined;
+
     try {
-      const result = await placeOrder(token, {
-        payment_method: payMethod === 'net' ? 'netbanking' : payMethod,
-        address: selectedAddr ? { name: selectedAddr.name, line: selectedAddr.line, tag: selectedAddr.tag } : undefined,
+      if (method === 'cod') {
+        // COD — no Razorpay, place directly
+        const result = await placeOrder(token, {
+          payment_method: 'cod',
+          address: addrPayload,
+          coupon: couponApplied ? coupon : undefined,
+        });
+        setOrderResult(result);
+        setScreen('success');
+        return;
+      }
+
+      // UPI / card / netbanking — use Razorpay checkout
+      const paymentData = await createPayment(token, {
+        payment_method: method,
+        address: addrPayload,
         coupon: couponApplied ? coupon : undefined,
+        coupon_discount_percent: couponApplied ? discountPercent : 0,
       });
-      setOrderResult(result);
-      setScreen('success');
-    } catch (e) {
-      console.error('Order failed:', e);
-      alert('Failed to place order. Please try again.');
+
+      // Load Razorpay checkout.js if not already loaded
+      await new Promise<void>((resolve, reject) => {
+        if ((window as any).Razorpay) { resolve(); return; }
+        const script = document.createElement('script');
+        script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+        script.onload = () => resolve();
+        script.onerror = () => reject(new Error('Failed to load Razorpay checkout'));
+        document.body.appendChild(script);
+      });
+
+      await new Promise<void>((resolve, reject) => {
+        const rzp = new (window as any).Razorpay({
+          key: paymentData.key_id,
+          amount: paymentData.amount,
+          currency: paymentData.currency,
+          order_id: paymentData.razorpay_order_id,
+          name: 'PetCircle',
+          description: `Order for ${petName}`,
+          image: 'https://pet-circle-chi.vercel.app/favicon.ico',
+          prefill: { name: selectedAddr?.name || '' },
+          theme: { color: '#D44800' },
+          handler: async (response: any) => {
+            try {
+              const verified = await verifyPayment(token, {
+                order_db_id: paymentData.order_db_id,
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
+              });
+              setOrderResult(verified);
+              setScreen('success');
+              resolve();
+            } catch (err) {
+              reject(err);
+            }
+          },
+          modal: {
+            ondismiss: () => reject(new Error('Payment cancelled')),
+          },
+        });
+        rzp.open();
+      });
+    } catch (e: any) {
+      if (e?.message === 'Payment cancelled') {
+        // User closed the modal — don't show error
+      } else {
+        console.error('Order failed:', e);
+        alert(e?.message || 'Failed to place order. Please try again.');
+      }
     } finally {
       setPlacing(false);
     }
-  }, [token, payMethod, selectedAddr, couponApplied, coupon]);
+  }, [token, payMethod, selectedAddr, couponApplied, coupon, discountPercent, petName]);
 
   // Derived values
   const inCartItems = useMemo(() => items.filter(i => i.in_cart), [items]);

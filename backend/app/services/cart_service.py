@@ -463,6 +463,9 @@ async def place_order(
 
     order_id = f"PC-{uuid.uuid4().hex[:8].upper()}"
 
+    # Determine payment status — COD confirmed immediately, online handled via Razorpay
+    pay_status = "cod" if payment_method == "cod" else "pending"
+
     # Create order record
     order = Order(
         user_id=user_id,
@@ -470,8 +473,9 @@ async def place_order(
         category="dashboard_order",
         items_description=items_desc,
         status="pending",
-        admin_notes=f"Order {order_id} | Payment: {payment_method} | Total: ₹{total}"
-                    + (f" | Coupon: {coupon} (-₹{discount})" if coupon else "")
+        payment_status=pay_status,
+        admin_notes=f"Order {order_id} | Payment: {payment_method} | Total: Rs.{total}"
+                    + (f" | Coupon: {coupon} (-Rs.{discount})" if coupon else "")
                     + (f" | Address: {address}" if address else ""),
     )
     db.add(order)

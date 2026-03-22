@@ -1708,6 +1708,82 @@ export async function placeOrder(
   }
 }
 
+export interface CreatePaymentResponse {
+  razorpay_order_id: string;
+  amount: number;        // paise (INR * 100)
+  currency: string;
+  key_id: string;
+  order_db_id: string;
+  subtotal: number;
+  discount: number;
+  delivery: number;
+  total: number;
+}
+
+export interface VerifyPaymentResponse {
+  order_id: string;
+  items: Array<{ product_id: string; name: string; icon: string | null; price: number; quantity: number; total: number }>;
+  subtotal: number;
+  discount: number;
+  delivery: number;
+  total: number;
+  payment_method: string;
+  payment_status: string;
+  status: string;
+}
+
+export async function createPayment(
+  token: string,
+  body: { payment_method: string; address?: { name: string; line: string; tag: string }; coupon?: string; coupon_discount_percent?: number }
+): Promise<CreatePaymentResponse> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/create-payment`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export async function verifyPayment(
+  token: string,
+  body: { order_db_id: string; razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string }
+): Promise<VerifyPaymentResponse> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/verify-payment`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") throw new Error("Request timed out. Please try again.");
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 /**
  * Authenticate to the admin dashboard with a password.
  * On success, returns the admin API key for subsequent requests.
