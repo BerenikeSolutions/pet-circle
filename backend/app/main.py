@@ -30,10 +30,12 @@ app = FastAPI(
 
 # --- CORS Middleware ---
 # Restrict cross-origin requests to the frontend dashboard URL only.
+# Allow localhost:3000 for local development and E2E testing.
+_cors_origins = [settings.FRONTEND_URL, "http://localhost:3000", "http://127.0.0.1:3000"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.FRONTEND_URL],
-    allow_methods=["GET", "POST", "PATCH"],
+    allow_origins=_cors_origins,
+    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
     allow_headers=["Content-Type", "X-ADMIN-KEY"],
 )
 
