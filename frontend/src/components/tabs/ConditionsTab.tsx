@@ -88,10 +88,13 @@ function HealthScoreCard({
   const r = 30, circ = 2 * Math.PI * r;
   const dash = (score / 100) * circ;
 
+  const cardBg = isGood ? '#F0FFF4' : '#FFF9F5';
+  const cardBorder = isGood ? '#34C75933' : '#D4480033';
+
   return (
     <div style={{
-      background: 'white', borderRadius: 20, padding: 20,
-      border: '1.5px solid #F2F2F7', boxShadow: '0 2px 12px rgba(0,0,0,0.06)',
+      background: cardBg, borderRadius: 20, padding: 20,
+      border: `1.5px solid ${cardBorder}`, boxShadow: '0 2px 12px rgba(0,0,0,0.06)',
       marginBottom: 12,
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 14 }}>
@@ -263,11 +266,7 @@ function ConditionCard({
   const statusMap: Record<string, string> = { chronic: 'managed', episodic: 'upcoming', resolved: 'done' };
 
   return (
-    <div style={{
-      background: 'white', borderRadius: 20, padding: '16px 16px 8px',
-      border: '1.5px solid #E5E5EA', boxShadow: '0 2px 8px rgba(0,0,0,0.05)',
-      marginBottom: 0,
-    }}>
+    <div style={{ padding: '14px 16px 8px' }}>
       {/* Header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
         <div style={{
@@ -277,7 +276,14 @@ function ConditionCard({
           {condition.icon || '🏥'}
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontWeight: 700, fontSize: 15, color: '#1C1C1E' }}>{condition.name}</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontWeight: 700, fontSize: 15, color: '#1C1C1E' }}>{condition.name}</span>
+            {condition.condition_type === 'episodic' && condition.episode_count && condition.episode_count > 1 && (
+              <span style={{ fontSize: 10, fontWeight: 600, padding: '2px 7px', borderRadius: 20, background: '#FFF6ED', color: '#FF9500' }}>
+                {condition.episode_count} episodes
+              </span>
+            )}
+          </div>
           <div style={{ fontSize: 11, color: '#8E8E93' }}>
             {condition.diagnosed_at ? `Diagnosed ${formatApiDate(condition.diagnosed_at)}` : ''}
             {condition.managed_by ? ` · ${condition.managed_by}` : ''}
@@ -872,31 +878,44 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
         conditions={conditions.filter(c => c.condition_type !== 'resolved')}
       />
 
-      {/* 2. "Ongoing Conditions" heading */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '0 2px' }}>
-        <span style={{ fontWeight: 700, fontSize: 15, color: '#1C1C1E' }}>Ongoing Conditions</span>
-        <div style={{ flex: 1, height: 1, background: '#E5E5EA' }} />
-        <span style={{
-          fontSize: 10, fontWeight: 700, padding: '3px 10px', borderRadius: 20,
-          background: '#FFF5F0', color: '#D44800',
-        }}>
-          {activeCount} Active
-        </span>
-      </div>
-
-      {/* 3. Condition Cards */}
+      {/* 2. Unified Conditions Card */}
       {conditions.length > 0 ? (
-        conditions.map((condition) => (
-          <ConditionCard
-            key={condition.id}
-            condition={condition}
-            onDelete={() => handleDeleteCondition(condition.id)}
-            onAddMed={() => setAddMedSheet(condition.id)}
-            onDeleteMed={handleDeleteMed}
-            onAddMon={() => setAddMonSheet(condition.id)}
-            onDeleteMon={handleDeleteMon}
-          />
-        ))
+        <div style={{
+          background: 'white', borderRadius: 20,
+          border: '1.5px solid #E5E5EA', boxShadow: '0 2px 8px rgba(0,0,0,0.05)',
+          overflow: 'hidden',
+        }}>
+          {/* Card header */}
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '14px 16px', borderBottom: '1px solid #F2F2F7',
+          }}>
+            <span style={{ fontWeight: 700, fontSize: 15, color: '#1C1C1E' }}>Ongoing Conditions</span>
+            <span style={{
+              fontSize: 10, fontWeight: 700, padding: '3px 10px', borderRadius: 20,
+              background: '#FFF5F0', color: '#D44800',
+            }}>
+              {activeCount} Active
+            </span>
+          </div>
+
+          {/* One ConditionCard per condition, separated by dividers */}
+          {conditions.map((condition, idx) => (
+            <div key={condition.id}>
+              {idx > 0 && <div style={{ height: 1, background: '#F2F2F7', margin: '0 16px' }} />}
+              <div style={{ padding: '0 0 8px' }}>
+                <ConditionCard
+                  condition={condition}
+                  onDelete={() => handleDeleteCondition(condition.id)}
+                  onAddMed={() => setAddMedSheet(condition.id)}
+                  onDeleteMed={handleDeleteMed}
+                  onAddMon={() => setAddMonSheet(condition.id)}
+                  onDeleteMon={handleDeleteMon}
+                />
+              </div>
+            </div>
+          ))}
+        </div>
       ) : (
         <div style={{
           background: 'white', borderRadius: 20, padding: 24, textAlign: 'center',

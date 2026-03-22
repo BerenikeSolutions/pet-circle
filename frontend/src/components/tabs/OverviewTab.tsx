@@ -270,6 +270,32 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
 
   return (
     <div className="space-y-4">
+      {/* Care at a Glance — leads the overview */}
+      <div>
+        <h3 className="text-sm font-semibold text-gray-500 mb-2">Care at a Glance</h3>
+        <div className="grid grid-cols-3 gap-2">
+          {tiles.map((tile, i) => {
+            const overdueCount = countOverdue(tile.items);
+            const topItem = tile.items[0];
+            const status = topItem ? getStatusForRecord(topItem) : 'missing';
+            return (
+              <button
+                key={i}
+                onClick={() => onTabChange(tile.tab)}
+                className="bg-white rounded-xl p-3 border border-gray-100 shadow-sm text-center hover:shadow-md transition-shadow flex flex-col items-center"
+              >
+                <span className="text-xl">{tile.icon}</span>
+                <p className="text-[11px] font-medium text-gray-700 mt-1 truncate">{tile.label}</p>
+                <StatusBadge status={status} />
+                {overdueCount > 0 && (
+                  <p className="text-[10px] text-red-500 font-medium mt-1">{overdueCount} overdue</p>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Health Score Ring */}
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
         <div className="flex items-center gap-4">
@@ -415,32 +441,6 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
           </div>
         </div>
       )}
-
-      {/* Care at a Glance */}
-      <div>
-        <h3 className="text-sm font-semibold text-gray-500 mb-2">Care at a Glance</h3>
-        <div className="grid grid-cols-3 gap-2">
-          {tiles.map((tile, i) => {
-            const overdueCount = countOverdue(tile.items);
-            const topItem = tile.items[0];
-            const status = topItem ? getStatusForRecord(topItem) : 'missing';
-            return (
-              <button
-                key={i}
-                onClick={() => onTabChange(tile.tab)}
-                className="bg-white rounded-xl p-3 border border-gray-100 shadow-sm text-center hover:shadow-md transition-shadow flex flex-col items-center"
-              >
-                <span className="text-xl">{tile.icon}</span>
-                <p className="text-[11px] font-medium text-gray-700 mt-1 truncate">{tile.label}</p>
-                <StatusBadge status={status} />
-                {overdueCount > 0 && (
-                  <p className="text-[10px] text-red-500 font-medium mt-1">{overdueCount} overdue</p>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      </div>
 
       {/* Condition Summary */}
       {hasConditions && (

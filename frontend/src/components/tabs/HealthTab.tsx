@@ -95,39 +95,58 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
     record: checkups.find(c => c.item_name.toLowerCase().includes(name.toLowerCase())),
   }));
 
-  // ── Condition monitoring items grouped by condition ───────────────────────
-  type MonBundle = {
-    conditionId: string;
-    conditionName: string;
-    conditionIcon: string;
-    items: Array<{
-      key: string;
-      name: string;
-      monitoringItem: NonNullable<typeof data.conditions>[0]['monitoring'][0];
-    }>;
+  // ── Infer sample type from monitoring item name ───────────────────────────
+  function inferSampleType(name: string): string {
+    const n = name.toLowerCase();
+    if (n.includes('blood') || n.includes('cbc') || n.includes('panel') || n.includes('chem') ||
+        n.includes('hematol') || n.includes('lft') || n.includes('kft') || n.includes('serology') ||
+        n.includes('titer') || n.includes('tick')) return 'Blood Draw';
+    if (n.includes('urine') || n.includes(' ua') || n.includes('urinalysis') || n.includes('usg') ||
+        n.match(/^ua\b/)) return 'Urine Sample';
+    if (n.includes('x-ray') || n.includes('xray') || n.includes('ultrasound') ||
+        n.includes('imaging') || n.includes('scan') || n.includes('radiograph')) return 'Imaging';
+    return 'Vet Visit';
+  }
+
+  const SAMPLE_TYPE_META: Record<string, { icon: string; actionLabel: string }> = {
+    'Blood Draw':   { icon: '🩸', actionLabel: 'Requires blood sample at lab/clinic' },
+    'Urine Sample': { icon: '🧪', actionLabel: 'Requires urine sample collection' },
+    'Imaging':      { icon: '📷', actionLabel: 'Requires imaging at clinic' },
+    'Vet Visit':    { icon: '🩺', actionLabel: 'Requires in-person vet consultation' },
   };
 
-  const conditionBundles: MonBundle[] = (data.conditions || [])
+  // Flat list of all condition monitoring items with sample-type inference
+  const allMonItems = (data.conditions || [])
     .filter(cond => cond.is_active && cond.monitoring.length > 0)
-    .map(cond => ({
-      conditionId: cond.id,
+    .flatMap(cond => cond.monitoring.map(mon => ({
+      key: `${cond.id}_${mon.id}`,
+      name: mon.name,
       conditionName: cond.name,
-      conditionIcon: cond.icon || '🩺',
-      items: cond.monitoring.map(mon => ({
-        key: `${cond.id}_${mon.id}`,
-        name: mon.name,
-        monitoringItem: mon,
-      })),
-    }));
+      monitoringItem: mon,
+      sampleType: inferSampleType(mon.name),
+    })));
+
+  // Group by sample type
+  const sampleTypeGroups = allMonItems.reduce<Record<string, typeof allMonItems>>((acc, item) => {
+    (acc[item.sampleType] = acc[item.sampleType] || []).push(item);
+    return acc;
+  }, {});
+
+  // Legacy conditionBundles kept for progress count only
+  const conditionBundles = (data.conditions || [])
+    .filter(cond => cond.is_active && cond.monitoring.length > 0)
+    .flatMap(cond => cond.monitoring.map(mon => ({
+      monitoringItem: mon,
+    })));
 
   // ── Progress counts (flat list for total) ────────────────────────────────
   const allCheckupFlat = [
     ...baseCheckupItems.map(item => ({
       isDone: !!(item.record && (item.record.status === 'up_to_date' || item.record.status === 'done')),
     })),
-    ...conditionBundles.flatMap(b => b.items.map(it => ({
+    ...conditionBundles.map(it => ({
       isDone: !!it.monitoringItem.last_done_date,
-    }))),
+    })),
   ];
   const totalItems = allCheckupFlat.length;
   const completedItems = allCheckupFlat.filter(i => i.isDone).length;
@@ -524,61 +543,67 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
           </div>
         </div>
 
-        {/* Vet Visit bundle (PetCircle base items) */}
+        {/* Vet Visit bundle (PetCircle base items — wellness exam items go here by default) */}
         <CheckupBundle
           bundleIcon="🩺"
           bundleLabel="Vet Visit"
           actionLabel="Annual wellness exam"
-          items={baseCheckupItems.map(item => {
-            const status = item.record ? getStatusForRecord(item.record) : 'missing';
-            return {
-              key: item.key,
-              name: item.name,
-              source: 'petcircle' as const,
-              status,
-              lastDone: item.record?.last_done_date || null,
-              nextDue: item.record?.next_due_date || null,
-              onLog: () => setEditingCheckup(item.record?.item_name || item.name),
-            };
-          })}
-        />
-
-        {/* Per-condition monitoring bundles */}
-        {conditionBundles.map(bundle => (
-          <CheckupBundle
-            key={bundle.conditionId}
-            bundleIcon={bundle.conditionIcon}
-            bundleLabel={bundle.conditionName}
-            actionLabel="Vet-prescribed monitoring"
-            items={bundle.items.map(it => {
+          items={[
+            ...baseCheckupItems.map(item => {
+              const status = item.record ? getStatusForRecord(item.record) : 'missing';
+              return {
+                key: item.key,
+                name: item.name,
+                source: 'petcircle' as const,
+                status,
+                lastDone: item.record?.last_done_date || null,
+                nextDue: item.record?.next_due_date || null,
+                onLog: () => setEditingCheckup(item.record?.item_name || item.name),
+              };
+            }),
+            // Monitoring items inferred as "Vet Visit" type go in this bundle too
+            ...(sampleTypeGroups['Vet Visit'] || []).map(it => {
               const st = monStatus(it.monitoringItem.next_due_date, it.monitoringItem.last_done_date);
               return {
                 key: it.key,
-                name: it.name,
+                name: `${it.name} (${it.conditionName})`,
                 source: 'vet' as const,
                 status: st,
                 lastDone: it.monitoringItem.last_done_date,
                 nextDue: it.monitoringItem.next_due_date,
                 onLog: () => setEditingMonId(it.monitoringItem.id),
               };
-            })}
-          />
-        ))}
+            }),
+          ]}
+        />
 
-        {/* Book Now CTA */}
-        {(baseCheckupItems.some(i => {
-          const s = i.record ? getStatusForRecord(i.record) : 'missing';
-          return s === 'overdue';
-        }) || conditionBundles.some(b => b.items.some(it =>
-          monStatus(it.monitoringItem.next_due_date, it.monitoringItem.last_done_date) === 'overdue'
-        ))) && (
-          <button
-            onClick={() => onCartClick('c14')}
-            style={{ width: '100%', background: '#D44800', color: 'white', border: 'none', borderRadius: 10, padding: '10px', fontSize: 13, fontWeight: 700, cursor: 'pointer', marginTop: 4 }}
-          >
-            Book Now
-          </button>
-        )}
+        {/* Sample-type bundles for vet-prescribed monitoring */}
+        {(['Blood Draw', 'Urine Sample', 'Imaging'] as const).map(sType => {
+          const groupItems = sampleTypeGroups[sType];
+          if (!groupItems || groupItems.length === 0) return null;
+          const meta = SAMPLE_TYPE_META[sType];
+          return (
+            <CheckupBundle
+              key={sType}
+              bundleIcon={meta.icon}
+              bundleLabel={sType}
+              actionLabel={meta.actionLabel}
+              items={groupItems.map(it => {
+                const st = monStatus(it.monitoringItem.next_due_date, it.monitoringItem.last_done_date);
+                return {
+                  key: it.key,
+                  name: `${it.name} (${it.conditionName})`,
+                  source: 'vet' as const,
+                  status: st,
+                  lastDone: it.monitoringItem.last_done_date,
+                  nextDue: it.monitoringItem.next_due_date,
+                  onLog: () => setEditingMonId(it.monitoringItem.id),
+                };
+              })}
+            />
+          );
+        })}
+
       </div>
 
       {/* ── Weight Log ─────────────────────────────────────────────────────── */}
@@ -774,12 +799,9 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
         />
       )}
       {editingMonId && (() => {
-        // Find the monitoring item across all condition bundles
-        let monName = '';
-        for (const b of conditionBundles) {
-          const found = b.items.find(it => it.monitoringItem.id === editingMonId);
-          if (found) { monName = found.name; break; }
-        }
+        // Find the monitoring item across all monitoring items
+        const found = allMonItems.find(it => it.monitoringItem.id === editingMonId);
+        const monName = found ? found.name : '';
         return (
           <DateEditSheet
             open={!!editingMonId}

@@ -117,6 +117,7 @@ export interface ConditionItem {
   managed_by: string | null;
   source: string;
   is_active: boolean;
+  episode_count?: number;
   medications: ConditionMedicationItem[];
   monitoring: ConditionMonitoringItem[];
   created_at: string | null;

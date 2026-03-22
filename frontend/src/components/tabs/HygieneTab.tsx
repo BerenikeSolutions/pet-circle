@@ -7,7 +7,7 @@ import {
   updateHygieneDate, deleteHygieneItem,
 } from '@/lib/api';
 import StatusBadge from '@/components/ui/StatusBadge';
-import ReminderBar from '@/components/ui/ReminderBar';
+import Toggle from '@/components/ui/Toggle';
 import DateEditSheet from '@/components/ui/DateEditSheet';
 import BottomSheet from '@/components/ui/BottomSheet';
 import AddRow from '@/components/ui/AddRow';
@@ -203,9 +203,13 @@ export default function HygieneTab({ data, token, onUpdated, onCartClick }: Hygi
     );
   }
 
+  const [freqSheetItem, setFreqSheetItem] = useState<HygienePreference | null>(null);
+  const [freqSheetValues, setFreqSheetValues] = useState({ freq: 1, unit: 'day' });
+
   const renderDailyItem = (item: HygienePreference) => {
     const status = computeStatus(item);
     const lastDone = formatLastDone(item.last_done);
+    const freqText = `${item.freq === 1 ? '' : item.freq + ' '}${item.unit}${item.freq !== 1 ? 's' : ''}`;
 
     return (
       <div key={item.item_id} className="py-3 border-b border-gray-50 last:border-0">
@@ -220,6 +224,16 @@ export default function HygieneTab({ data, token, onUpdated, onCartClick }: Hygi
           </div>
           <div className="flex items-center gap-2">
             <StatusBadge status={status} />
+            <button
+              onClick={() => { setFreqSheetItem(item); setFreqSheetValues({ freq: item.freq, unit: item.unit }); }}
+              style={{ fontSize: 11, fontWeight: 600, padding: '3px 9px', borderRadius: 20, background: '#F2F2F7', color: '#3C3C43', border: 'none', cursor: 'pointer', whiteSpace: 'nowrap' }}
+            >
+              🔁 {freqText} ✎
+            </button>
+            <Toggle
+              checked={item.reminder}
+              onChange={(v) => handleReminderToggle(item.item_id, v)}
+            />
             {!item.is_default && (
               <button
                 onClick={() => handleDelete(item.item_id)}
@@ -231,15 +245,6 @@ export default function HygieneTab({ data, token, onUpdated, onCartClick }: Hygi
             )}
           </div>
         </div>
-        <div className="pl-8 mt-1">
-          <ReminderBar
-            enabled={item.reminder}
-            onToggle={(v) => handleReminderToggle(item.item_id, v)}
-            freq={item.freq}
-            unit={item.unit}
-            onFreqChange={(f, u) => handleFreqSave(item.item_id, f, u)}
-          />
-        </div>
       </div>
     );
   };
@@ -248,6 +253,7 @@ export default function HygieneTab({ data, token, onUpdated, onCartClick }: Hygi
     const status = computeStatus(item);
     const lastDone = formatLastDone(item.last_done);
     const nextDue = computeNextDue(item);
+    const freqText = `${item.freq === 1 ? '' : item.freq + ' '}${item.unit}${item.freq !== 1 ? 's' : ''}`;
 
     return (
       <div key={item.item_id} className="py-3 border-b border-gray-50 last:border-0">
@@ -260,13 +266,23 @@ export default function HygieneTab({ data, token, onUpdated, onCartClick }: Hygi
               <p className="text-[11px] text-gray-500">Last: {lastDone}</p>
               {nextDue && (
                 <p className="text-[11px] text-gray-500">
-                  Next due: <span className="font-medium text-gray-700">{nextDue}</span>
+                  Next: <span className="font-medium text-gray-700">{nextDue}</span>
                 </p>
               )}
             </div>
           </div>
           <div className="flex items-center gap-2">
             <StatusBadge status={status} />
+            <button
+              onClick={() => { setFreqSheetItem(item); setFreqSheetValues({ freq: item.freq, unit: item.unit }); }}
+              style={{ fontSize: 11, fontWeight: 600, padding: '3px 9px', borderRadius: 20, background: '#F2F2F7', color: '#3C3C43', border: 'none', cursor: 'pointer', whiteSpace: 'nowrap' }}
+            >
+              🔁 {freqText} ✎
+            </button>
+            <Toggle
+              checked={item.reminder}
+              onChange={(v) => handleReminderToggle(item.item_id, v)}
+            />
             <button
               onClick={() => setDateEditing(item)}
               className="text-xs text-brand font-semibold"
@@ -284,15 +300,6 @@ export default function HygieneTab({ data, token, onUpdated, onCartClick }: Hygi
             )}
           </div>
         </div>
-        <div className="pl-8 mt-1">
-          <ReminderBar
-            enabled={item.reminder}
-            onToggle={(v) => handleReminderToggle(item.item_id, v)}
-            freq={item.freq}
-            unit={item.unit}
-            onFreqChange={(f, u) => handleFreqSave(item.item_id, f, u)}
-          />
-        </div>
       </div>
     );
   };
@@ -306,14 +313,14 @@ export default function HygieneTab({ data, token, onUpdated, onCartClick }: Hygi
         </div>
       )}
 
-      {/* Frequent Activity */}
+      {/* Frequent Activities */}
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
-        <h3 className="font-semibold text-sm mb-3">Frequent Activity</h3>
+        <h3 className="font-semibold text-sm mb-3">🌅 Frequent activities</h3>
         <div className="space-y-0">
           {dailyItems.map(item => renderDailyItem(item))}
         </div>
         <div className="mt-3">
-          <AddRow label="Add Activity" onClick={() => {
+          <AddRow label="Add hygiene activity" onClick={() => {
             setAddCategory('daily');
             setAddForm({ name: '', icon: '🧹', freq: 1, unit: 'day' });
             setAddSheet(true);
@@ -323,18 +330,60 @@ export default function HygieneTab({ data, token, onUpdated, onCartClick }: Hygi
 
       {/* Periodic Grooming */}
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
-        <h3 className="font-semibold text-sm mb-3">Periodic Grooming</h3>
+        <h3 className="font-semibold text-sm mb-3">📅 Periodic grooming</h3>
         <div className="space-y-0">
           {periodicItems.map(item => renderPeriodicItem(item))}
         </div>
         <div className="mt-3">
-          <AddRow label="Add Grooming Item" onClick={() => {
+          <AddRow label="Add grooming activity" onClick={() => {
             setAddCategory('periodic');
             setAddForm({ name: '', icon: '🛁', freq: 1, unit: 'month' });
             setAddSheet(true);
           }} />
         </div>
       </div>
+
+      {/* Freq edit sheet */}
+      {freqSheetItem && (
+        <BottomSheet open={!!freqSheetItem} onClose={() => setFreqSheetItem(null)} title={`Edit Frequency — ${freqSheetItem.name}`}>
+          <div className="space-y-3">
+            <div>
+              <label className="text-xs font-semibold text-gray-500 mb-1 block">Every</label>
+              <div className="flex gap-2">
+                <input
+                  type="number"
+                  min={1}
+                  value={freqSheetValues.freq}
+                  onChange={e => setFreqSheetValues(v => ({ ...v, freq: parseInt(e.target.value) || 1 }))}
+                  className="w-20 px-3 py-2 border border-gray-200 rounded-xl text-sm text-center focus:outline-none focus:border-brand"
+                />
+                <select
+                  value={freqSheetValues.unit}
+                  onChange={e => setFreqSheetValues(v => ({ ...v, unit: e.target.value }))}
+                  className="flex-1 px-3 py-2 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-brand"
+                >
+                  {['day', 'week', 'month', 'year'].map(u => (
+                    <option key={u} value={u}>{u}{freqSheetValues.freq !== 1 ? 's' : ''}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <button
+              onClick={async () => {
+                if (freqSheetItem) {
+                  await handleFreqSave(freqSheetItem.item_id, freqSheetValues.freq, freqSheetValues.unit);
+                  setFreqSheetItem(null);
+                }
+              }}
+              disabled={saving}
+              className="w-full py-3 rounded-xl text-white text-sm font-semibold"
+              style={{ background: 'var(--brand-gradient)' }}
+            >
+              Save
+            </button>
+          </div>
+        </BottomSheet>
+      )}
 
       {/* DateEditSheet */}
       {dateEditing && (
