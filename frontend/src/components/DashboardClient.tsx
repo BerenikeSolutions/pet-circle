@@ -32,6 +32,20 @@ function DashboardInner({ token }: { token: string }) {
   const [showReminders, setShowReminders] = useState(false);
   const [showNudges, setShowNudges] = useState(false);
   const [nudges, setNudges] = useState<NudgeItem[]>([]);
+  const [isOnline, setIsOnline] = useState(
+    typeof navigator !== "undefined" ? navigator.onLine : true
+  );
+
+  useEffect(() => {
+    const goOnline = () => setIsOnline(true);
+    const goOffline = () => setIsOnline(false);
+    window.addEventListener("online", goOnline);
+    window.addEventListener("offline", goOffline);
+    return () => {
+      window.removeEventListener("online", goOnline);
+      window.removeEventListener("offline", goOffline);
+    };
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -77,6 +91,26 @@ function DashboardInner({ token }: { token: string }) {
     }, 30000);
     return () => clearInterval(interval);
   }, [stale, retryCount, load]);
+
+  // Offline with no cached data
+  if (!isOnline && !data && !loading) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-4 p-8" style={{ background: 'var(--bg-app)' }}>
+        <div className="text-5xl">📡</div>
+        <div className="text-center">
+          <p className="text-base font-semibold text-gray-800">No network connection</p>
+          <p className="mt-1 text-sm text-gray-500">Please check your internet and try again.</p>
+        </div>
+        <button
+          onClick={load}
+          className="rounded-xl px-5 py-2 text-sm font-medium text-white"
+          style={{ background: 'var(--brand-gradient)' }}
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
 
   // Loading state
   if (loading && !data) {
@@ -145,8 +179,15 @@ function DashboardInner({ token }: { token: string }) {
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg-app)' }}>
-      {/* Stale data banner */}
-      {stale && (
+      {/* Offline banner */}
+      {!isOnline && (
+        <div className="border-b border-gray-300 bg-gray-100 px-4 py-3 text-center text-sm text-gray-700">
+          No network connection — showing last saved data
+        </div>
+      )}
+
+      {/* Stale data banner (online only) */}
+      {stale && isOnline && (
         <div className="bg-amber-50 border-b border-amber-300 px-4 py-3 text-center text-sm text-amber-800">
           <p>
             Showing last saved data
@@ -184,10 +225,29 @@ function DashboardInner({ token }: { token: string }) {
         onActionsClick={() => setShowNudges(true)}
       />
 
-      {/* Tab Bar */}
-      <DashboardTabBar activeTab={activeTab} onTabChange={setActiveTab} />
+      {/* Tab Bar — hidden when offline */}
+      {isOnline && <DashboardTabBar activeTab={activeTab} onTabChange={setActiveTab} />}
 
-      {/* Tab Content */}
+      {/* Offline placeholder */}
+      {!isOnline && (
+        <div className="max-w-[430px] mx-auto px-5 pt-10 pb-24 text-center">
+          <div className="text-5xl mb-4">📡</div>
+          <p className="text-base font-semibold text-gray-800">No network connection</p>
+          <p className="mt-1 text-sm text-gray-500">
+            Your pet&apos;s full health data will appear once you&apos;re back online.
+          </p>
+          <button
+            onClick={load}
+            className="mt-5 rounded-xl px-5 py-2 text-sm font-medium text-white"
+            style={{ background: 'var(--brand-gradient)' }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {/* Tab Content — hidden when offline */}
+      {isOnline && (
       <div className="max-w-[430px] mx-auto p-4 pb-24">
         {activeTab === 'overview' && (
           <OverviewTab
@@ -226,9 +286,10 @@ function DashboardInner({ token }: { token: string }) {
           <ConditionsTab data={data} token={token} onCartClick={(itemId?: string) => setPinnedCartItem(itemId ?? '')} />
         )}
       </div>
+      )}
 
-      {/* FAB — Nudges */}
-      {nudges.length > 0 && (
+      {/* FAB — Nudges (hidden when offline) */}
+      {isOnline && nudges.length > 0 && (
         <button
           onClick={() => setShowNudges(true)}
           className="fixed bottom-6 right-6 z-40 w-14 h-14 rounded-full shadow-lg flex items-center justify-center text-white text-xl"
