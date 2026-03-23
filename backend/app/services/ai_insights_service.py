@@ -60,6 +60,61 @@ def _get_openai_client():
 #  GPT generation helpers                                                       #
 # --------------------------------------------------------------------------- #
 
+async def _generate_conditions_summary_gpt(pet_context: str) -> dict:
+    """
+    Call GPT to produce a 2-3 sentence summary focused only on the pet's conditions.
+
+    If no active conditions exist, returns a short "no conditions" message.
+
+    Args:
+        pet_context: Structured text description of the pet's health status.
+
+    Returns:
+        {"summary": "<conditions-focused narrative>"}
+    """
+    client = _get_openai_client()
+
+    system_prompt = (
+        "You are a veterinary health assistant writing for a pet owner's conditions dashboard. "
+        "Given a pet's profile and active health conditions, write a 2-3 sentence summary "
+        "focused ONLY on the pet's conditions. Do NOT mention vaccines, nutrition, grooming, "
+        "checkups, or the overall health score. Structure it as follows:\n"
+        "1. Name and briefly describe each active condition and its type (chronic/episodic).\n"
+        "2. State which medications or monitoring items are being managed and their current status.\n"
+        "3. What the owner should act on next (overdue monitoring, refill due, unmanaged condition).\n"
+        "If no active conditions are present, return: "
+        "{\"summary\": \"No active conditions detected. Your pet is currently condition-free — keep up the great preventive care!\"}\n"
+        "Tone: warm, factual, parent-friendly. Never alarming. "
+        "Respond with ONLY valid JSON: {\"summary\": \"<text>\"}. "
+        "Do not include any explanation outside the JSON object."
+    )
+
+    user_prompt = f"Pet health context:\n{pet_context}"
+
+    async def _call() -> str:
+        response = await client.chat.completions.create(
+            model=OPENAI_QUERY_MODEL,
+            temperature=0,
+            max_tokens=300,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        return response.choices[0].message.content or "{}"
+
+    raw = await retry_openai_call(_call)
+    try:
+        parsed = json.loads(raw)
+        if "summary" not in parsed:
+            raise ValueError("Missing 'summary' key")
+        return parsed
+    except Exception as exc:
+        logger.warning("conditions_summary JSON parse failed: %s | raw=%s", exc, raw)
+        return {"summary": "Conditions summary is being updated."}
+
+
 async def _generate_health_summary_gpt(pet_context: str) -> dict:
     """
     Call GPT to produce a rich 3-4 sentence health narrative for the pet.
@@ -306,7 +361,9 @@ async def get_or_generate_insight(
     # Generate fresh content
     pet_context = _build_pet_context(pet, conditions, health_score)
     try:
-        if insight_type == "health_summary":
+        if insight_type == "conditions_summary":
+            content = await _generate_conditions_summary_gpt(pet_context)
+        elif insight_type == "health_summary":
             content = await _generate_health_summary_gpt(pet_context)
         elif insight_type == "vet_questions":
             content = await _generate_vet_questions_gpt(pet_context)
@@ -316,8 +373,8 @@ async def get_or_generate_insight(
     except Exception as exc:
         logger.error("GPT insight generation failed for %s/%s: %s", pet_id, insight_type, exc)
         # Return graceful defaults rather than crashing
-        if insight_type == "health_summary":
-            return {"summary": "Health summary is currently unavailable."}
+        if insight_type in ("health_summary", "conditions_summary"):
+            return {"summary": "Summary is currently unavailable."}
         return []
 
     # Upsert to DB (INSERT … ON CONFLICT DO UPDATE)

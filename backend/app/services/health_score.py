@@ -203,6 +203,10 @@ def compute_health_score(db: Session, pet_id: UUID) -> dict:
         grooming_score = 0.0
 
     # --- Build breakdown ---
+    # Conditions is excluded from scoring if no active conditions exist.
+    # In that case the 20% weight is redistributed proportionally across remaining categories.
+    conditions_excluded = not condition_rows
+
     breakdown = [
         {
             "category": "Vaccines",
@@ -227,6 +231,7 @@ def compute_health_score(db: Session, pet_id: UUID) -> dict:
             "score": round(conditions_score),
             "done": None,
             "total": None,
+            "excluded": conditions_excluded,
         },
         {
             "category": "Nutrition",
@@ -254,8 +259,10 @@ def compute_health_score(db: Session, pet_id: UUID) -> dict:
         },
     ]
 
-    # --- Weighted total ---
-    raw_score = sum((b["score"] / 100) * b["weight"] for b in breakdown)
+    # --- Weighted total (exclude conditions category if no conditions detected) ---
+    active_breakdown = [b for b in breakdown if not b.get("excluded")]
+    total_weight = sum(b["weight"] for b in active_breakdown)
+    raw_score = sum((b["score"] / 100) * b["weight"] for b in active_breakdown) / total_weight * 100
 
     # --- Label ---
     if raw_score >= 85:
@@ -267,10 +274,10 @@ def compute_health_score(db: Session, pet_id: UUID) -> dict:
     else:
         label = "Poor"
 
-    # --- Draggers: categories pulling score below 50% ---
+    # --- Draggers: categories pulling score below 50% (excluded categories omitted) ---
     draggers = [
         {"category": b["category"], "score": b["score"], "weight": b["weight"]}
-        for b in breakdown
+        for b in active_breakdown
         if b["score"] < 50
     ]
 

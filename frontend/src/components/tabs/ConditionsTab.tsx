@@ -76,20 +76,16 @@ const PRIORITY_BG: Record<string, string>    = { urgent: '#FFF0F0', high: '#FFF6
 const PRIORITY_LABEL: Record<string, string> = { urgent: 'URGENT', high: 'RECOMMENDED', medium: 'SUGGESTED' };
 
 /* ─────────────────────────────────────────────────────────────────
-   Health Score Card
+   Conditions Summary Card (ring removed — score shown in header)
 ───────────────────────────────────────────────────────────────── */
 function HealthScoreCard({
-  score, label, activeCount, summary, conditions,
+  activeCount, summary, conditions,
 }: {
-  score: number; label: string; activeCount: number; summary: string; conditions: ConditionItem[];
+  activeCount: number; summary: string; conditions: ConditionItem[];
 }) {
-  const isGood = score >= 50;
-  const ringColor = isGood ? '#34C759' : '#D44800';
-  const r = 30, circ = 2 * Math.PI * r;
-  const dash = (score / 100) * circ;
-
-  const cardBg = isGood ? '#F0FFF4' : '#FFF9F5';
-  const cardBorder = isGood ? '#34C75933' : '#D4480033';
+  const hasConditions = conditions.length > 0;
+  const cardBg = hasConditions ? '#FFF9F5' : '#F0FFF4';
+  const cardBorder = hasConditions ? '#D4480033' : '#34C75933';
 
   return (
     <div style={{
@@ -97,44 +93,19 @@ function HealthScoreCard({
       border: `1.5px solid ${cardBorder}`, boxShadow: '0 2px 12px rgba(0,0,0,0.06)',
       marginBottom: 12,
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 14 }}>
-        {/* SVG ring */}
-        <div style={{ position: 'relative', width: 80, height: 80, flexShrink: 0 }}>
-          <svg width={80} height={80} style={{ transform: 'rotate(-90deg)' }}>
-            <circle cx={40} cy={40} r={r} fill="none" stroke="#F2F2F7" strokeWidth={8} />
-            <circle
-              cx={40} cy={40} r={r} fill="none"
-              stroke={ringColor} strokeWidth={8}
-              strokeLinecap="round"
-              strokeDasharray={`${dash} ${circ - dash}`}
-            />
-          </svg>
-          <div style={{
-            position: 'absolute', inset: 0, display: 'flex',
-            flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+      <div style={{ marginBottom: conditions.length > 0 ? 14 : 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+          <span style={{
+            fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20,
+            background: hasConditions ? '#FFF5F0' : '#E8FAF0',
+            color: hasConditions ? '#D44800' : '#34C759',
           }}>
-            <span style={{ fontFamily: 'Fraunces, serif', fontSize: 20, fontWeight: 700, color: ringColor, lineHeight: 1 }}>
-              {score}
-            </span>
-            <span style={{ fontSize: 9, color: '#8E8E93', lineHeight: 1.2 }}>/100</span>
-          </div>
+            {activeCount} OPEN {activeCount === 1 ? 'CONDITION' : 'CONDITIONS'}
+          </span>
         </div>
-
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-            <span style={{ fontWeight: 700, fontSize: 16, color: '#1C1C1E' }}>{label}</span>
-            <span style={{
-              fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 20,
-              background: isGood ? '#E8FAF0' : '#FFF5F0',
-              color: isGood ? '#34C759' : '#D44800',
-            }}>
-              {activeCount} OPEN {activeCount === 1 ? 'CONDITION' : 'CONDITIONS'}
-            </span>
-          </div>
-          <p style={{ fontSize: 12, color: '#3C3C43', lineHeight: 1.5, margin: 0 }}>
-            {summary || 'Loading health summary…'}
-          </p>
-        </div>
+        <p style={{ fontSize: 12, color: '#3C3C43', lineHeight: 1.5, margin: 0 }}>
+          {summary || 'Loading conditions summary…'}
+        </p>
       </div>
 
       {/* Status pills */}
@@ -871,8 +842,6 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
 
       {/* 1. Health Score Card */}
       <HealthScoreCard
-        score={healthScore.score}
-        label={healthScore.label}
         activeCount={activeCount}
         summary={healthSummary}
         conditions={conditions.filter(c => c.condition_type !== 'resolved')}

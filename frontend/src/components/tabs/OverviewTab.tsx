@@ -23,22 +23,6 @@ interface OverviewTabProps {
   onRemindersClick?: () => void;
 }
 
-const SCORE_LABEL_COLORS: Record<string, { color: string; bg: string }> = {
-  Excellent: { color: '#34C759', bg: '#F0FFF4' },
-  Good: { color: '#007AFF', bg: '#F0F6FF' },
-  Fair: { color: '#FF9500', bg: '#FFF6ED' },
-  Poor: { color: '#FF3B30', bg: '#FFF0F0' },
-};
-
-const CATEGORY_ICONS: Record<string, string> = {
-  vaccines: '💉',
-  deworming_flea: '🪱',
-  conditions: '🏥',
-  nutrition: '🥗',
-  grooming: '✂️',
-  checkups: '🩺',
-};
-
 const ROLE_LABELS: Record<string, string> = {
   veterinarian: 'Vet',
   groomer: 'Groomer',
@@ -204,8 +188,6 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
   const activeDocCategories = [...DOC_CATEGORIES, 'Other' as const].filter(c => groupedDocs[c]?.length > 0);
 
   const contacts = data.contacts || [];
-  const hs = data.health_score;
-  const labelStyle = SCORE_LABEL_COLORS[hs.label] || SCORE_LABEL_COLORS.Fair;
 
   const records = data.preventive_records || [];
   const vaccines = filterByKeywords(records, VACCINE_KW);
@@ -260,14 +242,6 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
     }
   }, [token, onUpdated]);
 
-  // SVG ring parameters
-  const ringSize = 120;
-  const strokeWidth = 10;
-  const radius = (ringSize - strokeWidth) / 2;
-  const circumference = 2 * Math.PI * radius;
-  const scorePct = Math.min(hs.score, 100);
-  const dashOffset = circumference - (scorePct / 100) * circumference;
-
   return (
     <div className="space-y-4">
       {/* Care at a Glance — leads the overview */}
@@ -293,80 +267,6 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
               </button>
             );
           })}
-        </div>
-      </div>
-
-      {/* Health Score Ring */}
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
-        <div className="flex items-center gap-4">
-          <div className="relative shrink-0" style={{ width: ringSize, height: ringSize }}>
-            <svg width={ringSize} height={ringSize} className="-rotate-90">
-              <circle
-                cx={ringSize / 2} cy={ringSize / 2} r={radius}
-                fill="none" stroke="#F2F2F7" strokeWidth={strokeWidth}
-              />
-              <circle
-                cx={ringSize / 2} cy={ringSize / 2} r={radius}
-                fill="none" stroke={labelStyle.color} strokeWidth={strokeWidth}
-                strokeLinecap="round"
-                strokeDasharray={circumference}
-                strokeDashoffset={dashOffset}
-                style={{ transition: 'stroke-dashoffset 0.6s ease' }}
-              />
-            </svg>
-            <div className="absolute inset-0 flex flex-col items-center justify-center">
-              <span className="text-2xl font-bold" style={{ color: labelStyle.color }}>{hs.score}</span>
-              <span className="text-[10px] font-semibold text-gray-400">/ 100</span>
-            </div>
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2 mb-1">
-              <span
-                className="text-xs font-bold px-2 py-0.5 rounded-full"
-                style={{ color: labelStyle.color, backgroundColor: labelStyle.bg }}
-              >
-                {hs.label}
-              </span>
-            </div>
-            <p className="text-xs text-gray-500 mb-2">
-              {data.pet.name}&apos;s overall health score based on 6 care categories.
-            </p>
-            {/* Draggers */}
-            {hs.draggers.length > 0 && (
-              <div className="space-y-1">
-                <p className="text-[10px] font-semibold text-red-500">Needs attention:</p>
-                {hs.draggers.map((d, i) => (
-                  <p key={i} className="text-[10px] text-red-400">
-                    {CATEGORY_ICONS[d.category.toLowerCase().replace(/ & /g, '_').replace(/ /g, '_')] || '!'} {d.category} — {d.score}%
-                  </p>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Breakdown bars */}
-        <div className="mt-4 space-y-2">
-          {hs.breakdown.map((b) => (
-            <div key={b.key} className="flex items-center gap-2">
-              <span className="text-sm shrink-0">{CATEGORY_ICONS[b.key] || '?'}</span>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between mb-0.5">
-                  <span className="text-[11px] font-medium text-gray-700 truncate">{b.category}</span>
-                  <span className="text-[10px] text-gray-500 shrink-0">{b.score}% <span className="text-gray-300">({b.weight}%)</span></span>
-                </div>
-                <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                  <div
-                    className="h-full rounded-full transition-all duration-500"
-                    style={{
-                      width: `${Math.min(b.score, 100)}%`,
-                      backgroundColor: b.score >= 75 ? '#34C759' : b.score >= 50 ? '#FF9500' : '#FF3B30',
-                    }}
-                  />
-                </div>
-              </div>
-            </div>
-          ))}
         </div>
       </div>
 

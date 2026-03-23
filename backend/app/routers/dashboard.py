@@ -1416,7 +1416,7 @@ async def dashboard_health_summary(
         return await get_or_generate_insight(
             db=db,
             pet_id=dt.pet_id,
-            insight_type="health_summary",
+            insight_type="conditions_summary",
             pet=data["pet"],
             conditions=data["conditions"],
             health_score=data["health_score"],

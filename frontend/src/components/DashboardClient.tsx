@@ -221,6 +221,7 @@ function DashboardInner({ token }: { token: string }) {
         pet={data.pet}
         owner={data.owner}
         overdueCount={overdueCount}
+        healthScore={data.health_score}
         onCartClick={(itemId?: string) => setPinnedCartItem(itemId ?? '')}
         onActionsClick={() => setShowNudges(true)}
       />

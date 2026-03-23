@@ -10,11 +10,12 @@ interface DashboardHeaderProps {
   pet: PetProfile;
   owner: OwnerInfo;
   overdueCount: number;
+  healthScore: { score: number; label: string };
   onCartClick: (itemId?: string) => void;
   onActionsClick?: () => void;
 }
 
-export default function DashboardHeader({ pet, owner, overdueCount, onCartClick, onActionsClick }: DashboardHeaderProps) {
+export default function DashboardHeader({ pet, owner, overdueCount, healthScore, onCartClick, onActionsClick }: DashboardHeaderProps) {
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
 
   const photoUrl = photoPreview || (pet.photo_url ? `${API_BASE}${pet.photo_url}` : null);
@@ -66,14 +67,44 @@ export default function DashboardHeader({ pet, owner, overdueCount, onCartClick,
               <span className="text-xs">📷</span>
             </div>
           </label>
-          <div className="text-white min-w-0">
-            <h1 className="font-display text-2xl font-bold truncate">{pet.name}</h1>
-            <p className="text-white/80 text-sm">
-              {pet.breed} · {age} · {locationOrSpecies}
-            </p>
-            <p className="text-white/60 text-xs mt-0.5">
-              Parent: {owner.full_name}
-            </p>
+          <div className="text-white min-w-0 flex-1 flex items-center gap-3">
+            <div className="min-w-0 flex-1">
+              <h1 className="font-display text-2xl font-bold truncate">{pet.name}</h1>
+              <p className="text-white/80 text-sm">
+                {pet.breed} · {age} · {locationOrSpecies}
+              </p>
+              <p className="text-white/60 text-xs mt-0.5">
+                Parent: {owner.full_name}
+              </p>
+            </div>
+            {/* Health Score Ring */}
+            {(() => {
+              const r = 22;
+              const circ = 2 * Math.PI * r;
+              const dash = (healthScore.score / 100) * circ;
+              return (
+                <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 3 }}>
+                  <div style={{ position: 'relative', width: 54, height: 54 }}>
+                    <svg width={54} height={54} style={{ transform: 'rotate(-90deg)' }}>
+                      <circle cx={27} cy={27} r={r} fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth={5} />
+                      <circle
+                        cx={27} cy={27} r={r} fill="none" stroke="#fff" strokeWidth={5}
+                        strokeLinecap="round"
+                        strokeDasharray={`${dash} ${circ - dash}`}
+                      />
+                    </svg>
+                    <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      <span style={{ fontFamily: 'Fraunces, serif', fontSize: 14, fontWeight: 700, color: '#fff', lineHeight: 1 }}>
+                        {healthScore.score}
+                      </span>
+                    </div>
+                  </div>
+                  <span style={{ fontSize: 9, fontWeight: 700, color: 'rgba(255,255,255,0.75)', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                    {healthScore.label}
+                  </span>
+                </div>
+              );
+            })()}
           </div>
         </div>
 
