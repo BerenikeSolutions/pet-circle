@@ -491,7 +491,10 @@ def get_document_file_for_token(
     if not doc:
         raise ValueError("Document not found.")
 
-    file_bytes = asyncio.run(download_from_supabase(doc.file_path))
+    file_bytes = asyncio.run(download_from_supabase(
+        doc.file_path,
+        backend=getattr(doc, "storage_backend", "supabase"),
+    ))
     if not file_bytes:
         raise ValueError("Could not load document from storage.")
 
@@ -754,8 +757,11 @@ async def retry_document_extraction(
     if doc.extraction_status != "failed":
         raise ValueError("Only failed documents can be retried.")
 
-    # Download file from Supabase storage.
-    file_bytes = await download_from_supabase(doc.file_path)
+    # Download file from storage (GCP or Supabase) for re-extraction.
+    file_bytes = await download_from_supabase(
+        doc.file_path,
+        backend=getattr(doc, "storage_backend", "supabase"),
+    )
     if not file_bytes:
         raise ValueError("Could not download document from storage. Please re-upload via WhatsApp.")
 

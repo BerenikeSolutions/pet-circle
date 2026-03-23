@@ -86,6 +86,13 @@ class Settings(BaseSettings):
     # Frontend URL for CORS allow-origin (e.g., https://petcircle.vercel.app).
     FRONTEND_URL: str
 
+    # --- GCP Cloud Storage ---
+    # Optional at startup — if absent, all document uploads fall back to Supabase silently.
+    # GCP_CREDENTIALS_JSON: base64-encoded service account JSON string.
+    # Generate with: base64 -w 0 service-account.json
+    GCP_CREDENTIALS_JSON: str | None = None
+    GCP_BUCKET_NAME: str | None = None
+
     # --- Razorpay ---
     # Live/test keys from Razorpay dashboard → Settings → API Keys.
     # Optional at startup — payment endpoints will raise 503 if missing.

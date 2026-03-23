@@ -1,10 +1,10 @@
 """
 PetCircle Phase 1 — Document Upload Service (Module 7)
 
-Handles file upload validation, Supabase storage, and document record
-creation. This is the entry point for the document processing pipeline:
+Handles file upload validation, storage, and document record creation.
+This is the entry point for the document processing pipeline:
 
-    Upload → Validate → Store → Insert DB record → Trigger extraction
+    Upload → Validate → Store (GCP or Supabase) → Insert DB record → Trigger extraction
 
 Validation rules:
     - File size: max MAX_UPLOAD_MB (10MB) — from constants.
@@ -12,16 +12,23 @@ Validation rules:
     - Daily upload limit: MAX_UPLOADS_PER_PET_PER_DAY (10) — from constants.
 
 Storage:
-    - Private Supabase bucket (SUPABASE_BUCKET_NAME from env).
-    - Path format: {user_id}/{pet_id}/{filename} — from STORAGE_PATH_TEMPLATE constant.
-    - No public URLs — files accessed only through signed URLs.
+    - Primary: GCP Cloud Storage (if configured via GCP_CREDENTIALS_JSON + GCP_BUCKET_NAME).
+    - Fallback: Private Supabase bucket (SUPABASE_BUCKET_NAME from env).
+    - Path format: {user_id}/{pet_id}/{filename} — identical for both backends.
+    - No public URLs — files accessed only through authenticated API calls.
+    - storage_backend column on documents table records which backend holds each file.
 
 Rules:
     - All limits from constants.py — no hardcoded values.
-    - Bucket name from environment config — never hardcoded.
+    - Bucket names from environment config — never hardcoded.
     - All operations logged.
     - Upload failures do not crash the application.
     - Document record inserted with extraction_status='pending'.
+
+Note on pet photos:
+    - upload_to_supabase() and _download_supabase_raw() are also called by
+      onboarding services for pet photos. Those callers are Supabase-only and
+      are intentionally not routed through GCP.
 """
 
 import logging
@@ -254,6 +261,7 @@ def create_document_record(
     mime_type: str,
     original_filename: str | None = None,
     source_wamid: str | None = None,
+    storage_backend: str = "supabase",
 ) -> Document:
     """
     Insert a document record into the database.
@@ -266,10 +274,11 @@ def create_document_record(
     Args:
         db: SQLAlchemy database session.
         pet_id: UUID of the pet this document belongs to.
-        file_path: Supabase storage path of the uploaded file.
+        file_path: Storage path of the uploaded file (same path for GCP and Supabase).
         mime_type: MIME type of the uploaded file.
         original_filename: Original filename from the upload (optional).
         source_wamid: WhatsApp message ID that triggered this upload (optional).
+        storage_backend: Which backend holds the file — 'gcp' or 'supabase'.
 
     Returns:
         The created Document model instance.
@@ -281,6 +290,7 @@ def create_document_record(
         extraction_status="pending",
         document_name=original_filename[:200] if original_filename else None,
         source_wamid=source_wamid,
+        storage_backend=storage_backend,
     )
 
     db.add(document)
@@ -289,22 +299,24 @@ def create_document_record(
 
     logger.info(
         "Document record created: id=%s, pet_id=%s, path=%s, "
-        "mime=%s, extraction_status=pending",
+        "mime=%s, backend=%s, extraction_status=pending",
         str(document.id),
         str(pet_id),
         file_path,
         mime_type,
+        storage_backend,
     )
 
     return document
 
 
-async def download_from_supabase(storage_path: str) -> bytes | None:
+async def _download_supabase_raw(storage_path: str) -> bytes | None:
     """
-    Download a file from the private Supabase storage bucket.
+    Download a file directly from the private Supabase storage bucket.
 
-    Used by the extraction pipeline to retrieve uploaded files
-    for GPT processing (vision API for images, text extraction for PDFs).
+    Internal function — external callers should use download_from_supabase()
+    which routes to the correct backend. This function is also imported by
+    storage_service.py for fallback downloads and sync operations.
 
     The sync Supabase SDK call is run in a thread pool via asyncio
     to avoid blocking the event loop.
@@ -342,6 +354,30 @@ async def download_from_supabase(storage_path: str) -> bytes | None:
         return None
 
 
+async def download_from_supabase(
+    storage_path: str,
+    backend: str = "supabase",
+) -> bytes | None:
+    """
+    Download a file from the appropriate storage backend.
+
+    Routes to GCP or Supabase based on the backend parameter, which should
+    come from documents.storage_backend. If the backend is unavailable,
+    the other backend is tried as an emergency fallback.
+
+    Args:
+        storage_path: Path within the bucket ({user_id}/{pet_id}/{filename}).
+        backend: 'gcp' or 'supabase' — from documents.storage_backend column.
+                 Defaults to 'supabase' for backward compatibility with callers
+                 that don't yet pass this argument.
+
+    Returns:
+        Raw file bytes on success, None on failure.
+    """
+    from app.services.storage_service import download_file
+    return await download_file(storage_path, backend)
+
+
 async def process_document_upload(
     db: Session,
     pet_id: UUID,
@@ -364,8 +400,8 @@ async def process_document_upload(
         2. Validate MIME type (jpeg/png/pdf from constants).
         3. Check daily upload limit (10/pet/day from constants).
         4. Build storage path ({user_id}/{pet_id}/{filename}).
-        5. Upload to private Supabase bucket (bucket from env).
-        6. Insert document record (extraction_status='pending').
+        5. Upload to GCP (primary) or Supabase (fallback); record which backend.
+        6. Insert document record (extraction_status='pending', storage_backend set).
 
     Args:
         db: SQLAlchemy database session.
@@ -391,13 +427,16 @@ async def process_document_upload(
     # --- Step 4: Build storage path ---
     storage_path = build_storage_path(user_id, pet_id, filename)
 
-    # --- Step 5: Upload to Supabase private bucket ---
-    await upload_to_supabase(file_content, storage_path, mime_type)
+    # --- Step 5: Upload to GCP (primary) or Supabase (fallback) ---
+    from app.services.storage_service import upload_file as storage_upload
+    _, backend = await storage_upload(file_content, storage_path, mime_type)
 
     # --- Step 6: Create document record ---
     document = create_document_record(
         db, pet_id, storage_path, mime_type,
-        original_filename=filename, source_wamid=source_wamid,
+        original_filename=filename,
+        source_wamid=source_wamid,
+        storage_backend=backend,
     )
 
     return document

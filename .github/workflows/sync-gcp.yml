@@ -1,0 +1,28 @@
+name: GCP Storage Sync
+
+on:
+  schedule:
+    # 3:00 AM UTC = 8:30 AM IST — runs 30 minutes after the reminder engine.
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    # Allow manual trigger for on-demand sync or testing.
+
+jobs:
+  sync-gcp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Trigger GCP sync
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${{ secrets.PRODUCTION_API_URL }}/admin/trigger-gcp-sync" \
+            -H "X-ADMIN-KEY: ${{ secrets.ADMIN_SECRET_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"dry_run": false, "limit": 500}' \
+            --max-time 30)
+          echo "HTTP status: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "GCP sync trigger failed with status $STATUS"
+            exit 1
+          fi
+          echo "GCP sync job started successfully (running in background on server)"

@@ -1091,9 +1091,12 @@ async def _delayed_batch_extraction(
         for idx, doc in enumerate(pending_docs, 1):
             async with _extraction_semaphore:
                 try:
-                    # Download actual file content from Supabase for GPT processing.
+                    # Download file content from storage (GCP or Supabase) for GPT processing.
                     from app.services.document_upload import download_from_supabase
-                    file_bytes = await download_from_supabase(doc.file_path)
+                    file_bytes = await download_from_supabase(
+                        doc.file_path,
+                        backend=getattr(doc, "storage_backend", "supabase"),
+                    )
 
                     if not file_bytes:
                         fail_count += 1

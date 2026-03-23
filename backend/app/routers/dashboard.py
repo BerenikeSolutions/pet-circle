@@ -402,9 +402,9 @@ async def dashboard_upload_document(
         validate_file_upload,
         check_daily_upload_limit,
         build_storage_path,
-        upload_to_supabase,
         create_document_record,
     )
+    from app.services.storage_service import upload_file as storage_upload
 
     try:
         dt = validate_dashboard_token(db, token)
@@ -429,16 +429,18 @@ async def dashboard_upload_document(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # Upload to Supabase
+    # Upload to GCP (primary) or Supabase (fallback)
     try:
         storage_path = build_storage_path(pet.user_id, pet.id, filename)
-        await upload_to_supabase(file_content, storage_path, mime_type)
+        _, backend = await storage_upload(file_content, storage_path, mime_type)
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail="File upload failed. Please try again.")
 
     # Create DB record
     document = create_document_record(
-        db, pet.id, storage_path, mime_type, original_filename=filename,
+        db, pet.id, storage_path, mime_type,
+        original_filename=filename,
+        storage_backend=backend,
     )
 
     # Trigger extraction in background

@@ -6,8 +6,9 @@ Mirrors the 'documents' table exactly as defined in the frozen SQL schema.
 Constraints:
     - pet_id: FK to pets(id), ON DELETE CASCADE
     - extraction_status: CHECK IN ('pending', 'success', 'failed')
-    - file_path: stores Supabase storage path ({user_id}/{pet_id}/{filename})
+    - file_path: storage path ({user_id}/{pet_id}/{filename}), same path for both backends
     - mime_type: validated against ALLOWED_MIME_TYPES at service layer
+    - storage_backend: 'gcp' (primary) or 'supabase' (fallback/legacy)
 """
 
 import uuid
@@ -80,6 +81,12 @@ class Document(Base):
     # when Meta retries webhooks after server restarts or timeouts.
     # Unique constraint ensures one Document per WhatsApp message.
     source_wamid = Column(String(200), nullable=True, unique=True, index=True)
+
+    # Storage backend holding the file for this document.
+    # 'gcp'      — stored in GCP Cloud Storage (primary, preferred)
+    # 'supabase' — stored in Supabase private bucket (fallback or pre-migration)
+    # The sync job migrates 'supabase' rows to GCP over time.
+    storage_backend = Column(String(20), nullable=False, server_default="supabase")
 
     # Timestamp when the document was uploaded.
     # Indexed for daily upload limit check queries.

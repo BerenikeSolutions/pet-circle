@@ -21,6 +21,8 @@ Routes:
     PATCH  /admin/revoke-token/{pet_id}      — Revoke dashboard token
     PATCH  /admin/soft-delete-user/{user_id} — Soft delete a user
     POST   /admin/trigger-reminder/{pet_id}  — Trigger reminder for a pet
+    POST   /admin/trigger-gcp-sync           — Migrate documents from Supabase to GCP
+    GET    /admin/storage-stats              — Document counts by storage backend
 """
 
 import hmac
@@ -798,6 +800,89 @@ def verify_admin_key_endpoint():
         {"valid": true} if the key is accepted (403 otherwise via dependency).
     """
     return {"valid": True}
+
+
+class GcpSyncRequest(BaseModel):
+    """Request body for GCP storage sync trigger."""
+    dry_run: bool = False
+    limit: int = Field(default=500, ge=1, le=5000)
+
+
+@router.post("/trigger-gcp-sync")
+async def trigger_gcp_sync(
+    body: GcpSyncRequest = GcpSyncRequest(),
+    db: Session = Depends(get_db),
+):
+    """
+    Trigger a background job to migrate documents from Supabase to GCP.
+
+    Migrates all documents where storage_backend='supabase' to GCP
+    Cloud Storage, then removes them from Supabase.
+
+    The migration runs in a background task — this endpoint returns
+    immediately. Check server logs for per-document results.
+
+    Args:
+        dry_run: If True, log what would be migrated without making changes.
+        limit: Maximum number of documents to process (default 500, max 5000).
+
+    Returns:
+        {"status": "started", "dry_run": bool, "limit": int}
+    """
+    import asyncio
+    from app.services.storage_service import is_gcp_available
+
+    if not is_gcp_available():
+        raise HTTPException(
+            status_code=503,
+            detail="GCP is not configured or unavailable. "
+                   "Check GCP_CREDENTIALS_JSON and GCP_BUCKET_NAME environment variables.",
+        )
+
+    async def _run_sync():
+        """Run the sync job as a background task."""
+        from scripts.sync_gcp import sync_all_documents
+        summary = await sync_all_documents(limit=body.limit, dry_run=body.dry_run)
+        logger.info(
+            "GCP sync job completed: dry_run=%s, total=%d, migrated=%d, failed=%d",
+            body.dry_run, summary["total"], summary["migrated"], summary["failed"],
+        )
+
+    asyncio.create_task(_run_sync())
+
+    logger.info(
+        "GCP sync job started: dry_run=%s, limit=%d", body.dry_run, body.limit
+    )
+    return {"status": "started", "dry_run": body.dry_run, "limit": body.limit}
+
+
+@router.get("/storage-stats")
+def get_storage_stats(db: Session = Depends(get_db)):
+    """
+    Return document counts grouped by storage backend.
+
+    Useful for monitoring migration progress.
+
+    Returns:
+        {"gcp": <count>, "supabase": <count>, "total": <count>}
+    """
+    from sqlalchemy import text
+
+    rows = db.execute(
+        text(
+            "SELECT storage_backend, COUNT(*) AS count "
+            "FROM documents "
+            "GROUP BY storage_backend"
+        )
+    ).fetchall()
+
+    stats = {row.storage_backend: row.count for row in rows}
+    total = sum(stats.values())
+    return {
+        "gcp": stats.get("gcp", 0),
+        "supabase": stats.get("supabase", 0),
+        "total": total,
+    }
 
 
 class AdminLoginRequest(BaseModel):
