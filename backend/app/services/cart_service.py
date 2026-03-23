@@ -14,7 +14,7 @@ Key design:
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, date, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy import func as sqlfunc
 
@@ -23,6 +23,7 @@ from app.models.product_catalog import ProductCatalog
 from app.models.pet import Pet
 from app.models.condition import Condition
 from app.models.order import Order
+from app.models.pet_preference import PetPreference
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +255,13 @@ async def get_recommendations(
         _recommend_food(db, pet, existing_ids)
     )
 
+    # Exclude previously bought items
+    bought_names = _get_bought_names(db, pet_id)
+    recommendations = [
+        r for r in recommendations
+        if not _is_previously_bought(r["name"], bought_names)
+    ]
+
     # Deduplicate by product ID
     seen = set()
     unique = []
@@ -263,6 +271,88 @@ async def get_recommendations(
             unique.append(rec)
 
     return unique[:15]  # Cap at 15 recommendations
+
+
+def _get_bought_names(db: Session, pet_id) -> set:
+    """Return set of lowercased item names from pet_preferences for this pet."""
+    rows = (
+        db.query(PetPreference.item_name)
+        .filter(PetPreference.pet_id == pet_id)
+        .all()
+    )
+    return {row[0].strip().lower() for row in rows if row[0]}
+
+
+def _is_previously_bought(product_name: str, bought_names: set) -> bool:
+    """
+    Return True if this product name matches any previously bought item name.
+    Uses substring matching in both directions (case-insensitive).
+    """
+    product_lower = product_name.strip().lower()
+    for bought in bought_names:
+        if bought in product_lower or product_lower in bought:
+            return True
+    return False
+
+
+def get_last_bought(
+    db: Session,
+    pet_id,
+    exclude_names: set | None = None,
+) -> list[dict]:
+    """
+    Return previously bought items for a pet from pet_preferences.
+
+    Args:
+        exclude_names: Set of lowercased names to exclude (e.g. items currently
+                       in cart, or items just ordered).
+
+    Returns:
+        List of {name, used_count, last_bought_at, category}
+        Empty list if no history or all history is excluded (caller should hide the section).
+    """
+    rows = (
+        db.query(PetPreference)
+        .filter(PetPreference.pet_id == pet_id)
+        .order_by(PetPreference.updated_at.desc())
+        .limit(10)
+        .all()
+    )
+    result = []
+    for row in rows:
+        name = (row.item_name or "").strip()
+        if not name:
+            continue
+        if exclude_names and name.lower() in exclude_names:
+            continue
+        result.append({
+            "name": name,
+            "used_count": int(row.used_count or 0),
+            "last_bought_at": row.updated_at,
+            "category": row.category,
+        })
+    return result
+
+
+def _format_last_bought_label(last_bought_at) -> str:
+    """Convert a datetime to a human-readable recency label."""
+    if not last_bought_at:
+        return ""
+    today = date.today()
+    try:
+        if hasattr(last_bought_at, "date"):
+            bought_date = last_bought_at.date()
+        else:
+            bought_date = last_bought_at
+        delta = (today - bought_date).days
+        if delta == 0:
+            return "Today"
+        elif delta == 1:
+            return "Yesterday"
+        else:
+            return f"{delta} days ago"
+    except Exception:
+        return ""
 
 
 def _recommend_supplements(
@@ -492,6 +582,21 @@ async def place_order(
         }
         for item in in_cart
     ]
+
+    # Record each ordered item into pet_preferences so purchase history is tracked.
+    # Look up product category from catalog; fall back to "dashboard_order".
+    from app.services.recommendation_service import record_preference
+    for item in in_cart:
+        product = (
+            db.query(ProductCatalog)
+            .filter(
+                (ProductCatalog.cart_item_id == item.product_id)
+                | (ProductCatalog.id == item.product_id)
+            )
+            .first()
+        )
+        item_category = (product.category if product else None) or "dashboard_order"
+        record_preference(db, pet_id, item_category, item.name, "custom")
 
     # Clear cart
     for item in in_cart:

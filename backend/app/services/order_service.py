@@ -19,6 +19,7 @@ Flow states:
 State is tracked via user.order_state and user.active_order_id.
 """
 
+import asyncio
 import logging
 from uuid import UUID
 from sqlalchemy.orm import Session
@@ -623,6 +624,12 @@ async def handle_order_confirmation(db: Session, user, payload: str) -> None:
         # Notify admin via WhatsApp (if configured).
         await _notify_admin_whatsapp(db, order, user, pet)
 
+        # Send follow-up with purchase history + new recommendations (non-blocking).
+        if pet is not None:
+            asyncio.create_task(
+                _send_post_order_recommendations(db, user, order, pet, from_number)
+            )
+
         logger.info("Order confirmed: order_id=%s, user=%s", str(order.id), mask_phone(from_number))
 
     elif payload == ORDER_CANCEL:
@@ -680,6 +687,76 @@ async def handle_admin_order_status_feedback(db: Session, from_number: str, payl
         order.admin_notes = f"{order.admin_notes}\n{note}".strip() if order.admin_notes else note  # type: ignore[assignment]
         db.commit()
         await send_text_message(db, from_number, "Marked as not fulfilled yet and cancelled.")
+
+
+async def _send_post_order_recommendations(
+    db: Session,
+    user,
+    order,
+    pet,
+    from_number: str,
+) -> None:
+    """
+    Send a follow-up WhatsApp message after order confirmation with:
+    - Previously ordered items (excluding items in the current order)
+    - New product recommendations from catalog (items never previously bought)
+
+    Skipped entirely if:
+    - This is the pet's first order (no prior history beyond current order)
+    - Both sections are empty
+    Never crashes — failure does not affect the confirmed order.
+    """
+    try:
+        await asyncio.sleep(2)  # Let the confirmation message arrive first.
+
+        from app.services.cart_service import get_last_bought, get_recommendations, _format_last_bought_label
+
+        # Build exclusion set from items just ordered.
+        items_desc = str(order.items_description or "")
+        just_ordered = {
+            item.strip().lower()
+            for item in items_desc.split(",")
+            if item.strip()
+        }
+
+        last_bought = get_last_bought(db, pet.id, exclude_names=just_ordered)
+        recommendations = await get_recommendations(db, pet.id)
+
+        # Nothing to send.
+        if not last_bought and not recommendations:
+            return
+
+        parts = []
+
+        if last_bought:
+            lines = [f"🛍️ *Previously ordered for {pet.name}:*"]
+            for item in last_bought[:5]:
+                count = item["used_count"]
+                times = "time" if count == 1 else "times"
+                label = _format_last_bought_label(item["last_bought_at"])
+                suffix = f" ({label})" if label else ""
+                lines.append(f"• {item['name']} (ordered {count} {times}){suffix}")
+            parts.append("\n".join(lines))
+
+        if recommendations:
+            lines = [f"💡 *You might also need:*"]
+            for idx, rec in enumerate(recommendations[:5], start=1):
+                reason = rec.get("reason", "")
+                reason_str = f" — {reason}" if reason else ""
+                lines.append(f"{idx}. *{rec['name']}*{reason_str}")
+            parts.append("\n".join(lines))
+
+        msg = "\n\n".join(parts)
+        await send_text_message(db, from_number, msg)
+        logger.info(
+            "Post-order follow-up sent for order %s pet %s",
+            str(order.id), str(pet.id),
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to send post-order recommendations for order %s: %s",
+            str(order.id), str(e),
+        )
 
 
 # --- Private Helpers ---

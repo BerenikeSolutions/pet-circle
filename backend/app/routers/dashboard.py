@@ -56,7 +56,7 @@ from app.services.hygiene_service import get_hygiene_preferences, upsert_hygiene
 from app.services.nutrition_service import analyze_nutrition
 from app.services.nudge_engine import generate_nudges
 from app.services.ai_insights_service import get_or_generate_insight
-from app.services.cart_service import get_cart, toggle_cart_item, update_quantity, initialize_cart, place_order, add_to_cart, remove_from_cart, get_recommendations
+from app.services.cart_service import get_cart, toggle_cart_item, update_quantity, initialize_cart, place_order, add_to_cart, remove_from_cart, get_recommendations, get_last_bought, _format_last_bought_label
 from app.services.razorpay_service import create_razorpay_payment, verify_razorpay_payment
 from app.services.condition_service import (
     get_condition_timeline,
@@ -1803,7 +1803,31 @@ async def dashboard_cart_recommendations(
         except Exception as e:
             logger.warning("Could not get nutrition analysis for recommendations: %s", e)
 
-        return await get_recommendations(db, dt.pet_id, nutrition_gaps)
+        recommendations = await get_recommendations(db, dt.pet_id, nutrition_gaps)
+
+        # Build set of names currently in cart to exclude from last_bought
+        cart_names = set()
+        cart_rows = (
+            db.query(CartItem.name)
+            .filter(CartItem.pet_id == dt.pet_id, CartItem.in_cart == True)
+            .all()
+        )
+        for row in cart_rows:
+            if row[0]:
+                cart_names.add(row[0].strip().lower())
+
+        last_bought_raw = get_last_bought(db, dt.pet_id, exclude_names=cart_names)
+        last_bought = [
+            {
+                "name": item["name"],
+                "used_count": item["used_count"],
+                "last_bought_label": _format_last_bought_label(item["last_bought_at"]),
+                "category": item["category"],
+            }
+            for item in last_bought_raw
+        ]
+
+        return {"last_bought": last_bought, "recommendations": recommendations}
     except ValueError:
         raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
     except Exception as e:
