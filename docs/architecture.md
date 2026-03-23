@@ -26,15 +26,15 @@ FastAPI Webhook (/webhook/whatsapp)
     v
 Message Router (app/services/message_router.py)
     |
-    +---> Onboarding Service
+    +---> Onboarding Service (standard or agentic)
     +---> Document Upload + GPT Extraction
     +---> Conflict Engine
     +---> Reminder Response Handler
-    +---> Order Service (order placement + admin fulfillment check)
+    +---> Order Service (agentic order flow + admin fulfillment check)
     +---> Query Engine
     |
     v
-Supabase (PostgreSQL + Storage)
+Supabase (PostgreSQL) + GCP Cloud Storage
     |
     v
 Reminder Engine (daily cron at 8 AM IST)
@@ -54,8 +54,9 @@ Next.js Dashboard (token-based access)
 | Messaging | WhatsApp Cloud API | `backend/app/services/whatsapp_sender.py` |
 | AI Extraction | OpenAI GPT (gpt-4.1) | `backend/app/services/gpt_extraction.py` |
 | AI Query | OpenAI GPT (gpt-4.1-mini) | `backend/app/services/query_engine.py` |
+| Agentic Flows | OpenAI GPT (gpt-4.1) | `backend/app/services/agentic_onboarding.py`, `agentic_order.py`, `agentic_finalization.py` |
 | Database | Supabase (PostgreSQL) | `backend/app/database.py`, `backend/app/models/` |
-| File Storage | Supabase Storage (private) | `backend/app/services/document_upload.py` |
+| File Storage | GCP Cloud Storage (primary), Supabase Storage (fallback) | `backend/app/services/storage_service.py`, `document_upload.py` |
 | Frontend | Next.js 14 + Tailwind | `frontend/` |
 | Backend Hosting | Render | `render.yaml` |
 | Frontend Hosting | Vercel | `frontend/` |
@@ -64,10 +65,34 @@ Next.js Dashboard (token-based access)
 ## Key Design Decisions
 
 1. **Monolithic backend**: No microservices. All logic in one FastAPI app with clear layer separation.
-2. **No background queue**: Phase 1 processes inline. Queue can be added later if needed.
-3. **Token-based dashboard**: No login system. Secure random tokens shared via WhatsApp.
-4. **Supabase for everything**: PostgreSQL + Storage in one managed service.
+2. **No background queue**: Background processing via `asyncio.create_task()`. Queue can be added later if needed.
+3. **Token-based dashboard**: No login system. Secure 128-bit random tokens shared via WhatsApp.
+4. **GCP primary storage**: Document uploads go to GCP Cloud Storage (`petcircle-documents` bucket). Supabase Storage is the fallback. No public URLs — access via signed URLs only.
 5. **Environment-aware config**: `APP_ENV` controls which env file is loaded (development/test/production).
+6. **Performance**: Dashboard queries use SQLAlchemy `selectinload` for eager loading. Migration 017 adds composite indexes on all high-frequency filter patterns.
+
+## Agentic Flows
+
+Three LLM-orchestrated flows handle complex multi-turn interactions:
+
+- **`agentic_onboarding.py`**: Guides new users through onboarding using GPT to compose responses and manage conversation state.
+- **`agentic_order.py`**: Drives the order placement flow with GPT-powered product recommendations and intent detection.
+- **`agentic_finalization.py`**: Composes the final confirmation message after order or onboarding, using GPT to personalize the summary.
+
+All agentic flows use `gpt-4.1`, log all calls, and never block the webhook response.
+
+## Health Score
+
+The dashboard health score uses a **6-category weighted formula** computed by `backend/app/services/health_score.py`:
+
+1. Vaccinations
+2. Deworming
+3. Tick/flea prevention
+4. Vet checkups
+5. Nutrition
+6. Conditions management
+
+Each category is scored 0–100 and weighted. The composite score drives the ring indicator on the Overview tab.
 
 ## Order Notification Flow
 
@@ -81,5 +106,5 @@ Next.js Dashboard (token-based access)
 - WhatsApp webhook signature verification (`X-Hub-Signature-256`)
 - Admin endpoints require `X-ADMIN-KEY` header
 - Dashboard access via 128-bit random token
-- Media files in private Supabase bucket (no public URLs)
+- Media files in private GCP bucket (no public URLs)
 - All secrets loaded from environment variables (never hardcoded)

@@ -23,23 +23,13 @@ Layer 3: Tools (the execution)
 
 | Workflow | File | Primary Services |
 |----------|------|-----------------|
-| Onboard Pet Parent | `onboard_pet_parent.md` | onboarding.py, whatsapp_sender.py |
-| Record Preventive Event | `record_preventive_event.md` | document_upload.py, gpt_extraction.py, preventive_calculator.py, conflict_engine.py |
-| Handle Conflict | `handle_conflict.md` | conflict_engine.py, conflict_expiry.py, whatsapp_sender.py |
+| Onboard Pet Parent | `onboard_pet_parent.md` | onboarding.py, agentic_onboarding.py, whatsapp_sender.py |
+| Record Preventive Event | `record_preventive_event.md` | document_upload.py, storage_service.py, gpt_extraction.py, preventive_calculator.py, conflict_engine.py |
+| Conflict Management | `conflict_management.md` | conflict_engine.py, conflict_expiry.py, whatsapp_sender.py |
 | Send Reminder | `send_reminder.md` | reminder_engine.py, whatsapp_sender.py |
-| Process Document Upload | `process_document_upload.md` | document_upload.py, gpt_extraction.py |
 | Handle Reminder Response | `handle_reminder_response.md` | reminder_response.py, preventive_calculator.py |
-| Resolve Conflict Expiry | `resolve_conflict_expiry.md` | conflict_expiry.py |
 | Birthday Reminders | `BIRTHDAY_REMINDER_GUIDE.md` | birthday_service.py, reminder_engine.py |
-
-### Birthday Feature Documentation
-
-| Document | Purpose |
-|----------|---------|
-| `BIRTHDAY_REMINDER_GUIDE.md` | Full workflow for birthday reminder logic |
-| `BIRTHDAY_QUICK_REFERENCE.md` | Quick reference for birthday feature |
-| `BIRTHDAY_FEATURE_IMPLEMENTATION_SUMMARY.md` | Implementation details and decisions |
-| `SETUP_BIRTHDAY_REMINDERS.md` | Setup instructions for birthday reminders |
+| Cart & Orders | `order_cart_payments.md` | cart_service.py, order_service.py, agentic_order.py, agentic_finalization.py |
 
 ## Principles
 

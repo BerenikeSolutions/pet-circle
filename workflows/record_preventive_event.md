@@ -25,11 +25,10 @@ User uploads a document (photo or PDF) via WhatsApp for a registered pet.
    - Service: `document_upload.py`
 
 2. **Store document**
-   - Upload to Supabase storage bucket `petcircle-documents`.
-   - Path: `{user_id}/{pet_id}/{filename}`.
+   - Primary: GCP Cloud Storage (`petcircle-documents` bucket), path `{user_id}/{pet_id}/{filename}`. Fallback: Supabase Storage.
    - No public URLs. Access via signed URLs only.
    - Insert record into `documents` table with metadata.
-   - Service: `document_upload.py`
+   - Service: `storage_service.py`, `document_upload.py`
 
 3. **Extract structured data via GPT**
    - Send document to OpenAI GPT (`gpt-4.1`) for extraction.
@@ -88,6 +87,32 @@ User uploads a document (photo or PDF) via WhatsApp for a registered pet.
 - **Daily upload limit exceeded:** Inform user of the 10/day/pet limit.
 - **GPT extraction fails:** Log error. Inform user document could not be processed. Do not create partial records.
 - **GPT returns ambiguous data:** Flag for manual review. Do not auto-create record.
-- **Conflict detected:** Do not overwrite. Trigger `handle_conflict` workflow.
+- **Conflict detected:** Do not overwrite. Trigger conflict management workflow (`conflict_management.md`).
 - **User has multiple pets:** Ask which pet the document is for before processing.
 - **Duplicate document:** Detect via hash or metadata. Inform user and skip.
+
+---
+
+## Appendix: Document Download & Storage Detail
+
+This section details steps 1–2 above, for reference when modifying `document_upload.py`.
+
+1. **Download media from WhatsApp** — Use the media ID from the webhook payload to fetch the download URL from WhatsApp Cloud API. Download binary content. Service: `document_upload.py`
+
+2. **Validate MIME type** — Accepted: `image/jpeg`, `image/png`, `application/pdf`. Reject with a message listing accepted formats. Service: `document_upload.py`
+
+3. **Validate file size** — Maximum 10 MB. Inform user if exceeded. Service: `document_upload.py`
+
+4. **Check daily upload limit** — Query `documents` table for uploads by this pet today. Max 10 per pet per day. Service: `document_upload.py`
+
+5. **Determine target pet** — If one pet, auto-select. If multiple pets, check conversation context. If ambiguous, ask explicitly before proceeding. Service: `document_upload.py`
+
+6. **Upload to storage** — Primary: GCP Cloud Storage (`petcircle-documents` bucket), path `{user_id}/{pet_id}/{filename}`. Fallback: Supabase Storage. No public URLs; access via signed URLs only. Generate UUID-prefixed filename to avoid collisions. Service: `storage_service.py`, `document_upload.py`
+
+7. **Create document record** — Insert into `documents` table: user ID, pet ID, original filename, storage path, MIME type, file size, upload timestamp. Service: `document_upload.py`
+
+**Edge cases (download/storage):**
+- WhatsApp media download fails: retry once, then inform user to re-upload
+- Corrupt or unreadable file: GPT extraction will fail; log and inform user
+- Storage upload fails: do not proceed to extraction; retry once; log failure
+- User sends document before onboarding: reject with prompt to complete onboarding first

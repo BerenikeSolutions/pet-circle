@@ -478,9 +478,53 @@ print(get_today_ist())  # Should output current date in Asia/Kolkata(IST)
 
 ---
 
+## Deployment Setup
+
+### Step 1: Create WhatsApp Template (5 minutes)
+
+1. Go to Meta Business Manager → **WhatsApp** → **Message Templates** → **Create Template**
+2. Fill in:
+   - **Template Name:** `birthday_celebration`
+   - **Category:** Marketing or Transactional
+   - **Language:** English
+   - **Message Body:** (use template from WhatsApp Template Setup section above)
+3. Submit for review (usually approved within 1–2 hours)
+
+### Step 2: Update Environment Variables
+
+Add to all `.env` files (development, production, test):
+
+```bash
+WHATSAPP_TEMPLATE_BIRTHDAY=birthday_celebration
+```
+
+### Step 3: Deploy & Verify
+
+```bash
+# Pull latest and restart
+git pull origin main
+# Restart backend (Render auto-deploys on push)
+
+# Verify via seed test
+cd backend
+python scripts/seed_reminder_test_data.py
+
+# Trigger reminder engine manually to test
+curl -X POST http://localhost:8000/internal/run-reminder-engine \
+  -H "X-ADMIN-KEY: $ADMIN_KEY"
+```
+
+**Deployment checklist:**
+- [ ] WhatsApp template created and status is "APPROVED"
+- [ ] `WHATSAPP_TEMPLATE_BIRTHDAY` added to all `.env` files
+- [ ] Backend deployed and restarted
+- [ ] Seed test passes — birthday record created for test pet
+- [ ] Birthday template sent in logs for test run
+
+---
+
 ## Related Documents
 
-- [Reminder System Architecture](./REMINDER_SYSTEM_ANALYSIS.md)
 - [Preventive Record System](./backend/app/models/preventive_record.py)
 - [Onboarding Flow](./backend/app/services/onboarding.py)
 - [WhatsApp Integration](./backend/app/services/whatsapp_sender.py)
