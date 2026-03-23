@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import type { DashboardData, BackendDietItem, NutritionAnalysis } from '@/lib/api';
-import { getDietItems, addDietItem, updateDietItem, deleteDietItem, getNutritionAnalysis, addToCart } from '@/lib/api';
+import { getDietItems, addDietItem, updateDietItem, deleteDietItem, getNutritionAnalysis, getNutritionImportance, addToCart } from '@/lib/api';
 import AddRow from '@/components/ui/AddRow';
 import BottomSheet from '@/components/ui/BottomSheet';
 import Toggle from '@/components/ui/Toggle';
@@ -66,7 +66,9 @@ function formatDetail(detail: string | null): string | null {
 export default function NutritionTab({ data, token, onCartClick, onUpdated }: NutritionTabProps) {
   const [diet, setDiet] = useState<BackendDietItem[]>([]);
   const [nutrition, setNutrition] = useState<NutritionAnalysis | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [dietLoading, setDietLoading] = useState(true);
+  const [nutritionLoading, setNutritionLoading] = useState(true);
+  const [importanceNote, setImportanceNote] = useState<string>('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -80,23 +82,31 @@ export default function NutritionTab({ data, token, onCartClick, onUpdated }: Nu
   const [freqModal, setFreqModal] = useState<{ id: string; freq: number; unit: string } | null>(null);
   const [freqSettings, setFreqSettings] = useState<Record<string, { freq: number; unit: string }>>({});
 
-  const loadData = useCallback(async () => {
-    try {
-      setError(null);
-      const [dietData, nutritionData] = await Promise.all([
-        getDietItems(token),
-        getNutritionAnalysis(token),
-      ]);
-      setDiet(dietData);
-      setNutrition(nutritionData);
-    } catch (e: any) {
-      setError(e.message || 'Failed to load nutrition data');
-    } finally {
-      setLoading(false);
-    }
+  // Diet items load fast — unblocks the tab immediately
+  useEffect(() => {
+    setError(null);
+    getDietItems(token)
+      .then(setDiet)
+      .catch((e: any) => setError(e.message || 'Failed to load diet data'))
+      .finally(() => setDietLoading(false));
   }, [token]);
 
-  useEffect(() => { loadData(); }, [loadData]);
+  // Nutrition analysis can be slow (AI) — runs independently, doesn't block render
+  useEffect(() => {
+    getNutritionAnalysis(token)
+      .then(setNutrition)
+      .catch(() => {})
+      .finally(() => setNutritionLoading(false));
+  }, [token]);
+
+  // Why nutrition matters — AI-generated, cached 30 days
+  useEffect(() => {
+    getNutritionImportance(token).then(r => setImportanceNote(r.note)).catch(() => {});
+  }, [token]);
+
+  const refreshDiet = () => {
+    getDietItems(token).then(setDiet).catch(() => {});
+  };
 
   const handleSave = async () => {
     if (!form.label.trim()) return;
@@ -109,7 +119,7 @@ export default function NutritionTab({ data, token, onCartClick, onUpdated }: Nu
       }
       setEditSheet(false);
       setEditItem(null);
-      await loadData();
+      refreshDiet();
       onUpdated?.();
     } catch (e: any) {
       setError(e.message || 'Failed to save');
@@ -122,7 +132,7 @@ export default function NutritionTab({ data, token, onCartClick, onUpdated }: Nu
     setSaving(true);
     try {
       await deleteDietItem(token, itemId);
-      await loadData();
+      refreshDiet();
       onUpdated?.();
     } catch (e: any) {
       setError(e.message || 'Failed to delete');
@@ -165,8 +175,8 @@ export default function NutritionTab({ data, token, onCartClick, onUpdated }: Nu
     return `Every ${freq} ${unit}s`;
   };
 
-  // Loading skeleton
-  if (loading) {
+  // Loading skeleton — only blocks on diet (fast), not nutrition analysis (slow)
+  if (dietLoading) {
     return (
       <div className="space-y-4">
         <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 space-y-3">
@@ -210,7 +220,7 @@ export default function NutritionTab({ data, token, onCartClick, onUpdated }: Nu
       {error && (
         <div style={{ background: '#FFF0F0', border: '1px solid #FF3B3044', borderRadius: 12, padding: '10px 14px', fontSize: 12, color: '#FF3B30' }}>
           {error}
-          <button onClick={() => { setError(null); loadData(); }} style={{ marginLeft: 8, textDecoration: 'underline', background: 'none', border: 'none', color: '#FF3B30', cursor: 'pointer', fontSize: 12 }}>Retry</button>
+          <button onClick={() => { setError(null); getDietItems(token).then(setDiet).catch(() => {}); }} style={{ marginLeft: 8, textDecoration: 'underline', background: 'none', border: 'none', color: '#FF3B30', cursor: 'pointer', fontSize: 12 }}>Retry</button>
         </div>
       )}
 
@@ -331,41 +341,66 @@ export default function NutritionTab({ data, token, onCartClick, onUpdated }: Nu
           <div style={{ fontWeight: 700, fontSize: 14, color: '#1A1A1A' }}>Nutrition note</div>
         </div>
 
-        {/* Overall diet box */}
-        <div style={{ background: '#FFF6ED', border: '1px solid #FF950044', borderRadius: 10, padding: '8px 11px', marginBottom: 7 }}>
-          <div style={{ fontSize: 10, fontWeight: 700, color: '#8B5E00', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 2 }}>Overall diet</div>
-          <div style={{ fontSize: 12, color: '#3A3A3A', lineHeight: 1.5 }}>
-            {nd
-              ? (nd as any).diet_summary || (hasDiet
+        {nd ? (
+          <>
+            {/* Overall diet box — shown when analysis is available */}
+            <div style={{ background: '#FFF6ED', border: '1px solid #FF950044', borderRadius: 10, padding: '8px 11px', marginBottom: 7 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: '#8B5E00', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 2 }}>Overall diet</div>
+              <div style={{ fontSize: 12, color: '#3A3A3A', lineHeight: 1.5 }}>
+                {(nd as any).diet_summary || (hasDiet
                   ? `${calActual}/${calTarget} kcal/day — ${calStatus === 'ok' ? 'on target' : calStatus === 'low' ? 'slightly below target' : 'above target'}.`
-                  : 'Diet not recorded — macros and calorie analysis unavailable. Add diet info for a full breakdown.')
-              : 'Add diet items to see analysis.'}
-          </div>
-        </div>
-
-        {/* What to improve box */}
-        {nd && nd.improvements.length > 0 && (
-          <div style={{ background: '#F0F6FF', border: '1px solid #007AFF33', borderRadius: 10, padding: '8px 11px', marginBottom: 7 }}>
-            <div style={{ fontSize: 10, fontWeight: 700, color: '#005BBB', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 5 }}>
-              {hasDiet ? 'What to improve' : 'What to address (based on health records)'}
-            </div>
-            {nd.improvements.map((item, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 7, marginBottom: i === nd.improvements.length - 1 ? 0 : 5 }}>
-                <div style={{ width: 6, height: 6, borderRadius: '50%', background: item.dot, flexShrink: 0, marginTop: 4 }} />
-                <span style={{ fontSize: 12, color: '#333', lineHeight: 1.4 }}>{item.text}</span>
+                  : 'Diet not recorded — macros and calorie analysis unavailable. Add diet info for a full breakdown.')}
               </div>
-            ))}
-          </div>
-        )}
-
-        {/* Recommendation box */}
-        {nd && (
-          <div style={{ background: '#F0FFF4', border: '1px solid #34C75933', borderRadius: 10, padding: '8px 11px' }}>
-            <div style={{ fontSize: 10, fontWeight: 700, color: '#1A6B2A', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 2 }}>
-              {hasDiet ? 'Our recommendation' : 'PetCircle recommendation'}
             </div>
-            <div style={{ fontSize: 12, color: '#3A3A3A', lineHeight: 1.5 }}>{nd.recommendation}</div>
-          </div>
+
+            {/* What to improve box */}
+            {nd.improvements.length > 0 && (
+              <div style={{ background: '#F0F6FF', border: '1px solid #007AFF33', borderRadius: 10, padding: '8px 11px', marginBottom: 7 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, color: '#005BBB', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 5 }}>
+                  {hasDiet ? 'What to improve' : 'What to address (based on health records)'}
+                </div>
+                {nd.improvements.map((item, i) => (
+                  <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 7, marginBottom: i === nd.improvements.length - 1 ? 0 : 5 }}>
+                    <div style={{ width: 6, height: 6, borderRadius: '50%', background: item.dot, flexShrink: 0, marginTop: 4 }} />
+                    <span style={{ fontSize: 12, color: '#333', lineHeight: 1.4 }}>{item.text}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Recommendation box */}
+            <div style={{ background: '#F0FFF4', border: '1px solid #34C75933', borderRadius: 10, padding: '8px 11px' }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: '#1A6B2A', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 2 }}>
+                {hasDiet ? 'Our recommendation' : 'PetCircle recommendation'}
+              </div>
+              <div style={{ fontSize: 12, color: '#3A3A3A', lineHeight: 1.5 }}>{nd.recommendation}</div>
+            </div>
+          </>
+        ) : (
+          <>
+            {/* No nutrition data — show loading state or two-block fallback */}
+            {nutritionLoading ? (
+              <div style={{ fontSize: 12, color: '#AEAEB2', textAlign: 'center', padding: '8px 0' }}>Analyzing nutrition...</div>
+            ) : (
+              <>
+                {/* Block 1: data missing */}
+                <div style={{ background: '#FFF6ED', border: '1px solid #FF950044', borderRadius: 10, padding: '10px 12px', marginBottom: 8 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: '#8B5E00', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 3 }}>Nutrition info missing</div>
+                  <div style={{ fontSize: 12, color: '#3A3A3A', lineHeight: 1.5 }}>
+                    No diet recorded yet. Add food items in the Current Diet section above to unlock your pet's full nutrition analysis.
+                  </div>
+                </div>
+
+                {/* Block 2: why nutrition matters (AI, shown once loaded) */}
+                {importanceNote && (
+                  <div style={{ background: '#F0F6FF', border: '1px solid #007AFF33', borderRadius: 10, padding: '10px 12px' }}>
+                    <div style={{ fontSize: 10, fontWeight: 700, color: '#005BBB', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 3 }}>Why nutrition matters</div>
+                    <div style={{ fontSize: 12, color: '#3A3A3A', lineHeight: 1.5 }}>{importanceNote}</div>
+                  </div>
+                )}
+              </>
+            )}
+          </>
         )}
       </div>
 

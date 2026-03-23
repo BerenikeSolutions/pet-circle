@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import type { DashboardData, ContactItem, DocumentItem, NutritionAnalysis, NudgeItem, BackendDietItem } from '@/lib/api';
-import { addContact, updateContact, deleteContact, getNutritionAnalysis, getNudges, dismissNudge, uploadDocument, retryExtraction, getDietItems, addToCart } from '@/lib/api';
+import { addContact, updateContact, deleteContact, getNutritionAnalysis, getNutritionImportance, getNudges, dismissNudge, uploadDocument, retryExtraction, getDietItems, addToCart } from '@/lib/api';
 import StatusBadge from '@/components/ui/StatusBadge';
 import CollapsibleCard from '@/components/ui/CollapsibleCard';
 import AddRow from '@/components/ui/AddRow';
@@ -106,18 +106,20 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
   const [savingContact, setSavingContact] = useState(false);
   const [nutritionData, setNutritionData] = useState<NutritionAnalysis | null>(null);
   const [dietItems, setDietItems] = useState<BackendDietItem[]>([]);
+  const [nutritionImportanceNote, setNutritionImportanceNote] = useState<string>('');
   const [nudges, setNudges] = useState<NudgeItem[]>([]);
   const [dismissingNudge, setDismissingNudge] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [viewingDoc, setViewingDoc] = useState<DocumentItem | null>(null);
   const [retryingDoc, setRetryingDoc] = useState<string | null>(null);
 
-  // Fetch nutrition analysis, diet items, and nudges on mount
+  // Fetch nutrition analysis, diet items, nudges, and importance note on mount
   useEffect(() => {
     getNutritionAnalysis(token).then(setNutritionData).catch(() => {});
     getDietItems(token).then(setDietItems).catch(() => {});
     getNudges(token).then(setNudges).catch(() => {});
-  }, [token]);
+    getNutritionImportance(token).then(r => setNutritionImportanceNote(r.note)).catch(() => {});
+}, [token]);
 
   // Lock body scroll when document viewer is open
   useEffect(() => {
@@ -199,7 +201,7 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
     { icon: '💉', label: 'Vaccines', items: vaccines, tab: 'medical' },
     { icon: '🪱', label: 'Deworming', items: deworming, tab: 'medical' },
     { icon: '🐛', label: 'Flea & Tick', items: fleaTick, tab: 'medical' },
-    { icon: '🪮', label: 'Daily Care', items: records.filter(r => r.circle === 'hygiene'), tab: 'grooming' },
+    { icon: '🛒', label: 'Food Order', items: records.filter(r => r.circle === 'hygiene'), tab: 'grooming' },
     { icon: '✂️', label: 'Grooming', items: records.filter(r => r.circle === 'hygiene'), tab: 'grooming' },
     { icon: '🩺', label: 'Ann. Checkup', items: checkups, tab: 'medical' },
   ];
@@ -377,15 +379,6 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
         </div>
       )}
 
-      {/* Order Now CTA */}
-      <button
-        onClick={() => onCartClick()}
-        className="w-full py-3.5 rounded-2xl text-white font-semibold text-sm shadow-sm"
-        style={{ background: 'var(--brand-gradient)' }}
-      >
-        🛒 Order Now — Care Essentials
-      </button>
-
       {/* Nutrition Note — real data or fallback */}
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 space-y-3">
         <h3 className="font-semibold text-sm flex items-center gap-2">
@@ -449,15 +442,15 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
         ) : (
           <>
             <div className="rounded-xl p-3" style={{ backgroundColor: '#FFF6ED', borderLeft: '3px solid #FF9500' }}>
-              <p className="text-xs font-semibold text-amber-800 mb-1">Overall Diet</p>
-              <p className="text-xs text-amber-700">Add diet items in the Nutrition tab to see your analysis.</p>
+              <p className="text-xs font-semibold text-amber-800 mb-1">Nutrition Info Missing</p>
+              <p className="text-xs text-amber-700">No diet recorded yet. Head to the Nutrition tab to add food items and unlock your pet's full nutrition analysis.</p>
             </div>
-            <button
-              onClick={() => onTabChange('nutrition')}
-              className="text-xs text-brand font-semibold"
-            >
-              Go to Nutrition →
-            </button>
+            {nutritionImportanceNote && (
+              <div className="rounded-xl p-3" style={{ backgroundColor: '#F0F6FF', borderLeft: '3px solid #007AFF' }}>
+                <p className="text-xs font-semibold text-blue-800 mb-1">Why Nutrition Matters</p>
+                <p className="text-xs text-blue-700">{nutritionImportanceNote}</p>
+              </div>
+            )}
           </>
         )}
       </div>

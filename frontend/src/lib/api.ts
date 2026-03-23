@@ -843,6 +843,18 @@ export async function getNutritionAnalysis(token: string): Promise<NutritionAnal
   }
 }
 
+export async function getNutritionImportance(token: string): Promise<{ note: string }> {
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/nutrition-importance`, {
+      cache: "no-store",
+    });
+    if (!res.ok) return { note: "" };
+    return res.json();
+  } catch {
+    return { note: "" };
+  }
+}
+
 // --- Nudge API ---
 
 export async function getNudges(token: string): Promise<NudgeItem[]> {

@@ -55,7 +55,7 @@ from app.services.diet_service import get_diet_items, add_diet_item, update_diet
 from app.services.hygiene_service import get_hygiene_preferences, upsert_hygiene_preference, update_hygiene_date, add_hygiene_item, delete_hygiene_item
 from app.services.nutrition_service import analyze_nutrition
 from app.services.nudge_engine import generate_nudges
-from app.services.ai_insights_service import get_or_generate_insight
+from app.services.ai_insights_service import get_or_generate_insight, get_or_generate_nutrition_importance
 from app.services.cart_service import get_cart, toggle_cart_item, update_quantity, initialize_cart, place_order, add_to_cart, remove_from_cart, get_recommendations, get_last_bought, _format_last_bought_label
 from app.services.razorpay_service import create_razorpay_payment, verify_razorpay_payment
 from app.services.condition_service import (
@@ -1343,6 +1343,28 @@ async def dashboard_nutrition_analysis(
     except Exception as e:
         logger.error("Nutrition analysis error: %s", str(e), exc_info=True)
         raise HTTPException(status_code=503, detail="Could not generate nutrition analysis.")
+
+
+@router.get("/{token}/nutrition-importance")
+async def dashboard_nutrition_importance(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """Return an AI-generated note on why nutrition matters for this specific pet (cached 30 days)."""
+    try:
+        dt = validate_dashboard_token(db, token)
+        return await get_or_generate_nutrition_importance(db, dt.pet_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Nutrition importance error: %s", str(e))
+        return {
+            "note": (
+                "Good nutrition is the foundation of your pet's health at every life stage. "
+                "The right balance of proteins, fats, vitamins, and minerals supports their "
+                "energy, immune system, and long-term wellbeing."
+            )
+        }
 
 
 # --- Condition Timeline ---

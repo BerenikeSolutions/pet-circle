@@ -24,7 +24,7 @@ sensible default payload is returned so the dashboard never crashes.
 
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy import text
@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.constants import OPENAI_QUERY_MODEL
+from app.models.pet import Pet
 from app.models.pet_ai_insight import PetAiInsight
 from app.utils.retry import retry_openai_call
 
@@ -39,6 +40,9 @@ logger = logging.getLogger(__name__)
 
 # Re-generate if the cached insight is older than this many days.
 AI_INSIGHT_CACHE_DAYS = 7
+
+# Nutrition importance note is stable — re-generate only when pet ages significantly.
+NUTRITION_IMPORTANCE_CACHE_DAYS = 30
 
 # --------------------------------------------------------------------------- #
 #  Lazy OpenAI client                                                           #
@@ -396,6 +400,118 @@ async def get_or_generate_insight(
         db.commit()
     except Exception as exc:
         logger.error("Failed to upsert AI insight to DB: %s", exc)
+        db.rollback()
+
+    return content
+
+
+# --------------------------------------------------------------------------- #
+#  Nutrition Importance — separate cache with longer TTL                        #
+# --------------------------------------------------------------------------- #
+
+_NUTRITION_IMPORTANCE_FALLBACK = (
+    "Good nutrition is the foundation of your pet's health at every life stage. "
+    "The right balance of proteins, fats, vitamins, and minerals supports their "
+    "energy levels, immune system, coat condition, and long-term organ health. "
+    "Every meal is an opportunity to invest in a longer, healthier life for your pet."
+)
+
+
+async def _generate_nutrition_importance_gpt(pet: Pet) -> dict:
+    """
+    Generate a warm 3-4 sentence note on why nutrition matters for this specific pet.
+
+    Personalised to species, breed, and age so the note feels relevant rather than generic.
+
+    Returns:
+        {"note": "<3-4 sentence plain-text note>"}
+    """
+    age_years: float = (date.today() - pet.dob).days / 365.25 if pet.dob else 2.0
+    breed_str = pet.breed or pet.species
+
+    system_prompt = (
+        "You are a friendly pet nutritionist writing a short note for a pet owner's health dashboard. "
+        "Write a warm, practical 3-4 sentence note explaining why good nutrition is especially important "
+        f"for a {age_years:.1f}-year-old {pet.species} of the {breed_str} breed. "
+        "Cover their life stage, species-specific dietary needs, and the long-term health benefits. "
+        "Be encouraging and parent-friendly. Plain text only — no bullets, headers, or markdown."
+    )
+
+    client = _get_openai_client()
+
+    async def _call() -> str:
+        response = await client.chat.completions.create(
+            model=OPENAI_QUERY_MODEL,
+            temperature=0.6,
+            max_tokens=200,
+            messages=[{"role": "system", "content": system_prompt}],
+        )
+        return response.choices[0].message.content or ""
+
+    try:
+        note = await retry_openai_call(_call)
+        note = note.strip()
+        if not note:
+            raise ValueError("Empty response")
+        return {"note": note}
+    except Exception as exc:
+        logger.warning("nutrition_importance GPT failed: %s", exc)
+        return {"note": _NUTRITION_IMPORTANCE_FALLBACK}
+
+
+async def get_or_generate_nutrition_importance(db: Session, pet_id: UUID) -> dict:
+    """
+    Return a cached 'why nutrition matters' note for this pet, or generate a fresh one.
+
+    Cached for NUTRITION_IMPORTANCE_CACHE_DAYS (30 days). Stored in pet_ai_insights
+    with insight_type='nutrition_importance'.
+
+    Args:
+        db:     SQLAlchemy session.
+        pet_id: Pet UUID.
+
+    Returns:
+        {"note": "<plain-text nutrition importance note>"}
+    """
+    stale_cutoff = datetime.utcnow() - timedelta(days=NUTRITION_IMPORTANCE_CACHE_DAYS)
+
+    existing = (
+        db.query(PetAiInsight)
+        .filter(
+            PetAiInsight.pet_id == pet_id,
+            PetAiInsight.insight_type == "nutrition_importance",
+            PetAiInsight.generated_at >= stale_cutoff,
+        )
+        .first()
+    )
+    if existing:
+        return existing.content_json
+
+    # Load pet for personalisation
+    pet = db.query(Pet).filter(Pet.id == pet_id).first()
+    if not pet:
+        return {"note": _NUTRITION_IMPORTANCE_FALLBACK}
+
+    content = await _generate_nutrition_importance_gpt(pet)
+
+    try:
+        db.execute(
+            text("""
+                INSERT INTO pet_ai_insights (pet_id, insight_type, content_json, generated_at)
+                VALUES (:pet_id, :insight_type, :content_json::jsonb, NOW())
+                ON CONFLICT (pet_id, insight_type)
+                DO UPDATE SET content_json = EXCLUDED.content_json,
+                              generated_at = NOW()
+            """),
+            {
+                "pet_id": str(pet_id),
+                "insight_type": "nutrition_importance",
+                "content_json": json.dumps(content),
+            },
+        )
+        db.commit()
+    except Exception as exc:
+        logger.error("Failed to upsert nutrition_importance insight: %s", exc)
         db.rollback()
 
     return content

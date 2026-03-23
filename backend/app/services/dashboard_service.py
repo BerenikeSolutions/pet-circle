@@ -208,6 +208,34 @@ def get_dashboard_data(db: Session, token: str) -> dict:
             "medicine_name": record.medicine_name if hasattr(record, 'medicine_name') and record.medicine_name else None,
         })
 
+    # --- Inject preventive_master items that have no record yet ---
+    # Ensures all health-circle items (vaccines, deworming, flea/tick, checkups) appear
+    # on the dashboard even before any documents are uploaded. Items with existing
+    # records are skipped to avoid duplicates.
+    health_masters = (
+        db.query(PreventiveMaster)
+        .filter(
+            PreventiveMaster.circle == "health",
+            PreventiveMaster.species.in_([pet.species, "both"]),
+        )
+        .all()
+    )
+    existing_names = {r["item_name"] for r in preventive_records}
+    for master in health_masters:
+        if master.item_name not in existing_names:
+            preventive_records.append({
+                "item_name": master.item_name,
+                "category": master.category,
+                "circle": master.circle,
+                "last_done_date": None,
+                "next_due_date": None,
+                "status": "missing",
+                "recurrence_days": master.recurrence_days,
+                "custom_recurrence_days": None,
+                "medicine_dependent": master.medicine_dependent,
+                "medicine_name": None,
+            })
+
     # --- Health score (6-category, single source of truth) ---
     from app.services.health_score import compute_health_score
     health_score = compute_health_score(db, pet_id)
