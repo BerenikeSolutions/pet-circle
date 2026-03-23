@@ -98,6 +98,12 @@ class Settings(BaseSettings):
     # Optional — if not set, only dashboard notification (no WhatsApp alert).
     ORDER_NOTIFICATION_PHONE: str | None = None
 
+    # --- Feature Flags ---
+    # Set to 'true' to enable AI-driven conversational onboarding.
+    # Requires OPENAI_API_KEY. Falls back to deterministic flow if either is absent
+    # or if the OpenAI API health check fails.
+    AGENTIC_ONBOARDING_ENABLED: str = "false"
+
     # --- Timezone ---
     # Derived from constants, not from environment.
     # Exposed here so all layers can access timezone through settings.

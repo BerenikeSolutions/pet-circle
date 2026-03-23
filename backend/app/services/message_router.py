@@ -111,6 +111,25 @@ from app.models.conflict_flag import ConflictFlag
 logger = logging.getLogger(__name__)
 
 
+def _should_use_agentic_onboarding() -> bool:
+    """
+    Return True when AGENTIC_ONBOARDING_ENABLED='true' and the OpenAI API
+    is reachable. Evaluated per-message so the flag can be toggled via env
+    var update + redeploy without code changes.
+
+    Falls back to False (deterministic flow) on any error.
+    """
+    flag = getattr(settings, "AGENTIC_ONBOARDING_ENABLED", "false")
+    has_key = bool(getattr(settings, "OPENAI_API_KEY", None))
+    if flag.lower() != "true" or not has_key:
+        return False
+    try:
+        from app.services.agentic_onboarding import is_openai_available
+        return is_openai_available()
+    except Exception:
+        return False
+
+
 def _get_mobile(user) -> str:
     """
     Get the plaintext mobile number for sending messages.
@@ -234,6 +253,23 @@ async def route_message(db: Session, message_data: dict) -> None:
             # --- Allow image uploads during pet photo step ---
             if user.onboarding_state == "awaiting_pet_photo" and msg_type == "image":
                 await handle_onboarding_step(db, user, "", send_text_message, message_data=message_data)
+                return
+
+            # --- Agentic onboarding: route all message types to the agent ---
+            if user.onboarding_state == "agentic_onboarding":
+                from app.services.agentic_onboarding import handle_agentic_onboarding_step
+                await handle_agentic_onboarding_step(db, user, message_data, send_text_message)
+                return
+
+            # --- Transition from deterministic to agentic after consent step ---
+            # The deterministic _step_consent() has already asked "What is your name?"
+            # and set state=awaiting_name. The user's reply to that question becomes
+            # the first input to the agentic session.
+            if user.onboarding_state == "awaiting_name" and _should_use_agentic_onboarding():
+                user.onboarding_state = "agentic_onboarding"
+                db.commit()
+                from app.services.agentic_onboarding import handle_agentic_onboarding_step
+                await handle_agentic_onboarding_step(db, user, message_data, send_text_message)
                 return
 
             # --- All other onboarding states: block non-text ---
