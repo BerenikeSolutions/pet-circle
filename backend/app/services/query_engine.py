@@ -49,9 +49,8 @@ from app.core.constants import (
     OPENAI_QUERY_MODEL,
     OPENAI_QUERY_TEMPERATURE,
     OPENAI_QUERY_MAX_TOKENS,
-    HEALTH_SCORE_ESSENTIAL_WEIGHT,
-    HEALTH_SCORE_COMPLEMENTARY_WEIGHT,
 )
+from app.services.health_score import compute_health_score
 from app.config import settings
 from app.utils.retry import retry_openai_call
 
@@ -149,11 +148,6 @@ def _build_pet_context(db: Session, pet_id: UUID) -> str:
         .all()
     )
 
-    # Compute health score inline from the same records query
-    # to avoid a redundant DB round-trip via compute_health_score().
-    essential_done, essential_total = 0, 0
-    complementary_done, complementary_total = 0, 0
-
     context_parts.append("\n=== Preventive Health Records ===")
     if records:
         for record, master in records:
@@ -163,16 +157,6 @@ def _build_pet_context(db: Session, pet_id: UUID) -> str:
                 f"Next due: {record.next_due_date}, "
                 f"Status: {record.status}"
             )
-            # Accumulate health score counts from the same data.
-            if record.status != "cancelled":
-                if master.category == "essential":
-                    essential_total += 1
-                    if record.status == "up_to_date":
-                        essential_done += 1
-                elif master.category == "complete":
-                    complementary_total += 1
-                    if record.status == "up_to_date":
-                        complementary_done += 1
     else:
         context_parts.append("No preventive records found.")
 
@@ -225,21 +209,15 @@ def _build_pet_context(db: Session, pet_id: UUID) -> str:
     else:
         context_parts.append("No documents uploaded.")
 
-    # --- Health score (computed inline from records already loaded above) ---
-    e_ratio = essential_done / essential_total if essential_total > 0 else 0.0
-    c_ratio = complementary_done / complementary_total if complementary_total > 0 else 0.0
-    score = round(
-        (e_ratio * HEALTH_SCORE_ESSENTIAL_WEIGHT + c_ratio * HEALTH_SCORE_COMPLEMENTARY_WEIGHT) * 100
-    )
-
+    # --- Health score (6-category, single source of truth) ---
+    hs = compute_health_score(db, pet_id)
     context_parts.append("\n=== Health Score ===")
-    context_parts.append(f"Overall Score: {score}/100")
-    context_parts.append(
-        f"Essential items: {essential_done}/{essential_total} up to date"
-    )
-    context_parts.append(
-        f"Complementary items: {complementary_done}/{complementary_total} up to date"
-    )
+    context_parts.append(f"Overall Score: {hs['score']}/100 ({hs['label']})")
+    for b in hs["breakdown"]:
+        done_str = f"{b['done']}/{b['total']}" if b["done"] is not None else "N/A"
+        context_parts.append(
+            f"- {b['category']} ({b['weight']}%): {b['score']}/100 [{done_str}]"
+        )
 
     return "\n".join(context_parts)
 

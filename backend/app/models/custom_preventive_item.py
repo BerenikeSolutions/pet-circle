@@ -44,7 +44,8 @@ class CustomPreventiveItem(Base):
     # Name of the custom preventive item (e.g., "Heartgard Plus", "Fish Oil").
     item_name = Column(String(120), nullable=False)
 
-    # 'essential' or 'complete' — same semantics as preventive_master.
+    # 'essential' or 'complete' — UI classification matching preventive_master.
+    # 'essential' = mandatory, 'complete' = recommended. Not used for health score weighting.
     category = Column(String(20), nullable=False, server_default="complete")
 
     # Dashboard ring grouping: 'health', 'nutrition', or 'hygiene'.

@@ -23,7 +23,7 @@ interface HygieneTabProps {
 const HYGIENE_EMOJIS = ['🪮', '🦷', '👂', '👁️', '🛁', '🐾', '✂️', '🧴', '🧽', '🧹', '💅', '🪥', '🧼', '💧'];
 
 function computeStatus(item: HygienePreference): string {
-  if (!item.last_done) return 'upcoming';
+  if (!item.last_done) return 'missing';
 
   let lastDate: Date | null = null;
   if (item.last_done.includes('/')) {
@@ -32,7 +32,7 @@ function computeStatus(item: HygienePreference): string {
   } else {
     lastDate = new Date(item.last_done);
   }
-  if (isNaN(lastDate.getTime())) return 'upcoming';
+  if (isNaN(lastDate.getTime())) return 'missing';
 
   const now = new Date();
   const diffMs = now.getTime() - lastDate.getTime();

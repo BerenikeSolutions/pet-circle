@@ -7,6 +7,11 @@ TRUNCATE TABLE nudge_delivery_log CASCADE;
 TRUNCATE TABLE nudge_engagement CASCADE;
 TRUNCATE TABLE shown_fun_facts CASCADE;
 
+-- AI insights & agent sessions
+TRUNCATE TABLE pet_ai_insights CASCADE;
+TRUNCATE TABLE agent_onboarding_sessions CASCADE;
+TRUNCATE TABLE agent_order_sessions CASCADE;
+
 -- Flags & conflicts
 TRUNCATE TABLE conflict_flags CASCADE;
 
@@ -15,9 +20,8 @@ TRUNCATE TABLE reminders CASCADE;
 TRUNCATE TABLE preventive_records CASCADE;
 TRUNCATE TABLE custom_preventive_items CASCADE;
 
--- Diagnostics & medicines
+-- Diagnostics
 TRUNCATE TABLE diagnostic_test_results CASCADE;
-TRUNCATE TABLE prescribed_medicines CASCADE;
 
 -- Conditions
 TRUNCATE TABLE condition_medications CASCADE;

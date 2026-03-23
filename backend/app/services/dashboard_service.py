@@ -184,44 +184,13 @@ def get_dashboard_data(db: Session, token: str) -> dict:
 
     preventive_records = []
 
-    # --- Pre-load conditions for health score (also used later for response) ---
+    # --- Pre-load conditions (used for conditions response section) ---
     condition_rows = (
         db.query(Condition)
         .filter(Condition.pet_id == pet_id, Condition.is_active == True)
         .order_by(Condition.created_at.desc())
         .all()
     )
-
-    # --- 6-category health score buckets ---
-    # Keywords for classifying preventive items into score categories.
-    VACCINE_KW = {"vaccine", "rabies", "dhpp", "core vaccine", "feline core", "bordetella"}
-    DEWORMING_KW = {"deworming", "deworm"}
-    FLEA_TICK_KW = {"tick", "flea"}
-    CHECKUP_KW = {"checkup", "annual", "wellness", "blood test", "preventive blood"}
-
-    def _classify_item(item_name: str) -> str:
-        """Classify a preventive item into a health score category."""
-        name_lower = item_name.lower()
-        for kw in VACCINE_KW:
-            if kw in name_lower:
-                return "vaccines"
-        for kw in DEWORMING_KW:
-            if kw in name_lower:
-                return "deworming_flea"
-        for kw in FLEA_TICK_KW:
-            if kw in name_lower:
-                return "deworming_flea"
-        for kw in CHECKUP_KW:
-            if kw in name_lower:
-                return "checkups"
-        return "checkups"  # Default bucket for unclassified health items
-
-    # Buckets: {category: {"done": int, "total": int}}
-    score_buckets: dict[str, dict[str, int]] = {
-        "vaccines": {"done": 0, "total": 0},
-        "deworming_flea": {"done": 0, "total": 0},
-        "checkups": {"done": 0, "total": 0},
-    }
 
     for record, master in selected_records:
         # Use custom recurrence if set, otherwise fall back to master default
@@ -239,118 +208,9 @@ def get_dashboard_data(db: Session, token: str) -> dict:
             "medicine_name": record.medicine_name if hasattr(record, 'medicine_name') and record.medicine_name else None,
         })
 
-        # Classify into 6-category buckets (skip cancelled).
-        if record.status != "cancelled":
-            bucket = _classify_item(master.item_name)
-            score_buckets[bucket]["total"] += 1
-            if record.status == "up_to_date":
-                score_buckets[bucket]["done"] += 1
-
-    # --- Conditions score (20%) ---
-    # Full score if no conditions. Otherwise: ratio of managed medications
-    # + up-to-date monitoring items.
-    conditions_score = 100.0  # Default: no conditions = full score
-    if condition_rows:
-        cond_done = 0
-        cond_total = 0
-        for cond in condition_rows:
-            for med in cond.medications:
-                cond_total += 1
-                if med.status in ("active", "completed"):
-                    cond_done += 1
-            for mon in cond.monitoring:
-                cond_total += 1
-                if mon.last_done_date:
-                    cond_done += 1
-        if cond_total > 0:
-            conditions_score = (cond_done / cond_total) * 100
-        # If conditions exist but no meds/monitoring tracked, partial credit
-        else:
-            conditions_score = 50.0
-
-    # --- Nutrition score (20%) ---
-    # Based on diet items: having items = baseline score, more items = better.
-    from app.models.diet_item import DietItem
-    diet_count = db.query(DietItem).filter(DietItem.pet_id == pet_id).count()
-    if diet_count >= 3:
-        nutrition_score = 100.0
-    elif diet_count >= 1:
-        nutrition_score = 60.0
-    else:
-        nutrition_score = 0.0
-
-    # --- Grooming score (10%) ---
-    # Based on hygiene preferences: ratio of items with a recorded last_done.
-    from app.models.hygiene_preference import HygienePreference
-    hygiene_items = (
-        db.query(HygienePreference)
-        .filter(HygienePreference.pet_id == pet_id)
-        .all()
-    )
-    if hygiene_items:
-        hygiene_done = sum(1 for h in hygiene_items if h.last_done)
-        grooming_score = (hygiene_done / len(hygiene_items)) * 100
-    else:
-        grooming_score = 0.0
-
-    # --- Compute per-bucket ratios ---
-    def _bucket_pct(bucket: dict[str, int]) -> float:
-        if bucket["total"] == 0:
-            return 0.0
-        return (bucket["done"] / bucket["total"]) * 100
-
-    vaccines_pct = _bucket_pct(score_buckets["vaccines"])
-    deworming_flea_pct = _bucket_pct(score_buckets["deworming_flea"])
-    checkups_pct = _bucket_pct(score_buckets["checkups"])
-
-    # --- Weighted 6-category health score ---
-    # Vaccines 25%, Deworming & Flea 20%, Conditions 20%, Nutrition 20%, Grooming 10%, Checkups 5%
-    CATEGORY_WEIGHTS = {
-        "vaccines": 0.25,
-        "deworming_flea": 0.20,
-        "conditions": 0.20,
-        "nutrition": 0.20,
-        "grooming": 0.10,
-        "checkups": 0.05,
-    }
-
-    breakdown = [
-        {"category": "Vaccines", "key": "vaccines", "weight": 25, "score": round(vaccines_pct), "done": score_buckets["vaccines"]["done"], "total": score_buckets["vaccines"]["total"]},
-        {"category": "Deworming & Flea", "key": "deworming_flea", "weight": 20, "score": round(deworming_flea_pct), "done": score_buckets["deworming_flea"]["done"], "total": score_buckets["deworming_flea"]["total"]},
-        {"category": "Conditions", "key": "conditions", "weight": 20, "score": round(conditions_score), "done": None, "total": None},
-        {"category": "Nutrition", "key": "nutrition", "weight": 20, "score": round(nutrition_score), "done": None, "total": None},
-        {"category": "Grooming", "key": "grooming", "weight": 10, "score": round(grooming_score), "done": sum(1 for h in hygiene_items if h.last_done) if hygiene_items else 0, "total": len(hygiene_items) if hygiene_items else 0},
-        {"category": "Checkups", "key": "checkups", "weight": 5, "score": round(checkups_pct), "done": score_buckets["checkups"]["done"], "total": score_buckets["checkups"]["total"]},
-    ]
-
-    # Weighted total score
-    raw_score = sum(
-        (b["score"] / 100) * b["weight"] for b in breakdown
-    )
-
-    # Label
-    if raw_score >= 85:
-        score_label = "Excellent"
-    elif raw_score >= 65:
-        score_label = "Good"
-    elif raw_score >= 45:
-        score_label = "Fair"
-    else:
-        score_label = "Poor"
-
-    # Draggers: categories pulling the score down (score < 50%)
-    draggers = [
-        {"category": b["category"], "score": b["score"], "weight": b["weight"]}
-        for b in breakdown
-        if b["score"] < 50
-    ]
-
-    health_score = {
-        "score": round(raw_score),
-        "label": score_label,
-        "breakdown": breakdown,
-        "draggers": draggers,
-    }
+    # --- Health score (6-category, single source of truth) ---
+    from app.services.health_score import compute_health_score
+    health_score = compute_health_score(db, pet_id)
 
     # --- Load active reminders ---
     reminders = (
@@ -955,10 +815,6 @@ def get_health_trends(db: Session, token: str) -> dict:
         ValueError: If token is invalid or pet not found.
     """
     from collections import defaultdict
-    from app.core.constants import (
-        HEALTH_SCORE_ESSENTIAL_WEIGHT,
-        HEALTH_SCORE_COMPLEMENTARY_WEIGHT,
-    )
 
     dashboard_token = validate_dashboard_token(db, token)
     pet_id = dashboard_token.pet_id

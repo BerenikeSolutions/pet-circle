@@ -267,11 +267,13 @@ def main():
         test("Health score returned", score_data is not None)
         test("Score is numeric", isinstance(score_data.get("score"), (int, float)))
         test("Score between 0-100", 0 <= score_data["score"] <= 100)
-        test("Essential count present", "essential_total" in score_data)
-        test("Complementary count present", "complementary_total" in score_data)
-        print(f"    Score: {score_data['score']}/100 "
-              f"(Essential: {score_data['essential_done']}/{score_data['essential_total']}, "
-              f"Comp: {score_data['complementary_done']}/{score_data['complementary_total']})")
+        test("Label present", score_data.get("label") in ("Excellent", "Good", "Fair", "Poor"))
+        test("Breakdown has 6 categories", len(score_data.get("breakdown", [])) == 6)
+        test("Draggers is a list", isinstance(score_data.get("draggers"), list))
+        print(f"    Score: {score_data['score']}/100 ({score_data['label']})")
+        for b in score_data["breakdown"]:
+            done_str = f"{b['done']}/{b['total']}" if b["done"] is not None else "N/A"
+            print(f"      {b['category']} ({b['weight']}%): {b['score']}/100 [{done_str}]")
 
         # ===================================================================
         print("\n" + "="*60)

@@ -118,7 +118,7 @@ theme: {
 | Documents collapsible | `documents[]` |
 | WA Reminders | `reminders[]` |
 | Blood/urine data | `diagnostic_results[]` |
-| Health score | `health_score.score`, `essential_done/total` |
+| Health score | `health_score.score`, `health_score.label`, `health_score.breakdown` (6 categories), `health_score.draggers` |
 
 ### Mocked Data (no backend API)
 | UI Section | Mock Strategy |

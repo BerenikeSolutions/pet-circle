@@ -212,7 +212,7 @@ const WA_REMINDER_LABELS = { upcoming:"1 WEEK BEFORE", due:"DUE TODAY", overdue:
 - `ReminderItem`: item_name, next_due_date, status, sent_at
 - `DocumentItem`: id, document_name, document_category, doctor_name, hospital_name, mime_type, extraction_status, uploaded_at
 - `DiagnosticResultItem`: test_type, parameter_name, value_numeric, value_text, unit, reference_range, status_flag, observed_at, document_id
-- `HealthScore`: score, essential_done, essential_total, complementary_done, complementary_total
+- `HealthScore`: score, label, breakdown: HealthScoreBreakdown[], draggers: HealthScoreDragger[]
 - `DashboardData`: pet, owner, preventive_records, reminders, documents, diagnostic_results, health_score
 
 ### Key Functions (keep)

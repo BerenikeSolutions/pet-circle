@@ -48,11 +48,11 @@ function getRefillStatus(refillDueDate: string | null): string {
   return 'ok';
 }
 
-function getMonitoringStatus(nextDueDate: string | null): 'overdue' | 'upcoming' | 'done' {
-  if (!nextDueDate) return 'upcoming';
+function getMonitoringStatus(nextDueDate: string | null): 'overdue' | 'upcoming' | 'done' | 'missing' {
+  if (!nextDueDate) return 'missing';
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const due = new Date(nextDueDate);
-  if (isNaN(due.getTime())) return 'upcoming';
+  if (isNaN(due.getTime())) return 'missing';
   const diff = Math.ceil((due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
   if (diff < 0) return 'overdue';
   if (diff <= 30) return 'upcoming';

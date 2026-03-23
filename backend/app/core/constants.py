@@ -141,13 +141,6 @@ DASHBOARD_TOKEN_BYTES: int = 16
 # After expiry, the user can regenerate by typing "dashboard" in WhatsApp.
 DASHBOARD_TOKEN_EXPIRY_DAYS: int = 30
 
-# --- Health Score Weights ---
-# Essential preventive items weight (e.g., vaccines, deworming).
-HEALTH_SCORE_ESSENTIAL_WEIGHT: float = 0.9
-
-# Complementary preventive items weight (e.g., dental, blood test).
-HEALTH_SCORE_COMPLEMENTARY_WEIGHT: float = 0.1
-
 # --- Supabase Storage ---
 # Path template for uploaded files: {user_id}/{pet_id}/{filename}
 # Enforced in the upload service — never construct paths manually elsewhere.

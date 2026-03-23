@@ -40,8 +40,11 @@ class PreventiveMaster(Base):
     # Name of the preventive health item (e.g., "Rabies Vaccine", "Deworming").
     item_name = Column(String(120), nullable=False)
 
-    # Category determines health score weighting:
-    # 'essential' items have 0.9 weight, 'complete' items have 0.1 weight.
+    # UI classification for the preventive item.
+    # 'essential' = mandatory (displayed as 'Mandatory' on dashboard).
+    # 'complete' = recommended (displayed as 'Recommended' on dashboard).
+    # Not used for health score weighting — the 6-category score uses keyword
+    # classification on item_name (see health_score.py: classify_preventive_item).
     # CHECK constraint enforces only 'essential' or 'complete'.
     category = Column(String(20), nullable=False)
 
