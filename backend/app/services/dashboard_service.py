@@ -34,7 +34,7 @@ import logging
 import asyncio
 from uuid import UUID
 from datetime import date, datetime
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from app.models.dashboard_token import DashboardToken
 from app.models.pet import Pet
 from app.models.user import User
@@ -184,9 +184,15 @@ def get_dashboard_data(db: Session, token: str) -> dict:
 
     preventive_records = []
 
-    # --- Pre-load conditions (used for conditions response section) ---
+    # --- Pre-load conditions with eager-loaded relationships ---
+    # selectinload fires 2 IN-queries (medications, monitoring) instead of
+    # N*2 lazy queries — one per condition row.
     condition_rows = (
         db.query(Condition)
+        .options(
+            selectinload(Condition.medications),
+            selectinload(Condition.monitoring),
+        )
         .filter(Condition.pet_id == pet_id, Condition.is_active == True)
         .order_by(Condition.created_at.desc())
         .all()
@@ -480,10 +486,13 @@ def get_dashboard_data(db: Session, token: str) -> dict:
         "health_score": health_score,
         "nutrition": diet_items_data,
         "conflict_flags": conflict_rows,
+        # Internal pet_id exposed only for intra-service use (not sent to frontend).
+        # Allows callers to avoid a second validate_dashboard_token() call.
+        "_pet_id": str(pet_id),
     }
 
 
-def get_document_file_for_token(
+async def get_document_file_for_token(
     db: Session,
     token: str,
     document_id: str,
@@ -519,10 +528,10 @@ def get_document_file_for_token(
     if not doc:
         raise ValueError("Document not found.")
 
-    file_bytes = asyncio.run(download_from_supabase(
+    file_bytes = await download_from_supabase(
         doc.file_path,
         backend=getattr(doc, "storage_backend", "supabase"),
-    ))
+    )
     if not file_bytes:
         raise ValueError("Could not load document from storage.")
 
@@ -530,7 +539,7 @@ def get_document_file_for_token(
     return file_bytes, doc.mime_type, filename
 
 
-def get_pet_photo_for_token(
+async def get_pet_photo_for_token(
     db: Session,
     token: str,
 ) -> tuple[bytes, str]:
@@ -549,7 +558,7 @@ def get_pet_photo_for_token(
     if not pet or pet.is_deleted or not pet.photo_path:
         raise ValueError("Pet photo not found.")
 
-    file_bytes = asyncio.run(download_from_supabase(pet.photo_path))
+    file_bytes = await download_from_supabase(pet.photo_path)
     if not file_bytes:
         raise ValueError("Could not load photo from storage.")
 

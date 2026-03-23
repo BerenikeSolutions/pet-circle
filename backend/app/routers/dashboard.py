@@ -23,6 +23,7 @@ Rules:
 """
 
 import logging
+from datetime import datetime, timedelta
 from typing import Optional, List
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, File
@@ -55,7 +56,8 @@ from app.services.diet_service import get_diet_items, add_diet_item, update_diet
 from app.services.hygiene_service import get_hygiene_preferences, upsert_hygiene_preference, update_hygiene_date, add_hygiene_item, delete_hygiene_item
 from app.services.nutrition_service import analyze_nutrition
 from app.services.nudge_engine import generate_nudges
-from app.services.ai_insights_service import get_or_generate_insight, get_or_generate_nutrition_importance
+from app.services.ai_insights_service import get_or_generate_insight, get_or_generate_nutrition_importance, AI_INSIGHT_CACHE_DAYS
+from app.models.pet_ai_insight import PetAiInsight
 from app.services.cart_service import get_cart, toggle_cart_item, update_quantity, initialize_cart, place_order, add_to_cart, remove_from_cart, get_recommendations, get_last_bought, _format_last_bought_label
 from app.services.razorpay_service import create_razorpay_payment, verify_razorpay_payment
 from app.services.condition_service import (
@@ -301,13 +303,13 @@ def dashboard_update_preventive(
 
 
 @router.get("/{token}/pet-photo")
-def dashboard_get_pet_photo(
+async def dashboard_get_pet_photo(
     token: str,
     db: Session = Depends(get_db),
 ):
     """Serve the pet's profile photo for the dashboard."""
     try:
-        file_bytes, mime_type = get_pet_photo_for_token(db, token)
+        file_bytes, mime_type = await get_pet_photo_for_token(db, token)
         headers = {
             "Content-Disposition": 'inline; filename="pet_photo"',
             "Cache-Control": "private, max-age=3600",
@@ -320,7 +322,7 @@ def dashboard_get_pet_photo(
 
 
 @router.get("/{token}/document/{document_id}")
-def dashboard_get_document(
+async def dashboard_get_document(
     token: str,
     document_id: str,
     db: Session = Depends(get_db),
@@ -329,7 +331,7 @@ def dashboard_get_document(
     Stream a document inline in the browser for dashboard viewing.
     """
     try:
-        file_bytes, mime_type, filename = get_document_file_for_token(db, token, document_id)
+        file_bytes, mime_type, filename = await get_document_file_for_token(db, token, document_id)
         headers = {
             "Content-Disposition": f'inline; filename="{filename}"',
             "Cache-Control": "no-store, no-cache, must-revalidate",
@@ -1435,8 +1437,21 @@ async def dashboard_health_summary(
     Returns: {"summary": "<text>"}
     """
     try:
-        data = get_dashboard_data(db, token)
         dt = validate_dashboard_token(db, token)
+        stale_cutoff = datetime.utcnow() - timedelta(days=AI_INSIGHT_CACHE_DAYS)
+        cached = (
+            db.query(PetAiInsight)
+            .filter(
+                PetAiInsight.pet_id == dt.pet_id,
+                PetAiInsight.insight_type == "conditions_summary",
+                PetAiInsight.generated_at >= stale_cutoff,
+            )
+            .first()
+        )
+        if cached:
+            return cached.content_json
+        # Cache miss — load full dashboard data for GPT context
+        data = get_dashboard_data(db, token)
         return await get_or_generate_insight(
             db=db,
             pet_id=dt.pet_id,
@@ -1467,8 +1482,22 @@ async def dashboard_vet_questions(
     Returns: list of {priority, icon, q, context}
     """
     try:
-        data = get_dashboard_data(db, token)
         dt = validate_dashboard_token(db, token)
+        stale_cutoff = datetime.utcnow() - timedelta(days=AI_INSIGHT_CACHE_DAYS)
+        cached = (
+            db.query(PetAiInsight)
+            .filter(
+                PetAiInsight.pet_id == dt.pet_id,
+                PetAiInsight.insight_type == "vet_questions",
+                PetAiInsight.generated_at >= stale_cutoff,
+            )
+            .first()
+        )
+        if cached:
+            result = cached.content_json
+            return result if isinstance(result, list) else []
+        # Cache miss — load full dashboard data for GPT context
+        data = get_dashboard_data(db, token)
         result = await get_or_generate_insight(
             db=db,
             pet_id=dt.pet_id,
@@ -1498,8 +1527,8 @@ async def dashboard_regenerate_vet_questions(
     Returns: list of {priority, icon, q, context}
     """
     try:
-        data = get_dashboard_data(db, token)
         dt = validate_dashboard_token(db, token)
+        data = get_dashboard_data(db, token)
         result = await get_or_generate_insight(
             db=db,
             pet_id=dt.pet_id,

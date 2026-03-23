@@ -82,14 +82,16 @@ function DashboardInner({ token }: { token: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
-  // Auto-retry every 30s when showing stale data (max 20 retries).
+  // Auto-retry with exponential backoff when showing stale data (max 10 retries).
+  // Backoff: 10s → 15s → 22s → ... → capped at 60s.
   useEffect(() => {
-    if (!stale || retryCount >= 20) return;
-    const interval = setInterval(() => {
+    if (!stale || retryCount >= 10) return;
+    const backoffMs = Math.min(10000 * Math.pow(1.5, retryCount), 60000);
+    const timer = setTimeout(() => {
       setRetryCount((c) => c + 1);
       load();
-    }, 30000);
-    return () => clearInterval(interval);
+    }, backoffMs);
+    return () => clearTimeout(timer);
   }, [stale, retryCount, load]);
 
   // Offline with no cached data
