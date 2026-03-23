@@ -1175,10 +1175,35 @@ async def _delayed_batch_extraction(
 
         if user and pet:
             user._plaintext_mobile = from_number
-            await _send_batch_summary(
+
+            # Try LLM-composed finalization message when the dashboard link was
+            # deferred (user uploaded docs and the 5-min window closed before
+            # extraction finished). If LLM succeeds, skip the regular summary.
+            agentic_sent = await _try_agentic_finalization(
                 bg_db, user, pet, from_number,
-                all_results, success_count, fail_count, failed_doc_names,
+                all_results, success_count, fail_count,
             )
+
+            if not agentic_sent:
+                await _send_batch_summary(
+                    bg_db, user, pet, from_number,
+                    all_results, success_count, fail_count, failed_doc_names,
+                )
+                # Regular summary already includes the dashboard link.
+                # If finalization had deferred it, clear the flag now.
+                if getattr(user, "dashboard_link_pending", False):
+                    try:
+                        user.dashboard_link_pending = False
+                        bg_db.commit()
+                    except Exception as flag_err:
+                        logger.warning(
+                            "Could not clear dashboard_link_pending for user=%s: %s",
+                            str(user_id), flag_err,
+                        )
+                        try:
+                            bg_db.rollback()
+                        except Exception:
+                            pass
 
         # Clear the batch counter and rejection flag so user can upload again.
         _recent_uploads.pop(pet_key, None)
@@ -1366,6 +1391,105 @@ def _get_dashboard_link(db: Session, pet) -> str | None:
     except Exception as e:
         logger.error("Failed to get dashboard link for pet %s: %s", str(pet.id), str(e))
         return None
+
+
+async def _try_agentic_finalization(
+    db: Session, user, pet, from_number: str,
+    all_results: list[dict], success_count: int, fail_count: int,
+) -> bool:
+    """
+    Attempt to send an LLM-composed finalization message when the dashboard link
+    was deferred during onboarding (user.dashboard_link_pending == True).
+
+    Returns True if an LLM message was sent (caller should skip _send_batch_summary).
+    Returns False if the flag is unset, the feature is disabled, or LLM fails
+    (caller should proceed with _send_batch_summary and then clear the flag).
+
+    Never raises — all errors are logged and False is returned.
+    """
+    if not getattr(user, "dashboard_link_pending", False):
+        return False
+
+    try:
+        from app.services.agentic_finalization import (
+            _should_use_agentic_finalization,
+            compose_finalization_message,
+        )
+        if not _should_use_agentic_finalization():
+            return False
+
+        # --- Gather context for the LLM ---
+        from app.models.preventive_record import PreventiveRecord
+        from app.models.preventive_master import PreventiveMaster
+        from app.models.diet_item import DietItem
+
+        records = (
+            db.query(PreventiveRecord, PreventiveMaster)
+            .join(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
+            .filter(
+                PreventiveRecord.pet_id == pet.id,
+                PreventiveRecord.last_done_date.isnot(None),
+            )
+            .order_by(PreventiveRecord.last_done_date.desc())
+            .all()
+        )
+        items_extracted = [
+            {
+                "item_name": master.item_name,
+                "last_done_date": record.last_done_date.strftime("%d/%m/%Y"),
+                "next_due_date": (
+                    record.next_due_date.strftime("%d/%m/%Y")
+                    if record.next_due_date else None
+                ),
+            }
+            for record, master in records
+        ]
+
+        diet_count = db.query(DietItem).filter(DietItem.pet_id == pet.id).count()
+        dashboard_url = _get_dashboard_link(db, pet) or ""
+        fun_fact = await get_breed_fun_fact(
+            db, user.id, getattr(pet, "breed", None), pet.species or "dog"
+        )
+
+        composed = await compose_finalization_message(
+            pet_name=pet.name,
+            species=pet.species or "dog",
+            breed=getattr(pet, "breed", None),
+            docs_uploaded=success_count + fail_count,
+            items_extracted=items_extracted,
+            diet_count=diet_count,
+            dashboard_url=dashboard_url,
+            extraction_failed=fail_count > 0,
+            fun_fact=fun_fact,
+        )
+
+        if not composed:
+            return False
+
+        # Clear the pending flag before sending so a crash doesn't re-send.
+        try:
+            user.dashboard_link_pending = False
+            db.commit()
+        except Exception as flag_err:
+            logger.warning("Could not clear dashboard_link_pending: %s", flag_err)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+        await send_text_message(db, from_number, composed)
+        logger.info(
+            "agentic_finalization: sent LLM message for pet=%s user=%s",
+            pet.name, str(user.id),
+        )
+        return True
+
+    except Exception as exc:
+        logger.warning(
+            "_try_agentic_finalization failed for user=%s: %s — falling back",
+            str(user.id), exc,
+        )
+        return False
 
 
 async def _send_batch_summary(

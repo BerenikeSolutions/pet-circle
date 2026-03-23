@@ -109,6 +109,12 @@ class Settings(BaseSettings):
     # is absent or if the OpenAI API health check fails.
     AGENTIC_ORDER_ENABLED: str = "false"
 
+    # Set to 'true' to enable LLM-composed finalization message after onboarding.
+    # When enabled, a single gpt-4.1-mini call composes a warm, personalised
+    # WhatsApp message combining extraction results + dashboard link + fun fact.
+    # Falls back to the templated message if OpenAI is unavailable.
+    AGENTIC_FINALIZATION_ENABLED: str = "false"
+
     # --- Timezone ---
     # Derived from constants, not from environment.
     # Exposed here so all layers can access timezone through settings.

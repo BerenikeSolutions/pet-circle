@@ -74,6 +74,13 @@ class User(Base):
     # Set when entering awaiting_documents state, cleared on exit.
     # Nullable — only populated during the upload window.
     doc_upload_deadline = Column(DateTime(timezone=True), nullable=True)
+
+    # Flag set when _finalize_onboarding() fires while document extractions are
+    # still in-flight (extraction_status='pending'). When True, the dashboard
+    # link is held back from the finalization message and instead appended to
+    # the extraction summary once all docs finish processing.
+    # Cleared to False by _send_extraction_summary() after the link is sent.
+    dashboard_link_pending = Column(Boolean, default=False, nullable=False)
     
     # Soft delete flag — when True, user is treated as deleted.
     # No physical delete is ever performed; this preserves audit trail.

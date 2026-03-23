@@ -1657,9 +1657,30 @@ async def _finalize_onboarding(db, user, send_fn):
 
     msg = f"*Processing {pet.name}'s records...* ⏳\n\n{checklist_str}\n\n"
 
+    # --- If extractions are still in-flight, defer the dashboard link ---
+    # Set dashboard_link_pending so _send_extraction_summary() appends the
+    # link once all documents finish processing (Tier 1 coordination fix).
     if docs_uploaded > 0 and pending_extractions > 0:
-        msg += "You'll receive extraction results shortly.\n\n"
+        try:
+            user.dashboard_link_pending = True
+            db.commit()
+        except Exception as e:
+            logger.warning(
+                "Could not set dashboard_link_pending for user %s: %s",
+                str(user.id), str(e),
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        msg += (
+            f"Your documents are being processed — I'll send {pet.name}'s "
+            f"dashboard link as soon as they're done! 🔍"
+        )
+        await send_fn(db, mobile, msg)
+        return
 
+    # --- No pending extractions (skip / no uploads) — send link now ---
     if token:
         msg += (
             f"✅ *{pet.name}'s profile is ready!*\n"
