@@ -130,6 +130,25 @@ def _should_use_agentic_onboarding() -> bool:
         return False
 
 
+def _should_use_agentic_order() -> bool:
+    """
+    Return True when AGENTIC_ORDER_ENABLED='true' and the OpenAI API
+    is reachable. Evaluated per-message so the flag can be toggled via env
+    var update + redeploy without code changes.
+
+    Falls back to False (deterministic state machine) on any error.
+    """
+    flag = getattr(settings, "AGENTIC_ORDER_ENABLED", "false")
+    has_key = bool(getattr(settings, "OPENAI_API_KEY", None))
+    if flag.lower() != "true" or not has_key:
+        return False
+    try:
+        from app.services.agentic_onboarding import is_openai_available
+        return is_openai_available()
+    except Exception:
+        return False
+
+
 def _get_mobile(user) -> str:
     """
     Get the plaintext mobile number for sending messages.
@@ -369,6 +388,15 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
     if reschedule_result:
         return
 
+    # --- Agentic order flow — route all text to the agent ---
+    if user.order_state == "agentic_order":
+        if text_lower in ("cancel", "stop"):
+            # Let the agent handle the cancellation gracefully
+            pass
+        from app.services.agentic_order import handle_agentic_order_step
+        await handle_agentic_order_step(db, user, message_data, send_text_message)
+        return
+
     # --- Active order flow — intercept text for items or pet selection ---
     if user.order_state in (
         "awaiting_pet_reco",
@@ -468,9 +496,17 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
         return
 
     # "order" / "shop" / "buy" command — start product ordering flow.
+    # When AGENTIC_ORDER_ENABLED=true and OpenAI is reachable, use the
+    # LLM-driven flow; otherwise fall back to the deterministic state machine.
     if text_lower in ORDER_COMMANDS:
-        from app.services.order_service import start_order_flow
-        await start_order_flow(db, user)
+        if _should_use_agentic_order():
+            user.order_state = "agentic_order"
+            db.commit()
+            from app.services.agentic_order import handle_agentic_order_step
+            await handle_agentic_order_step(db, user, message_data, send_text_message)
+        else:
+            from app.services.order_service import start_order_flow
+            await start_order_flow(db, user)
         return
 
     # General query — route to GPT query engine
@@ -575,9 +611,15 @@ async def _try_handle_reschedule_date(
 
 
 async def _handle_button(db: Session, user, message_data: dict) -> None:
-    """Handle a button response — route to reminder or conflict handler."""
+    """Handle a button response — route to reminder, conflict, or order handler."""
     payload = message_data.get("button_payload", "")
     from_number = _get_mobile(user)
+
+    # --- Agentic order flow: forward button taps to the agent ---
+    if user.order_state == "agentic_order":
+        from app.services.agentic_order import handle_agentic_order_step
+        await handle_agentic_order_step(db, user, message_data, send_text_message)
+        return
 
     if payload in REMINDER_PAYLOADS:
         await _handle_reminder_button(db, user, payload)

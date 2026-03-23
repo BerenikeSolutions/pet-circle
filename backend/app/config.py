@@ -104,6 +104,11 @@ class Settings(BaseSettings):
     # or if the OpenAI API health check fails.
     AGENTIC_ONBOARDING_ENABLED: str = "false"
 
+    # Set to 'true' to enable AI-driven conversational order flow.
+    # Requires OPENAI_API_KEY. Falls back to deterministic state machine if either
+    # is absent or if the OpenAI API health check fails.
+    AGENTIC_ORDER_ENABLED: str = "false"
+
     # --- Timezone ---
     # Derived from constants, not from environment.
     # Exposed here so all layers can access timezone through settings.

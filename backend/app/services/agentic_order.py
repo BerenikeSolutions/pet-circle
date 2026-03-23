@@ -1,0 +1,658 @@
+"""
+PetCircle — Agentic Order Service
+
+An LLM-driven alternative to the deterministic order state machine.
+Activated when AGENTIC_ORDER_ENABLED=true and OPENAI_API_KEY is set.
+
+Architecture:
+    - One AgentOrderSession row per user stores the full OpenAI message
+      history and a structured "collected_data" snapshot.
+    - On each incoming WhatsApp message, we append the user turn, call the
+      OpenAI tool-calling API, execute any tool calls (which write to
+      collected_data in-memory), persist the updated session, and send the
+      assistant reply back via WhatsApp.
+    - When the model decides the order is ready to confirm, it calls the
+      confirm_order tool, which atomically creates the Order row, notifies
+      the admin, and schedules the post-order recommendations task.
+    - After that, user.order_state is cleared and the normal post-order
+      handler takes over.
+
+IMPORTANT — JSONB mutation tracking:
+    SQLAlchemy does not auto-detect in-place mutations (list.append, dict.update)
+    on JSONB columns. Always call flag_modified() before db.commit() when
+    modifying session.messages or session.collected_data.
+"""
+
+import asyncio
+import json
+import logging
+
+from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
+
+from app.config import settings
+from app.core.encryption import decrypt_field
+from app.models.agent_order_session import AgentOrderSession
+from app.models.order import Order
+from app.models.pet import Pet
+from app.models.user import User
+from app.utils.retry import retry_openai_call
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# System prompt
+# ---------------------------------------------------------------------------
+
+_SYSTEM_PROMPT = """You are PetCircle's friendly pet supply assistant on WhatsApp in India.
+
+Your job is to help the user place an order for their pet — naturally, through conversation.
+
+WHAT YOU NEED TO COLLECT:
+1. What they want to order (items list) — mandatory before confirming
+2. Which pet the order is for — mandatory only if the user has more than one pet
+3. Category — infer from the items (medicines / food_nutrition / supplements). Ask only if unclear.
+
+STYLE:
+- Be warm and brief. This is WhatsApp — keep messages short.
+- Understand natural language: "usual stuff", "same as last time", "something for ticks" all work.
+- Accept Hindi affirmations: "haan"/"ha" = yes, "nahi"/"na" = no.
+- Never use technical terms like "tool", "JSON", or "function call".
+- Do not show numbered category buttons — just ask conversationally.
+
+FLOW:
+1. If the user names items → call set_items immediately.
+2. If category is ambiguous → ask once, then call set_category.
+3. If user has multiple pets → call get_pet_list to fetch names, then ask which pet.
+4. Once you have items (and pet if needed) → call get_recommendations to show personalized
+   suggestions from their history. The user may add/change items after seeing suggestions.
+5. Show a brief order summary and ask for confirmation.
+6. On confirmation → call confirm_order.
+7. If the user wants to cancel at any point → call cancel_order.
+
+CATEGORIES:
+- medicines: prescription drugs, flea/tick treatments, dewormers, ear drops, etc.
+- food_nutrition: kibble, wet food, treats, meal toppers
+- supplements: vitamins, probiotics, omega oils, joint supplements
+
+RECOMMENDATIONS:
+- After calling get_recommendations, present the results naturally (not as a numbered menu).
+- User can say "add all", select by name, or skip suggestions.
+
+IMPORTANT:
+- Never confirm an order without items.
+- Never hardcode pet names — always fetch with get_pet_list.
+- After confirm_order succeeds, tell the user their order is placed and the team will call shortly.
+"""
+
+# ---------------------------------------------------------------------------
+# Tool definitions
+# ---------------------------------------------------------------------------
+
+_ORDER_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "set_items",
+            "description": (
+                "Store the list of items the user wants to order. "
+                "Call this as soon as the user mentions what they want. "
+                "Each item should be a plain string (e.g., 'Nexgard 3 tablets', 'Royal Canin 1kg')."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of item names/descriptions.",
+                    },
+                },
+                "required": ["items"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_category",
+            "description": (
+                "Set the order category once it is clear. "
+                "Infer from items when possible — only ask the user if truly ambiguous."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "enum": ["medicines", "food_nutrition", "supplements"],
+                    },
+                },
+                "required": ["category"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_pet",
+            "description": (
+                "Set which pet this order is for. "
+                "Only needed when the user has more than one pet. "
+                "Pass the pet_id string from the get_pet_list result."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pet_id": {
+                        "type": "string",
+                        "description": "UUID string of the pet.",
+                    },
+                },
+                "required": ["pet_id"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_pet_list",
+            "description": (
+                "Fetch the user's active pets as a list of {pet_id, name} objects. "
+                "Call this before asking the user to select a pet. "
+                "If there is only one pet, call set_pet automatically without asking."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_recommendations",
+            "description": (
+                "Fetch personalized product recommendations for the selected pet and category. "
+                "Returns a list of {name, reason} objects. "
+                "Present these to the user naturally and offer to add them to the order."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "confirm_order",
+            "description": (
+                "Finalize and place the order. Call this only after the user explicitly confirms. "
+                "Requires items to be set. If user has multiple pets, pet must also be set."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_order",
+            "description": "Cancel the order flow. Call when the user says they don't want to order.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
+# ---------------------------------------------------------------------------
+# Session management
+# ---------------------------------------------------------------------------
+
+
+def _get_or_create_session(db: Session, user: User) -> AgentOrderSession:
+    """
+    Load the active agentic order session for the user, or create a new one.
+
+    A new session starts with the system prompt as the first message.
+    """
+    session = (
+        db.query(AgentOrderSession)
+        .filter(
+            AgentOrderSession.user_id == user.id,
+            AgentOrderSession.is_complete == False,  # noqa: E712
+        )
+        .first()
+    )
+    if session is None:
+        session = AgentOrderSession(
+            user_id=user.id,
+            messages=[{"role": "system", "content": _SYSTEM_PROMPT}],
+            collected_data={"pet_id": None, "category": None, "items": []},
+            is_complete=False,
+        )
+        db.add(session)
+        db.flush()
+    return session
+
+
+def _save_session(db: Session, session: AgentOrderSession) -> None:
+    """
+    Persist the updated session to PostgreSQL.
+
+    flag_modified() is required because SQLAlchemy cannot detect in-place
+    mutations on JSONB columns (list.append, dict update).
+    """
+    flag_modified(session, "messages")
+    flag_modified(session, "collected_data")
+    try:
+        db.commit()
+    except Exception as e:
+        logger.error("Failed to save agent order session: %s", str(e))
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# OpenAI call
+# ---------------------------------------------------------------------------
+
+
+async def _call_openai_with_tools(messages: list) -> object:
+    """
+    Single OpenAI chat completion call with tool support.
+
+    Uses gpt-4.1 at temperature=0 for consistent extraction.
+    """
+    from app.services.onboarding import _get_openai_onboarding_client
+
+    client = _get_openai_onboarding_client()
+
+    async def _make_call():
+        return await client.chat.completions.create(
+            model="gpt-4.1",
+            temperature=0,
+            max_tokens=500,
+            tools=_ORDER_TOOLS,
+            tool_choice="auto",
+            messages=messages,
+        )
+
+    return await retry_openai_call(_make_call)
+
+
+# ---------------------------------------------------------------------------
+# Finalization
+# ---------------------------------------------------------------------------
+
+
+async def _finalize_agentic_order(
+    db: Session,
+    user: User,
+    session: AgentOrderSession,
+) -> str:
+    """
+    Create the Order row atomically and trigger post-order tasks.
+
+    Steps:
+        1. Validate mandatory fields (items non-empty).
+        2. Resolve pet_id: if not set and user has exactly 1 pet, auto-select.
+        3. Create Order row (status=pending, payment_status=pending).
+        4. Notify admin via WhatsApp.
+        5. Schedule post-order recommendations background task.
+        6. Clear user.order_state and mark session complete.
+
+    Returns:
+        "__COMPLETE__" sentinel on success, or an error string if mandatory
+        fields are missing (model will ask again).
+    """
+    from app.core.constants import ORDER_CATEGORY_MAP
+    from app.services.order_service import _notify_admin_whatsapp, _send_post_order_recommendations
+
+    cd = session.collected_data
+    items: list = cd.get("items") or []
+    pet_id = cd.get("pet_id")
+    category = cd.get("category") or "medicines"
+
+    # --- Validate items ---
+    if not items:
+        return "Error: no items selected. Ask the user what they want to order before confirming."
+
+    # --- Auto-detect single pet ---
+    pet = None
+    if not pet_id:
+        pets = (
+            db.query(Pet)
+            .filter(Pet.user_id == user.id, Pet.is_deleted == False)  # noqa: E712
+            .all()
+        )
+        if len(pets) == 1:
+            pet_id = str(pets[0].id)
+            pet = pets[0]
+        elif len(pets) > 1:
+            return "Error: multiple pets found but no pet selected. Ask the user which pet this is for."
+    else:
+        try:
+            from uuid import UUID as _UUID
+            pet = db.query(Pet).filter(Pet.id == _UUID(pet_id)).first()
+        except Exception:
+            pet = None
+
+    # --- Validate category enum ---
+    valid_categories = {"medicines", "food_nutrition", "supplements"}
+    if category not in valid_categories:
+        category = "medicines"
+
+    try:
+        mobile = getattr(user, "_plaintext_mobile", None) or decrypt_field(user.mobile_number)
+
+        # --- Create Order row ---
+        order = Order(
+            user_id=user.id,
+            pet_id=pet.id if pet else None,
+            category=category,
+            items_description=", ".join(items)[:2000],
+            status="pending",
+            payment_status="pending",
+        )
+        db.add(order)
+
+        # --- Record preferences for personalization ---
+        if pet:
+            from app.services.recommendation_service import record_preference
+            for item in items:
+                item_str = str(item).strip()
+                if item_str:
+                    record_preference(db, pet.id, category, item_str, "custom")
+
+        # --- Clear user state and mark session complete ---
+        user.order_state = None
+        user.active_order_id = None
+        session.is_complete = True
+
+        db.commit()
+
+        logger.info(
+            "Agentic order finalized: order_id=%s user=%s",
+            str(order.id),
+            str(user.id),
+        )
+
+        # --- Notify admin (non-blocking) ---
+        await _notify_admin_whatsapp(db, order, user, pet)
+
+        # --- Post-order recommendations (non-blocking background task) ---
+        if pet is not None:
+            asyncio.create_task(
+                _send_post_order_recommendations(db, user, order, pet, mobile)
+            )
+
+        return "__COMPLETE__"
+
+    except Exception as e:
+        logger.error("Agentic order finalization failed: %s", str(e), exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return f"Error during order placement: {str(e)}. Please try again."
+
+
+# ---------------------------------------------------------------------------
+# Tool dispatcher
+# ---------------------------------------------------------------------------
+
+
+async def _dispatch_tool_call(
+    db: Session,
+    user: User,
+    session: AgentOrderSession,
+    tool_name: str,
+    arguments_json: str,
+) -> str:
+    """
+    Execute a tool call from the model.
+
+    All tools except confirm_order and cancel_order write only to
+    collected_data (in-memory). The DB write happens atomically in
+    _finalize_agentic_order.
+
+    Returns:
+        Result string to feed back as a tool role message.
+        "__COMPLETE__" sentinel when confirm_order succeeds.
+        "__CANCELLED__" sentinel when cancel_order fires.
+    """
+    try:
+        args = json.loads(arguments_json or "{}")
+    except json.JSONDecodeError:
+        return "Error: could not parse tool arguments."
+
+    if tool_name == "set_items":
+        items = args.get("items", [])
+        # Replace — caller can refine by calling again
+        session.collected_data["items"] = [str(i).strip() for i in items if str(i).strip()]
+        return f"Items stored: {session.collected_data['items']}"
+
+    elif tool_name == "set_category":
+        category = args.get("category")
+        valid = {"medicines", "food_nutrition", "supplements"}
+        if category not in valid:
+            return f"Error: category must be one of {valid}."
+        session.collected_data["category"] = category
+        return f"Category set to '{category}'."
+
+    elif tool_name == "set_pet":
+        pet_id = args.get("pet_id", "").strip()
+        if not pet_id:
+            return "Error: pet_id is required."
+        session.collected_data["pet_id"] = pet_id
+        return f"Pet set to '{pet_id}'."
+
+    elif tool_name == "get_pet_list":
+        pets = (
+            db.query(Pet)
+            .filter(Pet.user_id == user.id, Pet.is_deleted == False)  # noqa: E712
+            .order_by(Pet.name)
+            .all()
+        )
+        if not pets:
+            return "[]"
+        result = [{"pet_id": str(p.id), "name": p.name} for p in pets]
+        return json.dumps(result)
+
+    elif tool_name == "get_recommendations":
+        pet_id = session.collected_data.get("pet_id")
+        category = session.collected_data.get("category") or "medicines"
+
+        if not pet_id:
+            return "[]  # No pet selected yet — set pet first."
+
+        try:
+            from uuid import UUID as _UUID
+            from app.services.recommendation_service import get_or_generate_recommendations
+            recs = await get_or_generate_recommendations(
+                db,
+                pet_id=_UUID(pet_id),
+                category=category,
+                increment_on_hit=True,
+            )
+            if not recs:
+                return "[]"
+            # Return as JSON list of {name, reason}
+            simplified = [
+                {"name": r.get("name", ""), "reason": r.get("reason", "")}
+                for r in recs
+            ]
+            return json.dumps(simplified)
+        except Exception as e:
+            logger.warning("Agentic order: recommendation fetch failed: %s", str(e))
+            return "[]"
+
+    elif tool_name == "confirm_order":
+        return await _finalize_agentic_order(db, user, session)
+
+    elif tool_name == "cancel_order":
+        # Mark session complete so it won't be reused
+        session.is_complete = True
+        user.order_state = None
+        user.active_order_id = None
+        db.commit()
+        logger.info("Agentic order cancelled for user %s", str(user.id))
+        return "__CANCELLED__"
+
+    else:
+        logger.warning("Unknown tool call in agentic order: %s", tool_name)
+        return f"Error: unknown tool '{tool_name}'."
+
+
+# ---------------------------------------------------------------------------
+# Agent loop
+# ---------------------------------------------------------------------------
+
+
+async def _run_agent_loop(
+    db: Session,
+    user: User,
+    session: AgentOrderSession,
+) -> str | None:
+    """
+    Execute the OpenAI tool-calling loop for one user turn.
+
+    Runs until:
+    - The model produces a text reply (no tool call) → return the text.
+    - confirm_order fires → finalize, let model produce closing message, return it.
+    - cancel_order fires → let model produce closing message, return it.
+    - Max iterations exceeded → return a safe fallback.
+
+    Returns:
+        The text to send to the user, or None on unexpected failure.
+    """
+    MAX_ITERATIONS = 5
+
+    for iteration in range(MAX_ITERATIONS):
+        response = await _call_openai_with_tools(session.messages)
+        choice = response.choices[0]
+        message = choice.message
+
+        # Build assistant message dict
+        assistant_msg: dict = {"role": "assistant", "content": message.content or ""}
+        if message.tool_calls:
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in message.tool_calls
+            ]
+        session.messages.append(assistant_msg)
+
+        # No tool calls → model is speaking directly to the user
+        if not message.tool_calls:
+            return message.content or ""
+
+        # Execute each tool call
+        terminal_signal: str | None = None
+        for tc in message.tool_calls:
+            result = await _dispatch_tool_call(
+                db, user, session, tc.function.name, tc.function.arguments
+            )
+
+            if result == "__COMPLETE__":
+                terminal_signal = "COMPLETE"
+                result = "Order placed in database successfully."
+            elif result == "__CANCELLED__":
+                terminal_signal = "CANCELLED"
+                result = "Order cancelled."
+
+            session.messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result,
+                }
+            )
+
+        if terminal_signal:
+            # Let the model produce the closing message to the user.
+            final_response = await _call_openai_with_tools(session.messages)
+            final_text = final_response.choices[0].message.content or ""
+            session.messages.append({"role": "assistant", "content": final_text})
+            return final_text
+
+    logger.warning("Agent order loop exceeded max iterations for user %s", str(user.id))
+    return "I had trouble processing that. Please type *order* to try again."
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+
+async def handle_agentic_order_step(
+    db: Session,
+    user: User,
+    message_data: dict,
+    send_fn,
+) -> None:
+    """
+    Main entry point for agentic order flow. Called from message_router.
+
+    Handles text and button messages. Buttons are forwarded as their
+    display label so the model understands what the user tapped.
+
+    Args:
+        db:           SQLAlchemy session.
+        user:         User model with _plaintext_mobile set.
+        message_data: Flat dict from webhook (_extract_message_data).
+        send_fn:      async send_text_message(db, mobile, text)
+    """
+    mobile = getattr(user, "_plaintext_mobile", None)
+    msg_type = message_data.get("type", "text")
+
+    session = _get_or_create_session(db, user)
+
+    # Build user-turn content
+    if msg_type == "button":
+        # Forward button taps as natural language so the model handles them
+        button_text = message_data.get("button_text") or message_data.get("button_payload") or ""
+        user_content = button_text.strip() if button_text else ""
+    elif msg_type == "text":
+        user_content = (message_data.get("text") or "").strip()
+    else:
+        # Non-text, non-button (image, document, etc.) — acknowledge and continue
+        user_content = "[System: User sent a non-text message. Acknowledge briefly and continue.]"
+
+    if not user_content:
+        await send_fn(db, mobile, "Please send a text message to continue your order.")
+        return
+
+    session.messages.append({"role": "user", "content": user_content})
+
+    # --- Run the agent loop ---
+    reply_text = await _run_agent_loop(db, user, session)
+
+    # --- Persist session ---
+    _save_session(db, session)
+
+    # --- Send reply ---
+    if reply_text and mobile:
+        await send_fn(db, mobile, reply_text)
