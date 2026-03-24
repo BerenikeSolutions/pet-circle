@@ -233,6 +233,7 @@ export default function HygieneTab({ data, token, onUpdated, onCartClick }: Hygi
             <Toggle
               checked={item.reminder}
               onChange={(v) => handleReminderToggle(item.item_id, v)}
+              disabled={!item.last_done}
             />
             {!item.is_default && (
               <button
@@ -282,6 +283,7 @@ export default function HygieneTab({ data, token, onUpdated, onCartClick }: Hygi
             <Toggle
               checked={item.reminder}
               onChange={(v) => handleReminderToggle(item.item_id, v)}
+              disabled={!item.last_done}
             />
             <button
               onClick={() => setDateEditing(item)}

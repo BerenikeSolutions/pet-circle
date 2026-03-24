@@ -543,7 +543,7 @@ export function generateHealthPdf(data: DashboardData): void {
     }
   }
 
-  // ── Preventive Care ───────────────────────────────────────────────────
+  // ── Preventive Care ─────────────────────────────────────────────────
   const records = data.preventive_records || [];
 
   const VACCINE_KW = ['vaccine', 'vaccination', 'dhppi', 'rabies', 'kennel cough', 'coronavirus', 'ccov', 'nobivac'];
@@ -559,49 +559,54 @@ export function generateHealthPdf(data: DashboardData): void {
   const deworming = filterKW(records, DEWORMING_KW);
   const fleaTick = filterKW(records, FLEA_TICK_KW);
 
-  if (records.length > 0) {
-    builder.sectionHeading('Preventive Care');
+  builder.sectionHeading('Preventive Care');
 
-    const statusColor = (s: string) =>
-      s === 'overdue' ? RED : s === 'upcoming' ? AMBER : s === 'done' ? GREEN : GREY_LIGHT;
-    const statusLabel = (s: string) =>
-      s === 'overdue' ? 'OVERDUE' : s === 'upcoming' ? 'DUE SOON' : s === 'done' ? 'UP TO DATE' : 'NO RECORD';
+  const statusColor = (s: string) =>
+    s === 'overdue' ? RED : s === 'upcoming' ? AMBER : s === 'done' ? GREEN : GREY_LIGHT;
+  const statusLabel = (s: string) =>
+    s === 'overdue' ? 'OVERDUE' : s === 'upcoming' ? 'DUE SOON' : s === 'done' ? 'UP TO DATE' : 'NO RECORD';
 
-    const renderPrevGroup = (title: string, group: PreventiveRecord[]) => {
-      if (group.length === 0) return;
-      builder.subHeading(title, GREY_DARK);
-
-      for (const rec of group) {
-        builder.ensureSpace(10);
-        const sc = statusColor(rec.status);
-        const sl = statusLabel(rec.status);
-
-        setTextColor(doc, GREY_DARK);
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(8);
-        doc.text(rec.item_name, MARGIN + 4, builder.curY);
-
-        builder.pill(sl, sc, WHITE, PAGE_W - MARGIN - 26, builder.curY);
-        builder.move(4.5);
-
-        const meta = [
-          rec.last_done_date ? `Last: ${fmtDate(rec.last_done_date)}` : 'Last: No record',
-          rec.next_due_date ? `Next: ${fmtDate(rec.next_due_date)}` : 'Next: —',
-        ].join('   ·   ');
-        builder.bodyText(meta, 4, GREY_LIGHT, 7.5);
-
-        if (rec.medicine_name) {
-          builder.bodyText(`Medicine: ${rec.medicine_name}`, 4, GREY_MID, 7.5);
-        }
-      }
+  const renderPrevGroup = (title: string, group: PreventiveRecord[], alwaysShow = false) => {
+    if (group.length === 0 && !alwaysShow) return;
+    builder.subHeading(title, GREY_DARK);
+    if (group.length === 0) {
+      builder.bodyText('No record found', 4, GREY_LIGHT, 7.5);
       builder.move(2);
-    };
+      return;
+    }
 
-    renderPrevGroup('Vaccinations', vaccines);
-    renderPrevGroup('Deworming', deworming);
-    renderPrevGroup('Tick & Flea Prevention', fleaTick);
+    for (const rec of group) {
+      builder.ensureSpace(10);
+      const sc = statusColor(rec.status);
+      const sl = statusLabel(rec.status);
 
-    // remaining records (checkups, etc.)
+      setTextColor(doc, GREY_DARK);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.text(rec.item_name, MARGIN + 4, builder.curY);
+
+      builder.pill(sl, sc, WHITE, PAGE_W - MARGIN - 26, builder.curY);
+      builder.move(4.5);
+
+      const meta = [
+        rec.last_done_date ? `Last: ${fmtDate(rec.last_done_date)}` : 'Last: No record',
+        rec.next_due_date ? `Next: ${fmtDate(rec.next_due_date)}` : 'Next: —',
+      ].join('   ·   ');
+      builder.bodyText(meta, 4, GREY_LIGHT, 7.5);
+
+      if (rec.medicine_name) {
+        builder.bodyText(`Medicine: ${rec.medicine_name}`, 4, GREY_MID, 7.5);
+      }
+    }
+    builder.move(2);
+  };
+
+  // Core groups always shown; "Other Records" only when records exist
+  renderPrevGroup('Vaccinations', vaccines, true);
+  renderPrevGroup('Deworming', deworming, true);
+  renderPrevGroup('Tick & Flea Prevention', fleaTick, true);
+
+  if (records.length > 0) {
     const covered = new Set([...vaccines, ...deworming, ...fleaTick]);
     const others = records.filter((r) => !covered.has(r));
     renderPrevGroup('Other Records', others);
@@ -609,9 +614,12 @@ export function generateHealthPdf(data: DashboardData): void {
 
   // ── Diagnostic Test Results ───────────────────────────────────────────
   const diagnostics = data.diagnostic_results || [];
-  if (diagnostics.length > 0) {
-    builder.sectionHeading('Diagnostic Test Results');
+  builder.sectionHeading('Diagnostic Test Results');
 
+  if (diagnostics.length === 0) {
+    builder.bodyText('No record found', 0, GREY_LIGHT);
+    builder.move(3);
+  } else {
     const grouped: Record<string, DiagnosticResultItem[]> = {};
     for (const d of diagnostics) {
       const key = d.test_type || 'other';
@@ -674,7 +682,7 @@ export function generateHealthPdf(data: DashboardData): void {
     }
   }
 
-  // ── Appendix — Documents ─────────────────────────────────────────────
+  // ── Appendix — Documents ───────────────────────────────────────────
   const documents = data.documents || [];
   if (documents.length > 0) {
     builder.newPage();

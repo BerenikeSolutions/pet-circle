@@ -841,12 +841,14 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12, animation: 'slideUp 0.4s ease' }}>
 
-      {/* 1. Health Score Card */}
-      <HealthScoreCard
-        activeCount={activeCount}
-        summary={healthSummary}
-        conditions={conditions.filter(c => c.condition_type !== 'resolved')}
-      />
+      {/* 1. Health Score Card — only shown when there are conditions */}
+      {conditions.length > 0 && (
+        <HealthScoreCard
+          activeCount={activeCount}
+          summary={healthSummary}
+          conditions={conditions.filter(c => c.condition_type !== 'resolved')}
+        />
+      )}
 
       {/* 2. Unified Conditions Card */}
       {conditions.length > 0 ? (
@@ -921,12 +923,14 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
       {/* 5. Last Vet Visit */}
       <LastVetVisitCard vetVisit={vetVisit} />
 
-      {/* 6. Ask the Vet */}
-      <AskTheVetSection
-        questions={vetQuestions}
-        loading={vetQLoading}
-        onRegenerate={handleRegenerate}
-      />
+      {/* 6. Ask the Vet — only shown when there are conditions */}
+      {conditions.length > 0 && (
+        <AskTheVetSection
+          questions={vetQuestions}
+          loading={vetQLoading}
+          onRegenerate={handleRegenerate}
+        />
+      )}
 
       {/* 7. Health Management Timeline */}
       {(timeline.length > 0 || conditions.length > 0) && (
