@@ -46,7 +46,7 @@ Return structure:
 
 import logging
 from uuid import UUID
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from app.models.preventive_record import PreventiveRecord
 from app.models.preventive_master import PreventiveMaster
 
@@ -155,6 +155,7 @@ def compute_health_score(db: Session, pet_id: UUID) -> dict:
     from app.models.condition import Condition
     condition_rows = (
         db.query(Condition)
+        .options(selectinload(Condition.medications), selectinload(Condition.monitoring))
         .filter(Condition.pet_id == pet_id, Condition.is_active == True)
         .all()
     )

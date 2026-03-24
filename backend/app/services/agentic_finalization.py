@@ -23,6 +23,7 @@ import logging
 from typing import Any
 
 from app.config import settings
+from app.core.constants import OPENAI_QUERY_MODEL
 from app.utils.retry import retry_openai_call
 
 logger = logging.getLogger(__name__)
@@ -160,7 +161,7 @@ async def compose_finalization_message(
     async def _call() -> str:
         client = _get_client()
         response = await client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model=OPENAI_QUERY_MODEL,
             temperature=0.3,
             max_tokens=300,
             messages=[

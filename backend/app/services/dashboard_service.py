@@ -34,6 +34,7 @@ import logging
 import asyncio
 from uuid import UUID
 from datetime import date, datetime
+from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
 from app.models.dashboard_token import DashboardToken
 from app.models.pet import Pet
@@ -425,17 +426,12 @@ def get_dashboard_data(db: Session, token: str) -> dict:
     ]
     conflict_rows = []
     if conflict_record_ids:
-        # Get all preventive record UUIDs for this pet to join against
-        pet_rec_rows = (
-            db.query(PreventiveRecord)
-            .filter(PreventiveRecord.pet_id == pet_id)
-            .all()
-        )
-        pet_rec_map = {str(r.id): r for r in pet_rec_rows}
+        # Reuse already-loaded preventive_data tuples — avoids a redundant full table scan
+        pet_rec_map = {str(r.id): r for r, _ in preventive_data}
         cf_rows = (
             db.query(ConflictFlag)
             .filter(
-                ConflictFlag.preventive_record_id.in_([r.id for r in pet_rec_rows]),
+                ConflictFlag.preventive_record_id.in_(list(pet_rec_map.keys())),
                 ConflictFlag.status == "pending",
             )
             .order_by(ConflictFlag.created_at.desc())
@@ -929,29 +925,22 @@ def get_health_trends(db: Session, token: str) -> dict:
             status_counts[record.status] += 1
 
     # --- Diagnostic document frequency by month ---
-    # Counts documents categorized as "Diagnostic" per month.
-    diagnostic_docs = (
-        db.query(Document)
+    # Counts documents categorized as "Diagnostic" per month — aggregated in SQL.
+    _diag_rows = (
+        db.query(
+            func.to_char(Document.created_at, "YYYY-MM").label("month"),
+            func.count().label("count"),
+        )
         .filter(
             Document.pet_id == pet_id,
             Document.document_category == "Diagnostic",
             Document.extraction_status == "success",
         )
+        .group_by(func.to_char(Document.created_at, "YYYY-MM"))
+        .order_by(func.to_char(Document.created_at, "YYYY-MM"))
         .all()
     )
-
-    diagnostic_monthly: dict[str, int] = defaultdict(int)
-    for doc in diagnostic_docs:
-        if doc.created_at:
-            month_key = doc.created_at.strftime("%Y-%m")
-            diagnostic_monthly[month_key] += 1
-
-    diagnostic_trends = []
-    for month in sorted(diagnostic_monthly.keys()):
-        diagnostic_trends.append({
-            "month": month,
-            "count": diagnostic_monthly[month],
-        })
+    diagnostic_trends = [{"month": row.month, "count": row.count} for row in _diag_rows]
 
     return {
         "monthly_completions": monthly_data,

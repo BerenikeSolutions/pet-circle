@@ -18,7 +18,7 @@ Provides condition management logic:
 import logging
 from datetime import date, timedelta
 from uuid import UUID
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.models.condition import Condition
 from app.models.condition_medication import ConditionMedication
@@ -68,6 +68,7 @@ async def get_condition_timeline(db: Session, pet_id: UUID) -> dict:
     # ── Condition diagnosis + medication + monitoring events ──────────────────
     conditions = (
         db.query(Condition)
+        .options(selectinload(Condition.medications), selectinload(Condition.monitoring))
         .filter(Condition.pet_id == pet_id, Condition.is_active == True)
         .all()
     )
@@ -408,9 +409,10 @@ async def get_condition_recommendations(db: Session, pet_id: UUID) -> dict:
     recommendations = []
     today = date.today()
 
-    # Load active conditions with relationships
+    # Load active conditions with relationships — eager-load to avoid N+1 on medications/monitoring
     conditions = (
         db.query(Condition)
+        .options(selectinload(Condition.medications), selectinload(Condition.monitoring))
         .filter(Condition.pet_id == pet_id, Condition.is_active == True)
         .all()
     )

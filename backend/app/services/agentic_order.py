@@ -273,6 +273,17 @@ def _save_session(db: Session, session: AgentOrderSession) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _trim_messages(messages: list, max_turns: int = 10) -> list:
+    """Return system prompt + last max_turns non-system messages for the API call.
+
+    session.messages is NOT mutated — full history is still persisted to DB.
+    This only trims what is sent to OpenAI, preventing unbounded context growth.
+    """
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    turn_msgs = [m for m in messages if m.get("role") != "system"]
+    return system_msgs + turn_msgs[-max_turns:]
+
+
 async def _call_openai_with_tools(messages: list) -> object:
     """
     Single OpenAI chat completion call with tool support.
@@ -545,7 +556,7 @@ async def _run_agent_loop(
     MAX_ITERATIONS = 5
 
     for iteration in range(MAX_ITERATIONS):
-        response = await _call_openai_with_tools(session.messages)
+        response = await _call_openai_with_tools(_trim_messages(session.messages))
         choice = response.choices[0]
         message = choice.message
 
