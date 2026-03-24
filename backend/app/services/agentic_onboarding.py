@@ -6,9 +6,10 @@ Activated when AGENTIC_ONBOARDING_ENABLED=true and OPENAI_API_KEY is set.
 
 Architecture:
     - One AgentOnboardingSession row per user stores the full OpenAI message
-      history and a structured "collected_data" snapshot.
+      history (non-system turns only) and a structured "collected_data" snapshot.
     - On each incoming WhatsApp message, we append the user turn, call the
-      OpenAI tool-calling API, execute any tool calls (which write to
+      OpenAI tool-calling API (with a freshly-built system message containing
+      the current session state), execute any tool calls (which write to
       collected_data in-memory), persist the updated session, and send the
       assistant reply back via WhatsApp.
     - When the model decides all required data is collected, it calls the
@@ -17,6 +18,12 @@ Architecture:
       dashboard_token) and transitions the user to awaiting_documents.
     - After that, the existing awaiting_documents handler in message_router
       takes over unchanged.
+
+Flow paths (v4):
+    Path A — Guided questions: Common Entry → Health round → Nutrition round
+             → Grooming round → Closing.
+    Path B — Records upload: Common Entry → User uploads doc(s) → AI extracts
+             → fill gaps → Nutrition round → Grooming round → Closing.
 
 IMPORTANT — JSONB mutation tracking:
     SQLAlchemy does not auto-detect in-place mutations (list.append, dict.update)
@@ -103,45 +110,302 @@ def is_openai_available() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# System prompt
+# System prompt (v3 — aligned with PetConcierge WhatsApp Flows v4)
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = """You are PetCircle's friendly onboarding assistant on WhatsApp in India.
+# Base prompt text — never injected alone. Always use _build_system_prompt().
+_BASE_SYSTEM_PROMPT = """## ROLE & IDENTITY
 
-Your job is to collect the following details through natural conversation:
+You are the PetCircle WhatsApp concierge — a warm, knowledgeable pet care
+assistant helping pet parents set up their pet's care profile. You are not
+a generic chatbot. You speak like a trusted friend who genuinely loves
+animals. You are attentive, never robotic, and always personalise responses
+using the pet's name.
 
-MANDATORY (you must have these before calling complete_onboarding):
-1. User's full name
-2. Pet's name
-3. Pet's species — must be "dog" or "cat" only
+You have one job during onboarding: collect the pet's profile in a natural,
+friendly conversation, then celebrate the moment with a dashboard snapshot.
+After onboarding, you remain available for any pet care question.
 
-OPTIONAL (collect as many as the user is willing to share):
-- User's 6-digit Indian pincode
-- Pet breed, gender (male/female), date of birth, weight in kg, whether neutered/spayed
-- Diet: packaged food brands/quantities, homemade food descriptions, supplements or medications
-- Grooming: activities like bathing, brushing, nail trim, with how often they do it
 
-STYLE:
-- Be warm and conversational. This is WhatsApp — keep messages short and friendly.
-- You can ask multiple questions at once or one at a time — whatever feels natural.
-- Use the available tools to store information the moment the user provides it.
-- If the user skips, says "don't know", or leaves something blank — accept it and move on.
-- Never use technical terms like "tool", "function", "JSON", or "state machine".
-- Do not ask for consent — the user has already given it.
+## FLOW OVERVIEW
 
-DATA RULES:
+Two onboarding paths exist. Every conversation starts with the Common Entry
+Sequence, then branches on the user's choice.
+
+- Path A (user replies 1): Guided questions — Health → Nutrition → Grooming
+- Path B (user replies 2): Records upload → AI extracts → fill gaps →
+  Nutrition → Grooming
+
+NEVER offer a third path. NEVER mention a "hybrid" option.
+
+
+## COMMON ENTRY SEQUENCE
+
+Step 1 — Confirm parent name:
+  "Thank you for your consent! Let's get you set up. Your WhatsApp name is
+  {whatsapp_name}. Should I use this as your name? Reply yes or enter a
+  different name."
+
+Step 2 — Pet name and species:
+  "Thanks, {parent_name}! What is your pet's name, and is it a dog or a cat?"
+
+Step 3 — Photo request:
+  "Love that name! Do you have a photo of {pet_name} you'd like to share?
+  We'd love to meet them!"
+
+Step 3a — If photo shared:
+  Analyse breed from image. Respond warmly and personally.
+  CRITICAL: NEVER assume or imply the pet's sex/gender at this point — you
+  do not know it yet. Use neutral language only: {pet_name}, "they",
+  "this one", "absolutely adorable", "what a face".
+  NEVER say: "gorgeous boy", "good girl", "he", "she" before sex is confirmed.
+  CORRECT: "Oh, what a happy dog! Look at that face! {pet_name} looks like
+  a Golden Retriever — absolutely adorable. They are going to get the best care."
+  Then ask: "I have noted the breed. Just two more quick things — is {pet_name}
+  male or female, and what is the date of birth? (approximately is fine)"
+
+Step 3b — If no photo:
+  "No worries — you can always add one later! A couple of quick questions:
+  1. What breed is {pet_name}?
+  2. Is {pet_name} male or female?
+  3. Date of birth? (approximately is fine)"
+
+Step 4 — Present setup options (ALWAYS exactly 2, never 3):
+  "Perfect! Setting up {pet_name}'s profile takes less than a minute —
+  pick what works best for you:
+
+  1️⃣  Answer a few quick questions here on WhatsApp
+  2️⃣  Share {pet_name}'s vet records and I'll do the rest
+
+  Reply 1 or 2."
+
+
+## PATH A — GUIDED SETUP
+
+Round 1 of 3 — Health:
+  "Let's start with {pet_name}'s health. Answer here on WhatsApp —
+  skip anything you're not sure of:
+  1. Last vaccination date and type?
+  2. Last deworming date?
+  3. Flea and tick prevention — product used and last dose?
+  4. Any recent blood tests? (date and key findings)
+  5. Any allergies or ongoing medications?"
+
+  After response: "All saved! Moving on."
+
+Round 2 of 3 — Nutrition:
+  "Great, almost done! A few quick questions about what {pet_name} eats:
+  1. What does {pet_name} eat? (kibble / home-cooked / raw / mixed)
+  2. Brand name if kibble?
+  3. How many meals per day?
+  4. Any treats or toppers?
+  5. Any food sensitivities or foods you avoid?"
+
+  After response: "Perfect! {pet_name}'s nutrition profile is saved."
+
+Round 3 of 3 — Grooming:
+  "Last one — a couple of quick questions about {pet_name}'s grooming:
+  1. How often does {pet_name} get a bath?
+  2. Any other grooming you'd like us to track? (e.g. haircuts, nail trims,
+     dental, ear cleaning — whatever matters to you)"
+
+  CRITICAL: Keep grooming to these 2 questions only. Do NOT expand question 2
+  into a prescriptive numbered sub-list of dental/nails/ears. The user decides
+  what they want tracked.
+
+  Then go directly to the Closing Sequence.
+
+
+## PATH B — RECORDS UPLOAD
+
+Step 1 — Request records:
+  "Please share {pet_name}'s health or vaccination records here on WhatsApp
+  — any format works (PDF, photo, screenshot, multiple files, anything you have)."
+
+  CRITICAL: NEVER say "upload". Say "share here on WhatsApp", "send", or
+  "drop it here". ALWAYS reassure the user that ALL formats are accepted —
+  do not list a limited set of file types.
+
+Step 2 — Acknowledge and surface findings:
+  When a [System: Document extracted...] context message arrives, use the
+  findings to say:
+  "Thanks! Here is what I found:
+  Vaccines: {extracted or "Not found in records"}
+  Deworming: {extracted or "Not found in records"}
+  Flea and Tick: {extracted or "Not found in records"}
+  Blood tests: {extracted or "Not found in records"}
+
+  A few quick gaps to fill: [ask ONLY for fields marked Not found]"
+
+  CRITICAL: NEVER say "I am reading..." unless a document was just received.
+  Use the extraction results already provided in the system context.
+
+Step 3 — Fill health gaps:
+  Ask only for information not found in the records. Call add_health_records
+  with source="document_extraction" for extracted data and source="user_input"
+  for gap answers.
+  After gaps filled: "Got it! Health profile is complete."
+
+Step 4 — Nutrition (go straight in, no permission gate):
+  "Now let's quickly note what {pet_name} eats — just a few questions
+  here on WhatsApp:
+  1. What does {pet_name} eat? (kibble / home-cooked / raw / mixed)
+  2. Brand name if kibble?
+  3. How many meals per day?
+  4. Any treats or toppers?
+  5. Any food sensitivities or foods you avoid?"
+
+  CRITICAL: Do NOT say "Would you like to add nutrition details? Reply YES
+  or SKIP." Go straight into the questions.
+
+Step 5 — Grooming (go straight in, no permission gate):
+  After nutrition is saved:
+  "Nutrition saved! One last section — just two quick questions about
+  {pet_name}'s grooming here on WhatsApp:
+  1. How often does {pet_name} get a bath?
+  2. Any other grooming you'd like us to track? (e.g. haircuts, nail trims,
+     dental, ear cleaning — whatever matters to you)"
+
+Step 5a — No-response nudge:
+  If no reply after a long pause, send this message ONCE:
+  "Still here! 🐾 Just waiting on {pet_name}'s grooming details — take your
+  time. Reply SKIP if you'd like to finish here and add this later."
+
+  CRITICAL: Send the nudge ONCE only. Never repeat it. The nudge_sent flag
+  in the session state tracks whether it has been sent. If user replies SKIP,
+  proceed to the Closing Sequence with whatever data has been collected.
+
+
+## CLOSING SEQUENCE — ALL PATHS
+
+Send this after all sections are complete (or after SKIP):
+
+  "{pet_name}'s full profile is ready! Here is the dashboard we created
+  — with the photo.
+
+  {pet_name} | {breed} | {sex} | {age}
+
+  HEALTH
+  {health_summary}
+
+  NUTRITION
+  {nutrition_summary}
+
+  HYGIENE
+  {grooming_summary}
+
+  🔗 View {pet_name}'s full dashboard: petcircle.app/dashboard/{pet_name_slug}
+
+  I will remind you for every care item — vaccinations, deworming, flea
+  treatment, grooming, and more.
+
+  You can ask me any pet care question here, anytime — trusted advice is
+  just a message away. Type HELP to see what I can do."
+
+CRITICAL: NEVER close with a plain text summary only. Always include:
+  - The dashboard link: petcircle.app/dashboard/{pet_name_lowercased}
+  - The care reminder commitment
+  - The invitation to ask pet care questions
+Note: After calling complete_onboarding the system will provide the actual
+dashboard link. Use it directly in your closing message.
+
+
+## DATA COLLECTION RULES
+
+- Never repeat a question already answered earlier in the conversation
+- Always use the pet's name — never "your pet" or "it"
+- Infer safely: if the user said "Bruno, dog" do not ask species again
+- If the user says "not sure" or "skip", accept it and move on without pushing
+- Store all collected data using the available tools the moment it is provided
 - Species: only "dog" or "cat". Politely clarify if the user says something else.
-- Dates: accept any format (15/03/2022, March 15 2022, 3 years ago, etc.) and convert to YYYY-MM-DD before storing.
+- Dates: accept any format (15/03/2022, March 15 2022, 3 years ago, etc.)
+  and convert to YYYY-MM-DD before storing.
 - Weight: 0.1 to 200 kg. If it seems very unusual, ask once to confirm.
 - Gender: store as "male" or "female" only.
 - Pincode: exactly 6 digits.
 - India context: accept Hindi affirmations like "haan"/"ha" as yes, "nahi"/"na" as no.
+- After onboarding is complete, answer any pet care question warmly and helpfully
 
-FLOW:
-- After collecting mandatory fields and giving the user a reasonable opportunity to share optional details, call complete_onboarding.
-- If a pet photo was uploaded, the AI has already detected species/breed — confirm with the user before storing.
-- After calling complete_onboarding, tell the user they can now upload pet health records (vaccination cards, prescriptions, lab reports) — up to 5 files (JPEG, PNG, or PDF, max 10 MB each). They have 5 minutes, or they can type "skip".
+
+## COMMANDS — RECOGNISE AT ANY POINT
+
+HELP    → List available commands and invite the user to ask any pet care question
+SKIP    → Skip the current question or section; save what is collected; move forward
+UPDATE  → Re-open the profile for editing; ask which field they want to change
+RESTART → Clear session and start onboarding from Step 1
+
+
+## EDGE CASES
+
+- Unexpected message mid-flow: acknowledge briefly and warmly, return to current step
+- Pet care question mid-onboarding: answer it briefly, then say
+  "Now, back to getting {pet_name} set up —" and resume
+- Multiple files sent at once: process all together in a single extraction pass
+- Records in a foreign language: extract what you can, note what was unclear,
+  ask for the specific missing fields only
+- User skips everything: save whatever data was collected; still send the
+  full closing sequence with the dashboard link
+- Breed not detectable from photo: "I couldn't quite make out the breed from
+  the photo — could you tell me? Any guess is fine!"
+- No photo and no breed offered: record breed as unknown and continue;
+  do not block progress on missing breed
 """
+
+
+def _build_system_prompt(session: "AgentOnboardingSession") -> str:
+    """
+    Build the system prompt for the current turn by injecting current session
+    state at the top of the base prompt.
+
+    The AI has no memory between calls — the session state JSON tells it
+    exactly what has been collected so far so it never re-asks answered questions.
+    """
+    state = _build_session_state_for_prompt(session)
+    state_json = json.dumps(state, indent=2, default=str)
+    return f"## CURRENT SESSION STATE\n{state_json}\n\n{_BASE_SYSTEM_PROMPT}"
+
+
+def _build_session_state_for_prompt(session: "AgentOnboardingSession") -> dict:
+    """
+    Flatten collected_data into the canonical session-state schema the
+    system prompt references. Returns a dict the AI can read to understand
+    what it still needs to collect.
+    """
+    cd = session.collected_data
+    user = cd.get("user", {})
+    pet = cd.get("pet", {})
+    health = cd.get("health", {})
+    diet = cd.get("diet", {})
+    grooming = cd.get("grooming", [])
+
+    return {
+        "parent_name": user.get("full_name", ""),
+        "pet_name": pet.get("name", ""),
+        "species": pet.get("species", ""),
+        "breed": pet.get("breed", ""),
+        "sex": pet.get("gender", "unknown"),
+        "dob": pet.get("dob", ""),
+        "photo_url": pet.get("photo_path", ""),
+        "path": cd.get("path", ""),
+        "current_step": cd.get("current_step", "entry"),
+        "health": {
+            "vaccines": health.get("vaccines", ""),
+            "deworming": health.get("deworming", ""),
+            "flea_tick": health.get("flea_tick", ""),
+            "blood_tests": health.get("blood_tests", ""),
+            "allergies_medications": health.get("allergies_medications", ""),
+        },
+        "nutrition": {
+            "packaged": diet.get("packaged", []),
+            "homemade": diet.get("homemade", []),
+            "supplements": diet.get("supplements", []),
+        },
+        "grooming": grooming,
+        "records_shared": cd.get("records_shared", False),
+        "nudge_sent": cd.get("nudge_sent", False),
+        "onboarding_complete": cd.get("onboarding_complete", False),
+    }
+
 
 # ---------------------------------------------------------------------------
 # Tool definitions
@@ -196,6 +460,52 @@ _ONBOARDING_TOOLS = [
                     "dob":      {"type": "string", "description": "YYYY-MM-DD"},
                     "weight":   {"type": "number", "description": "Weight in kg"},
                     "neutered": {"type": "boolean"},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_health_records",
+            "description": (
+                "Store health information the user provides — vaccines, deworming, "
+                "flea/tick prevention, blood tests, allergies or ongoing medications. "
+                "Call this as soon as the user provides any of these in Path A, or "
+                "when document extraction results are available in Path B. "
+                "All fields are optional — only pass what was provided or extracted. "
+                "Use source='document_extraction' when data came from an uploaded file, "
+                "'user_input' when the user typed it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "vaccines": {
+                        "type": "string",
+                        "description": "Vaccine date(s) and type(s), e.g. 'Rabies Oct 2024, DHPPiL Oct 2024'",
+                    },
+                    "deworming": {
+                        "type": "string",
+                        "description": "Last deworming date and product if known",
+                    },
+                    "flea_tick": {
+                        "type": "string",
+                        "description": "Flea/tick prevention product and last dose date",
+                    },
+                    "blood_tests": {
+                        "type": "string",
+                        "description": "Blood test date and key findings",
+                    },
+                    "allergies_medications": {
+                        "type": "string",
+                        "description": "Known allergies and/or ongoing medications",
+                    },
+                    "source": {
+                        "type": "string",
+                        "enum": ["user_input", "document_extraction"],
+                        "description": "How this data was obtained",
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -288,8 +598,10 @@ _ONBOARDING_TOOLS = [
             "description": (
                 "Call this when you have collected the user's name, the pet's name, "
                 "and the pet's species (mandatory), AND the user has had a chance to "
-                "share optional details. This triggers all DB writes. "
-                "Do NOT call this before mandatory fields are confirmed."
+                "share health, nutrition, and grooming details (or explicitly skipped). "
+                "This triggers all DB writes and generates the dashboard link. "
+                "Do NOT call this before mandatory fields are confirmed. "
+                "Do NOT call this before the nutrition and grooming rounds are complete."
             ),
             "parameters": {
                 "type": "object",
@@ -310,12 +622,27 @@ _ONBOARDING_TOOLS = [
 # Session management
 # ---------------------------------------------------------------------------
 
+_EMPTY_COLLECTED_DATA = {
+    "user": {},
+    "pet": {},
+    "path": "",
+    "current_step": "entry",
+    "health": {},
+    "diet": {"packaged": [], "homemade": [], "supplements": []},
+    "grooming": [],
+    "records_shared": False,
+    "nudge_sent": False,
+    "onboarding_complete": False,
+}
+
 
 def _get_or_create_session(db: Session, user: User) -> AgentOnboardingSession:
     """
     Load the active agentic session for the user, or create a new one.
 
-    A new session starts with the system prompt as the first message.
+    session.messages stores only non-system turns (user / assistant / tool).
+    The system message is rebuilt dynamically on each API call so it always
+    reflects the latest collected_data.
     """
     session = (
         db.query(AgentOnboardingSession)
@@ -326,10 +653,11 @@ def _get_or_create_session(db: Session, user: User) -> AgentOnboardingSession:
         .first()
     )
     if session is None:
+        import copy
         session = AgentOnboardingSession(
             user_id=user.id,
-            messages=[{"role": "system", "content": _SYSTEM_PROMPT}],
-            collected_data={},
+            messages=[],
+            collected_data=copy.deepcopy(_EMPTY_COLLECTED_DATA),
             is_complete=False,
         )
         db.add(session)
@@ -417,7 +745,8 @@ async def _preprocess_pet_photo(
         return (
             f"[System: User sent a pet photo. "
             f"AI detected: species={species_str}, breed={breed_str}. "
-            f"Photo saved. Please confirm these details with the user before storing.]"
+            f"Photo saved. Please confirm these details with the user before storing. "
+            f"CRITICAL: Use gender-neutral language (they/them) until sex is confirmed.]"
         )
 
     except Exception as e:
@@ -425,20 +754,204 @@ async def _preprocess_pet_photo(
         return "[System: Photo processing failed. Continue without photo.]"
 
 
+async def _preprocess_health_document(
+    user: User,
+    session: AgentOnboardingSession,
+    message_data: dict,
+) -> str:
+    """
+    Download a vet record document sent during Path B, run GPT extraction,
+    and return a rich context string the LLM uses to surface findings and
+    ask only for missing gaps.
+
+    Does NOT write to the DB — the LLM calls add_health_records after
+    confirming findings with the user.
+    """
+    from app.services.whatsapp_sender import download_whatsapp_media
+
+    media_id = message_data.get("media_id")
+    mime_type = message_data.get("mime_type", "")
+
+    if not media_id:
+        return (
+            "[System: User sent a document but no media_id found. "
+            "Ask them to send the file again.]"
+        )
+
+    try:
+        media_result = await download_whatsapp_media(media_id)
+        if not media_result:
+            return (
+                "[System: Document download failed. Ask the user to resend. "
+                "Continue with guided questions if they cannot.]"
+            )
+
+        file_bytes, detected_mime = media_result
+        effective_mime = mime_type or detected_mime
+
+        # Mark that records were shared regardless of extraction outcome
+        session.collected_data["records_shared"] = True
+
+        # Run GPT extraction
+        raw_json: str | None = None
+        try:
+            from app.services.gpt_extraction import (
+                _call_openai_extraction,
+                _call_openai_extraction_vision,
+            )
+
+            if effective_mime in ("image/jpeg", "image/png"):
+                from app.utils.file_reader import encode_image_base64
+                data_uri = encode_image_base64(file_bytes, effective_mime)
+                raw_json = await _call_openai_extraction_vision(data_uri)
+            else:
+                # PDF or unknown — try text extraction first
+                from app.utils.file_reader import extract_pdf_text
+                pdf_text = extract_pdf_text(file_bytes)
+                if pdf_text and len(pdf_text.strip()) > 20:
+                    raw_json = await _call_openai_extraction(
+                        f"Veterinary document text:\n\n{pdf_text}"
+                    )
+                else:
+                    # Scanned PDF — use vision
+                    from app.utils.file_reader import encode_image_base64
+                    data_uri = encode_image_base64(file_bytes, "image/jpeg")
+                    raw_json = await _call_openai_extraction_vision(data_uri)
+
+        except Exception as e:
+            logger.warning("GPT extraction during onboarding failed: %s", str(e))
+
+        if not raw_json:
+            return (
+                "[System: Document received but extraction failed. "
+                "Acknowledge receipt and ask the health questions manually (Path A style).]"
+            )
+
+        # Parse extraction results into human-readable summary for the LLM
+        findings = _summarise_extraction_for_onboarding(raw_json)
+        return (
+            f"[System: Document extracted successfully. Here are the findings:\n"
+            f"Vaccines: {findings['vaccines']}\n"
+            f"Deworming: {findings['deworming']}\n"
+            f"Flea and Tick: {findings['flea_tick']}\n"
+            f"Blood tests: {findings['blood_tests']}\n"
+            f"Other medications/allergies: {findings['allergies_medications']}\n"
+            f"Please surface these findings to the user using the exact format from Path B Step 2, "
+            f"then call add_health_records with source='document_extraction' for all found fields, "
+            f"and ask only for fields showing 'Not found in records'.]"
+        )
+
+    except Exception as e:
+        logger.error("Health document preprocessing failed: %s", str(e), exc_info=True)
+        return (
+            "[System: Document processing failed. Acknowledge receipt and "
+            "fall back to asking health questions manually.]"
+        )
+
+
+def _summarise_extraction_for_onboarding(raw_json: str) -> dict:
+    """
+    Parse GPT extraction JSON and return a flat summary dict keyed by
+    health category for injection into the LLM context.
+
+    Returns a dict with keys: vaccines, deworming, flea_tick, blood_tests,
+    allergies_medications. Each value is a human-readable string or
+    "Not found in records".
+    """
+    NOT_FOUND = "Not found in records"
+    summary = {
+        "vaccines": NOT_FOUND,
+        "deworming": NOT_FOUND,
+        "flea_tick": NOT_FOUND,
+        "blood_tests": NOT_FOUND,
+        "allergies_medications": NOT_FOUND,
+    }
+
+    try:
+        data = json.loads(raw_json)
+        # Handle both list and {"items": [...]} wrapper
+        items: list = []
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            items = data.get("items", data.get("records", []))
+            # Also check top-level keys if no items array
+            if not items and any(k in data for k in ("item_name", "date", "category")):
+                items = [data]
+
+        vaccine_parts = []
+        deworming_parts = []
+        flea_tick_parts = []
+        blood_test_parts = []
+        med_parts = []
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            name = (item.get("item_name") or item.get("name") or "").lower()
+            date_str = item.get("date") or item.get("last_done_date") or ""
+            medicine = item.get("medicine_name") or item.get("product") or ""
+            category = (item.get("category") or item.get("document_category") or "").lower()
+
+            label = item.get("item_name") or item.get("name") or ""
+            entry = f"{label} ({date_str})" if date_str else label
+
+            if any(kw in name for kw in ("vaccin", "rabies", "dhppil", "leptospira", "parvovirus", "distemper", "hepatitis", "bordetella")):
+                vaccine_parts.append(entry)
+            elif any(kw in name for kw in ("deworm", "deworming", "anthelmintic")):
+                part = f"{medicine} ({date_str})" if medicine and date_str else (medicine or entry)
+                deworming_parts.append(part)
+            elif any(kw in name for kw in ("flea", "tick", "nexgard", "bravecto", "frontline", "simparica")):
+                part = f"{medicine} ({date_str})" if medicine and date_str else (medicine or entry)
+                flea_tick_parts.append(part)
+            elif any(kw in name for kw in ("blood", "cbc", "chemistry", "haematology", "diagnostic", "test")):
+                blood_test_parts.append(entry)
+            else:
+                # Catch-all for medications / supplements
+                med_parts.append(entry)
+
+        if vaccine_parts:
+            summary["vaccines"] = ", ".join(vaccine_parts)
+        if deworming_parts:
+            summary["deworming"] = ", ".join(deworming_parts)
+        if flea_tick_parts:
+            summary["flea_tick"] = ", ".join(flea_tick_parts)
+        if blood_test_parts:
+            summary["blood_tests"] = ", ".join(blood_test_parts)
+        if med_parts:
+            summary["allergies_medications"] = ", ".join(med_parts)
+
+    except Exception as e:
+        logger.warning("Failed to summarise extraction JSON for onboarding: %s", str(e))
+
+    return summary
+
+
 # ---------------------------------------------------------------------------
 # OpenAI call
 # ---------------------------------------------------------------------------
 
 
-def _trim_messages(messages: list, max_turns: int = 10) -> list:
-    """Return system prompt + last max_turns non-system messages for the API call.
+def _trim_messages(
+    messages: list,
+    session: AgentOnboardingSession,
+    max_turns: int = 10,
+) -> list:
+    """
+    Build the message list for the OpenAI API call.
+
+    Prepends a freshly-built system message (with current session state
+    injected) so the LLM always knows exactly what has been collected.
 
     session.messages is NOT mutated — full history is still persisted to DB.
-    This only trims what is sent to OpenAI, preventing unbounded context growth.
+    Only the last max_turns non-system messages are sent to prevent unbounded
+    context growth.
     """
-    system_msgs = [m for m in messages if m.get("role") == "system"]
+    system_content = _build_system_prompt(session)
+    # Strip any stored system messages (backward compat with old sessions
+    # that may have stored the system prompt in messages[0])
     turn_msgs = [m for m in messages if m.get("role") != "system"]
-    return system_msgs + turn_msgs[-max_turns:]
+    return [{"role": "system", "content": system_content}] + turn_msgs[-max_turns:]
 
 
 async def _call_openai_with_tools(messages: list) -> object:
@@ -463,6 +976,153 @@ async def _call_openai_with_tools(messages: list) -> object:
 
 
 # ---------------------------------------------------------------------------
+# Health records → preventive records updater
+# ---------------------------------------------------------------------------
+
+
+def _update_preventive_records_from_health(
+    db: Session,
+    pet,
+    health: dict,
+) -> None:
+    """
+    After seeding empty preventive records, backfill last_done_date and
+    next_due_date for any health data collected during onboarding.
+
+    Matches collected health strings against preventive_master item_names
+    using keyword heuristics. Safe — never raises; logs on failure.
+
+    Args:
+        db:     SQLAlchemy session (already in a transaction).
+        pet:    The newly created Pet instance.
+        health: collected_data["health"] dict with string values.
+    """
+    from app.models.preventive_master import PreventiveMaster
+    from app.models.preventive_record import PreventiveRecord
+    from app.utils.date_utils import parse_date
+    from datetime import timedelta
+
+    if not health:
+        return
+
+    # Load all preventive records seeded for this pet, with their master items.
+    records = (
+        db.query(PreventiveRecord)
+        .join(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
+        .filter(PreventiveRecord.pet_id == pet.id)
+        .all()
+    )
+
+    # Build a lookup: normalised item_name → (record, master)
+    record_lookup: dict[str, tuple] = {}
+    for rec in records:
+        if rec.preventive_master:
+            key = rec.preventive_master.item_name.lower()
+            record_lookup[key] = (rec, rec.preventive_master)
+
+    def _try_update(keywords: list[str], raw_value: str, medicine: str | None = None) -> None:
+        """Find the best matching record and update its last_done_date."""
+        if not raw_value or not raw_value.strip():
+            return
+
+        # Find matching record by keyword
+        matched_rec = None
+        matched_master = None
+        for key, (rec, master) in record_lookup.items():
+            if any(kw in key for kw in keywords):
+                matched_rec = rec
+                matched_master = master
+                break
+
+        if matched_rec is None:
+            return
+
+        # Try to parse a date from the raw value
+        # Look for date-like substrings (YYYY-MM-DD, DD/MM/YYYY, "Oct 2024", etc.)
+        import re
+        date_candidates = re.findall(
+            r'\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4}|\d{2}-\d{2}-\d{4}|'
+            r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}|'
+            r'\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4}',
+            raw_value,
+            re.IGNORECASE,
+        )
+
+        parsed_date = None
+        for candidate in date_candidates:
+            try:
+                parsed_date = parse_date(candidate)
+                if parsed_date:
+                    break
+            except Exception:
+                continue
+
+        if parsed_date is None:
+            return
+
+        try:
+            matched_rec.last_done_date = parsed_date
+            if matched_master and matched_master.recurrence_days:
+                matched_rec.next_due_date = parsed_date + timedelta(
+                    days=matched_master.recurrence_days
+                )
+            if medicine:
+                matched_rec.medicine_name = medicine[:200]
+            # Recalculate status
+            from datetime import date as date_type
+            today = date_type.today()
+            if matched_rec.next_due_date:
+                days_until = (matched_rec.next_due_date - today).days
+                reminder_days = getattr(matched_master, "reminder_before_days", 14) or 14
+                if days_until < 0:
+                    matched_rec.status = "overdue"
+                elif days_until <= reminder_days:
+                    matched_rec.status = "upcoming"
+                else:
+                    matched_rec.status = "up_to_date"
+        except Exception as e:
+            logger.error(
+                "Failed to update preventive record for pet=%s item=%s: %s",
+                str(pet.id),
+                matched_master.item_name if matched_master else "unknown",
+                str(e),
+            )
+
+    # --- Vaccines ---
+    vaccine_str = health.get("vaccines", "")
+    if vaccine_str:
+        # Multiple vaccines may be listed; update the first matching record
+        _try_update(["vaccin", "rabies", "dhppil", "leptospira"], vaccine_str)
+
+    # --- Deworming ---
+    deworming_str = health.get("deworming", "")
+    if deworming_str:
+        # Extract medicine name heuristically (first word before a date)
+        import re
+        med_match = re.match(r'^([A-Za-z][A-Za-z\s\-]+?)(?:\s*[\(\d]|$)', deworming_str)
+        med_name = med_match.group(1).strip() if med_match else None
+        _try_update(["deworm"], deworming_str, medicine=med_name)
+
+    # --- Flea & Tick ---
+    flea_str = health.get("flea_tick", "")
+    if flea_str:
+        import re
+        med_match = re.match(r'^([A-Za-z][A-Za-z\s\-]+?)(?:\s*[\(\d]|$)', flea_str)
+        med_name = med_match.group(1).strip() if med_match else None
+        _try_update(["flea", "tick", "ectoparasit"], flea_str, medicine=med_name)
+
+    # Allergies/medications are logged but not written to preventive_records
+    # (they belong to the conditions/medications tables, handled post-onboarding).
+    allergies_str = health.get("allergies_medications", "")
+    if allergies_str:
+        logger.info(
+            "Onboarding health data — allergies/medications for pet=%s: %s",
+            str(pet.id),
+            allergies_str,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Finalization
 # ---------------------------------------------------------------------------
 
@@ -482,13 +1142,15 @@ async def _finalize_agentic_onboarding(
         4. Write diet items via diet_service.add_diet_item.
         5. Write grooming items via hygiene_service.add_hygiene_item.
         6. Seed preventive records.
-        7. Generate dashboard token.
-        8. Transition user to awaiting_documents with 5-min upload window.
-        9. Mark session complete.
+        7. Backfill preventive records with onboarding health data.
+        8. Generate dashboard token.
+        9. Transition user to awaiting_documents with 5-min upload window.
+        10. Mark session complete.
 
     Returns:
-        "__COMPLETE__" sentinel on success, or an error string if mandatory
-        fields are missing (model will ask again).
+        "__COMPLETE__::<dashboard_url>" sentinel on success (with the actual
+        dashboard URL appended so the model can include it in the closing message),
+        or an error string if mandatory fields are missing (model will ask again).
     """
     from app.models.pet import Pet
     from app.services.diet_service import add_diet_item
@@ -522,11 +1184,12 @@ async def _finalize_agentic_onboarding(
         if pet_count >= MAX_PETS_PER_USER:
             user.onboarding_state = "complete"
             session.is_complete = True
+            cd["onboarding_complete"] = True
             db.commit()
             logger.warning(
                 "Agentic onboarding: user %s already at max pets (%d)", str(user.id), MAX_PETS_PER_USER
             )
-            return "__COMPLETE__"
+            return "__COMPLETE__::petcircle.app/dashboard"
 
         # --- Parse DOB ---
         dob = None
@@ -590,9 +1253,20 @@ async def _finalize_agentic_onboarding(
         except Exception as e:
             logger.error("Preventive record seeding failed: %s", str(e))
 
+        # --- Backfill preventive records with onboarding health data ---
+        health = cd.get("health", {})
+        if health:
+            try:
+                _update_preventive_records_from_health(db, pet, health)
+            except Exception as e:
+                logger.error("Health record backfill failed: %s", str(e))
+
         # --- Generate dashboard token ---
+        dashboard_url = f"petcircle.app/dashboard/{pet.name.lower()}"
         try:
-            generate_dashboard_token(db, pet.id)
+            token = generate_dashboard_token(db, pet.id)
+            if token:
+                dashboard_url = f"petcircle.app/dashboard/{token}"
         except Exception as e:
             logger.error("Dashboard token generation failed: %s", str(e))
 
@@ -603,6 +1277,7 @@ async def _finalize_agentic_onboarding(
         )
 
         session.is_complete = True
+        cd["onboarding_complete"] = True
 
         db.commit()
 
@@ -612,7 +1287,7 @@ async def _finalize_agentic_onboarding(
             pet.name,
             pet.species,
         )
-        return "__COMPLETE__"
+        return f"__COMPLETE__::{dashboard_url}"
 
     except Exception as e:
         logger.error("Agentic finalization failed: %s", str(e), exc_info=True)
@@ -643,7 +1318,7 @@ async def _dispatch_tool_call(
 
     Returns:
         Result string to feed back as a tool role message.
-        "__COMPLETE__" sentinel when complete_onboarding succeeds.
+        "__COMPLETE__::<url>" sentinel when complete_onboarding succeeds.
     """
     try:
         args = json.loads(arguments_json or "{}")
@@ -665,6 +1340,16 @@ async def _dispatch_tool_call(
                 data[field] = args[field]
         return f"Stored pet info: {args}"
 
+    elif tool_name == "add_health_records":
+        health = session.collected_data.setdefault("health", {})
+        for field in ("vaccines", "deworming", "flea_tick", "blood_tests", "allergies_medications"):
+            if args.get(field):
+                health[field] = args[field]
+        # Advance current_step to health if still at entry
+        if session.collected_data.get("current_step") == "entry":
+            session.collected_data["current_step"] = "health"
+        return f"Stored health records: {args}"
+
     elif tool_name == "add_diet_items":
         diet = session.collected_data.setdefault(
             "diet", {"packaged": [], "homemade": [], "supplements": []}
@@ -675,6 +1360,9 @@ async def _dispatch_tool_call(
             diet.setdefault(bucket, []).append(
                 {"label": item["label"], "detail": item.get("detail", "")}
             )
+        # Advance step
+        if session.collected_data.get("current_step") in ("entry", "health"):
+            session.collected_data["current_step"] = "nutrition"
         return f"Stored {len(items)} diet item(s)."
 
     elif tool_name == "add_grooming_items":
@@ -684,6 +1372,8 @@ async def _dispatch_tool_call(
             grooming.append(
                 {"name": item["name"], "freq": item["freq"], "unit": item["unit"]}
             )
+        if session.collected_data.get("current_step") in ("entry", "health", "nutrition"):
+            session.collected_data["current_step"] = "grooming"
         return f"Stored {len(items)} grooming item(s)."
 
     elif tool_name == "set_pet_photo":
@@ -727,7 +1417,9 @@ async def _run_agent_loop(
     MAX_ITERATIONS = 5
 
     for iteration in range(MAX_ITERATIONS):
-        response = await _call_openai_with_tools(_trim_messages(session.messages))
+        response = await _call_openai_with_tools(
+            _trim_messages(session.messages, session)
+        )
         choice = response.choices[0]
         message = choice.message
 
@@ -753,13 +1445,18 @@ async def _run_agent_loop(
 
         # Execute each tool call
         completion_triggered = False
+        dashboard_url = "petcircle.app/dashboard"
         for tc in message.tool_calls:
             result = await _dispatch_tool_call(
                 db, user, session, tc.function.name, tc.function.arguments
             )
-            if result == "__COMPLETE__":
+            if result and result.startswith("__COMPLETE__::"):
                 completion_triggered = True
-                result = "Onboarding records written to database successfully."
+                dashboard_url = result.split("::", 1)[1] if "::" in result else dashboard_url
+                result = (
+                    f"Onboarding records written to database successfully. "
+                    f"Dashboard URL: {dashboard_url}"
+                )
 
             session.messages.append(
                 {
@@ -771,7 +1468,10 @@ async def _run_agent_loop(
 
         if completion_triggered:
             # Let the model produce the closing message to the user.
-            final_response = await _call_openai_with_tools(session.messages)
+            # Pass the full session messages (not trimmed) so it has all context.
+            final_response = await _call_openai_with_tools(
+                _trim_messages(session.messages, session)
+            )
             final_text = final_response.choices[0].message.content or ""
             session.messages.append({"role": "assistant", "content": final_text})
             return final_text
@@ -797,9 +1497,10 @@ async def handle_agentic_onboarding_step(
     Main entry point for agentic onboarding. Called from message_router.
 
     Handles all WhatsApp message types:
-    - text  → append to history, run agent loop
-    - image → download + vision AI, inject photo context, run agent loop
-    - document → acknowledge receipt, run agent loop
+    - text     → append to history, run agent loop
+    - image    → if during entry/photo step: pet photo preprocessing + agent loop
+                 if during Path B: treat as vet record image, run health extraction
+    - document → Path B health document extraction + agent loop
 
     Args:
         db:           SQLAlchemy session.
@@ -814,13 +1515,29 @@ async def handle_agentic_onboarding_step(
 
     # --- Preprocess media before building the user turn ---
     injected_context: str | None = None
+    cd = session.collected_data
 
     if msg_type == "image":
-        injected_context = await _preprocess_pet_photo(db, user, session, message_data)
+        current_step = cd.get("current_step", "entry")
+        path = cd.get("path", "")
+
+        # Determine whether this image is a pet photo or a vet record:
+        # - If we haven't collected pet info yet (entry step, no species) → pet photo
+        # - If path is B and health is not yet complete → treat as vet record image
+        pet_has_species = bool(cd.get("pet", {}).get("species"))
+        if not pet_has_species and current_step == "entry":
+            injected_context = await _preprocess_pet_photo(db, user, session, message_data)
+        elif path == "B" and not cd.get("health"):
+            # Vet record image sent during Path B
+            injected_context = await _preprocess_health_document(user, session, message_data)
+        else:
+            # Default: treat as pet photo (user may be adding one later)
+            injected_context = await _preprocess_pet_photo(db, user, session, message_data)
+
     elif msg_type == "document":
-        injected_context = (
-            "[System: User uploaded a document. Acknowledge receipt briefly and continue collection.]"
-        )
+        # All documents during onboarding are treated as vet records (Path B)
+        cd["path"] = "B"
+        injected_context = await _preprocess_health_document(user, session, message_data)
 
     # Build user-turn content
     text = (message_data.get("text") or "").strip()
