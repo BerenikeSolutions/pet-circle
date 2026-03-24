@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import type { DashboardData, ContactItem, DocumentItem, NutritionAnalysis, NudgeItem, BackendDietItem } from '@/lib/api';
-import { addContact, updateContact, deleteContact, getNutritionAnalysis, getNutritionImportance, getNudges, dismissNudge, uploadDocument, retryExtraction, deleteDocument, getDietItems, addToCart } from '@/lib/api';
+import { addContact, updateContact, deleteContact, getNutritionAnalysis, getNutritionImportance, dismissNudge, uploadDocument, retryExtraction, deleteDocument, getDietItems, addToCart } from '@/lib/api';
 import StatusBadge from '@/components/ui/StatusBadge';
 import CollapsibleCard from '@/components/ui/CollapsibleCard';
 import AddRow from '@/components/ui/AddRow';
@@ -21,6 +21,10 @@ interface OverviewTabProps {
   onCartClick: (itemId?: string) => void;
   onUpdated?: () => void;
   onRemindersClick?: () => void;
+  // Nudges are owned by DashboardClient (single source of truth).
+  // Do NOT call getNudges() here — pass nudges as props from the parent.
+  nudges: NudgeItem[];
+  onNudgesChange: (nudges: NudgeItem[]) => void;
 }
 
 const ROLE_LABELS: Record<string, string> = {
@@ -99,7 +103,7 @@ function inferDocCategory(doc: DocumentItem): string {
   return 'Other';
 }
 
-export default function OverviewTab({ data, token, onTabChange, onCartClick, onUpdated, onRemindersClick }: OverviewTabProps) {
+export default function OverviewTab({ data, token, onTabChange, onCartClick, onUpdated, onRemindersClick, nudges, onNudgesChange }: OverviewTabProps) {
   const [contactSheet, setContactSheet] = useState(false);
   const [editContact, setEditContact] = useState<ContactItem | null>(null);
   const [contactForm, setContactForm] = useState({ type: 'Vet', name: '', clinic: '', phone: '', note: '' });
@@ -107,20 +111,19 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
   const [nutritionData, setNutritionData] = useState<NutritionAnalysis | null>(null);
   const [dietItems, setDietItems] = useState<BackendDietItem[]>([]);
   const [nutritionImportanceNote, setNutritionImportanceNote] = useState<string>('');
-  const [nudges, setNudges] = useState<NudgeItem[]>([]);
   const [dismissingNudge, setDismissingNudge] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [viewingDoc, setViewingDoc] = useState<DocumentItem | null>(null);
   const [retryingDoc, setRetryingDoc] = useState<string | null>(null);
   const [deletingDoc, setDeletingDoc] = useState<string | null>(null);
 
-  // Fetch nutrition analysis, diet items, nudges, and importance note on mount
+  // Fetch nutrition analysis, diet items, and importance note on mount.
+  // Nudges are NOT fetched here — they come from DashboardClient via props.
   useEffect(() => {
     getNutritionAnalysis(token).then(setNutritionData).catch(() => {});
     getDietItems(token).then(setDietItems).catch(() => {});
-    getNudges(token).then(setNudges).catch(() => {});
     getNutritionImportance(token).then(r => setNutritionImportanceNote(r.note)).catch(() => {});
-}, [token]);
+  }, [token]);
 
   // Lock body scroll when document viewer is open
   useEffect(() => {
@@ -136,13 +139,13 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
     setDismissingNudge(nudgeId);
     try {
       await dismissNudge(token, nudgeId);
-      setNudges(prev => prev.filter(n => n.id !== nudgeId));
+      onNudgesChange(nudges.filter(n => n.id !== nudgeId));
     } catch {
       // ignore
     } finally {
       setDismissingNudge(null);
     }
-  }, [token]);
+  }, [token, nudges, onNudgesChange]);
 
   const handleUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];

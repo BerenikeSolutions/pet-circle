@@ -28,10 +28,22 @@ function DashboardInner({ token }: { token: string }) {
   const [cachedAt, setCachedAt] = useState<string | undefined>();
   const [retryCount, setRetryCount] = useState(0);
   const [activeTab, setActiveTab] = useState("overview");
+  // visitedTabs: tracks which tabs have been mounted at least once.
+  // Used by the lazy-init guard — see TAB RENDERING comment below.
+  const [visitedTabs, setVisitedTabs] = useState<Set<string>>(new Set(["overview"]));
   const [pinnedCartItem, setPinnedCartItem] = useState<string | null>(null);
   const [showReminders, setShowReminders] = useState(false);
   const [showNudges, setShowNudges] = useState(false);
   const [nudges, setNudges] = useState<NudgeItem[]>([]);
+  // CART NAVIGATION ORIGIN
+  // showNudgesAfterCart tracks whether CartView was opened from NudgesView.
+  // When true, Back in CartView returns to NudgesView instead of the main tab.
+  // Always set this flag (true/false) when calling setPinnedCartItem — never leave it stale.
+  const [showNudgesAfterCart, setShowNudgesAfterCart] = useState(false);
+  // NUDGE LOADING STATES — drive loading/error UI in NudgesView.
+  // Never use plain .catch(() => {}) for nudge fetches — nudgesError drives the retry button.
+  const [nudgesLoading, setNudgesLoading] = useState(false);
+  const [nudgesError, setNudgesError] = useState(false);
   const [isOnline, setIsOnline] = useState(
     typeof navigator !== "undefined" ? navigator.onLine : true
   );
@@ -76,9 +88,31 @@ function DashboardInner({ token }: { token: string }) {
     }
   }, [token]);
 
+  // NUDGE SINGLE SOURCE OF TRUTH
+  // loadNudges() is the only place getNudges() should be called.
+  // OverviewTab receives nudges as a prop — it must NOT call getNudges() itself.
+  // If you add a new component that needs nudges, pass them as props from here.
+  /**
+   * Fetches nudges for this dashboard. Sets nudgesLoading/nudgesError states.
+   * Called on mount and each time the action plan panel is opened.
+   * MUST NOT silently swallow errors — nudgesError drives the retry UI in NudgesView.
+   */
+  const loadNudges = useCallback(async () => {
+    setNudgesLoading(true);
+    setNudgesError(false);
+    try {
+      const result = await getNudges(token);
+      setNudges(result);
+    } catch {
+      setNudgesError(true);
+    } finally {
+      setNudgesLoading(false);
+    }
+  }, [token]);
+
   useEffect(() => {
     load();
-    getNudges(token).then(setNudges).catch(() => {});
+    loadNudges();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token]);
 
@@ -93,6 +127,18 @@ function DashboardInner({ token }: { token: string }) {
     }, backoffMs);
     return () => clearTimeout(timer);
   }, [stale, retryCount, load]);
+
+  // TAB CHANGE HANDLER — registers first-visit in visitedTabs.
+  // Required by the lazy-init guard in the tab rendering block below.
+  const handleTabChange = useCallback((tab: string) => {
+    setActiveTab(tab);
+    setVisitedTabs((prev) => {
+      if (prev.has(tab)) return prev;
+      const next = new Set(prev);
+      next.add(tab);
+      return next;
+    });
+  }, []);
 
   // Offline with no cached data
   if (!isOnline && !data && !loading) {
@@ -156,9 +202,28 @@ function DashboardInner({ token }: { token: string }) {
 
   const overdueCount = countOverdue(data.preventive_records || []);
 
-  // Cart view
+  // FLASH FAB — UNIFIED SIGNAL
+  // hasActions controls BOTH the FAB (⚡ button) AND informs the header's Actions Due badge.
+  // Never use nudges.length alone for FAB visibility — it will hide the button when the nudge
+  // API fails while overdue preventive records still exist. Always derive from hasActions.
+  const hasActions = nudges.length > 0 || overdueCount > 0;
+
+  // Cart view — onBack returns to NudgesView when that's where the user came from
   if (pinnedCartItem !== null) {
-    return <CartView data={data} token={token} pinnedItemId={pinnedCartItem || undefined} onBack={() => setPinnedCartItem(null)} />;
+    return (
+      <CartView
+        data={data}
+        token={token}
+        pinnedItemId={pinnedCartItem || undefined}
+        onBack={() => {
+          setPinnedCartItem(null);
+          if (showNudgesAfterCart) {
+            setShowNudgesAfterCart(false);
+            setShowNudges(true);
+          }
+        }}
+      />
+    );
   }
 
   if (showReminders) {
@@ -172,9 +237,18 @@ function DashboardInner({ token }: { token: string }) {
         nudges={nudges}
         token={token}
         onBack={() => setShowNudges(false)}
-        onCartClick={(itemId?: string) => { setShowNudges(false); setPinnedCartItem(itemId ?? ''); }}
+        onCartClick={(itemId?: string) => {
+          // CART NAVIGATION ORIGIN — record that we came from NudgesView
+          setShowNudgesAfterCart(true);
+          setShowNudges(false);
+          setPinnedCartItem(itemId ?? '');
+        }}
         onRemindersClick={() => { setShowNudges(false); setShowReminders(true); }}
         onNudgesChange={setNudges}
+        nudgesLoading={nudgesLoading}
+        nudgesError={nudgesError}
+        onRetryNudges={loadNudges}
+        overdueCount={overdueCount}
       />
     );
   }
@@ -224,12 +298,12 @@ function DashboardInner({ token }: { token: string }) {
         owner={data.owner}
         overdueCount={overdueCount}
         healthScore={data.health_score}
-        onCartClick={(itemId?: string) => setPinnedCartItem(itemId ?? '')}
-        onActionsClick={() => setShowNudges(true)}
+        onCartClick={(itemId?: string) => { setShowNudgesAfterCart(false); setPinnedCartItem(itemId ?? ''); }}
+        onActionsClick={() => { setShowNudges(true); loadNudges(); }}
       />
 
       {/* Tab Bar — hidden when offline */}
-      {isOnline && <DashboardTabBar activeTab={activeTab} onTabChange={setActiveTab} />}
+      {isOnline && <DashboardTabBar activeTab={activeTab} onTabChange={handleTabChange} />}
 
       {/* Offline placeholder */}
       {!isOnline && (
@@ -249,58 +323,80 @@ function DashboardInner({ token }: { token: string }) {
         </div>
       )}
 
-      {/* Tab Content — hidden when offline */}
+      {/*
+        TAB RENDERING — DO NOT CHANGE TO CONDITIONAL UNMOUNTING
+        -------------------------------------------------------
+        All tabs use CSS display:none + lazy-init (visitedTabs set) to stay mounted after first visit.
+        Switching to `{activeTab === 'x' && <Tab />}` would unmount/remount tabs on every switch,
+        causing every useEffect + API call to fire again → visible loading on every tab switch.
+        Rule: tabs mount ONCE (on first visit) and stay alive via display:none from that point on.
+      */}
       {isOnline && (
-      <div className="max-w-[430px] mx-auto p-4 pb-24">
-        {activeTab === 'overview' && (
-          <OverviewTab
-            data={data}
-            token={token}
-            onTabChange={setActiveTab}
-            onCartClick={(itemId?: string) => setPinnedCartItem(itemId ?? '')}
-            onUpdated={load}
-            onRemindersClick={() => setShowReminders(true)}
-          />
-        )}
-        {activeTab === 'medical' && (
-          <HealthTab
-            data={data}
-            token={token}
-            onUpdated={load}
-            onCartClick={(itemId?: string) => setPinnedCartItem(itemId ?? '')}
-          />
-        )}
-        {activeTab === 'grooming' && (
-          <HygieneTab
-            data={data}
-            token={token}
-            onUpdated={load}
-            onCartClick={(itemId?: string) => setPinnedCartItem(itemId ?? '')}
-          />
-        )}
-        {activeTab === 'nutrition' && (
-          <NutritionTab
-            data={data}
-            token={token}
-            onCartClick={(itemId?: string) => setPinnedCartItem(itemId ?? '')}
-          />
-        )}
-        {activeTab === 'conditions' && (
-          <ConditionsTab data={data} token={token} onCartClick={(itemId?: string) => setPinnedCartItem(itemId ?? '')} />
-        )}
-      </div>
+        <div className="max-w-[430px] mx-auto p-4 pb-24">
+          {/* Overview always mounts first (default tab) */}
+          <div style={{ display: activeTab === 'overview' ? 'block' : 'none' }}>
+            <OverviewTab
+              data={data}
+              token={token}
+              nudges={nudges}
+              onNudgesChange={setNudges}
+              onTabChange={handleTabChange}
+              onCartClick={(itemId?: string) => { setShowNudgesAfterCart(false); setPinnedCartItem(itemId ?? ''); }}
+              onUpdated={load}
+              onRemindersClick={() => setShowReminders(true)}
+            />
+          </div>
+          <div style={{ display: activeTab === 'medical' ? 'block' : 'none' }}>
+            {visitedTabs.has('medical') && (
+              <HealthTab
+                data={data}
+                token={token}
+                onUpdated={load}
+                onCartClick={(itemId?: string) => { setShowNudgesAfterCart(false); setPinnedCartItem(itemId ?? ''); }}
+              />
+            )}
+          </div>
+          <div style={{ display: activeTab === 'grooming' ? 'block' : 'none' }}>
+            {visitedTabs.has('grooming') && (
+              <HygieneTab
+                data={data}
+                token={token}
+                onUpdated={load}
+                onCartClick={(itemId?: string) => { setShowNudgesAfterCart(false); setPinnedCartItem(itemId ?? ''); }}
+              />
+            )}
+          </div>
+          <div style={{ display: activeTab === 'nutrition' ? 'block' : 'none' }}>
+            {visitedTabs.has('nutrition') && (
+              <NutritionTab
+                data={data}
+                token={token}
+                onCartClick={(itemId?: string) => { setShowNudgesAfterCart(false); setPinnedCartItem(itemId ?? ''); }}
+              />
+            )}
+          </div>
+          <div style={{ display: activeTab === 'conditions' ? 'block' : 'none' }}>
+            {visitedTabs.has('conditions') && (
+              <ConditionsTab
+                data={data}
+                token={token}
+                onCartClick={(itemId?: string) => { setShowNudgesAfterCart(false); setPinnedCartItem(itemId ?? ''); }}
+              />
+            )}
+          </div>
+        </div>
       )}
 
       {/* FAB — Nudges (hidden when offline) */}
-      {isOnline && nudges.length > 0 && (
+      {isOnline && hasActions && (
         <button
-          onClick={() => setShowNudges(true)}
+          onClick={() => { setShowNudges(true); loadNudges(); }}
           className="fixed bottom-6 right-6 z-40 w-14 h-14 rounded-full shadow-lg flex items-center justify-center text-white text-xl"
           style={{ background: 'var(--brand-gradient)' }}
         >
           ⚡
           <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center">
-            {nudges.length}
+            {nudges.length > 0 ? nudges.length : overdueCount}
           </span>
         </button>
       )}
