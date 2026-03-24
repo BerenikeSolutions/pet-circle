@@ -379,6 +379,7 @@ def _build_session_state_for_prompt(session: "AgentOnboardingSession") -> dict:
     grooming = cd.get("grooming", [])
 
     return {
+        "whatsapp_name": user.get("whatsapp_name", ""),
         "parent_name": user.get("full_name", ""),
         "pet_name": pet.get("name", ""),
         "species": pet.get("species", ""),
@@ -1123,6 +1124,28 @@ def _update_preventive_records_from_health(
 
 
 # ---------------------------------------------------------------------------
+# OG image URL builder
+# ---------------------------------------------------------------------------
+
+
+def _build_og_image_url(dashboard_token: str) -> str | None:
+    """
+    Build the Next.js /api/og URL for the dashboard snapshot card.
+
+    The frontend Edge Function at /api/og?token=<token> calls the backend
+    GET /dashboard/{token} endpoint to fetch live pet data and renders a
+    branded PNG card with the pet's health, nutrition, and hygiene summary.
+
+    Returns None if FRONTEND_URL is not set in settings.
+    """
+    from app.config import settings
+    frontend = getattr(settings, "FRONTEND_URL", "") or ""
+    if not frontend or not dashboard_token:
+        return None
+    return f"{frontend}/api/og?token={dashboard_token}"
+
+
+# ---------------------------------------------------------------------------
 # Finalization
 # ---------------------------------------------------------------------------
 
@@ -1263,12 +1286,20 @@ async def _finalize_agentic_onboarding(
 
         # --- Generate dashboard token ---
         dashboard_url = f"petcircle.app/dashboard/{pet.name.lower()}"
+        token = None
         try:
             token = generate_dashboard_token(db, pet.id)
             if token:
                 dashboard_url = f"petcircle.app/dashboard/{token}"
         except Exception as e:
             logger.error("Dashboard token generation failed: %s", str(e))
+
+        # --- Build and store dashboard snapshot (OG image) URL ---
+        # The Next.js /api/og?token=<token> edge function fetches live pet
+        # data and renders a branded card PNG — sent as the WhatsApp image card.
+        og_url = _build_og_image_url(token or "")
+        if og_url:
+            cd["og_image_url"] = og_url
 
         # --- Transition to awaiting_documents ---
         user.onboarding_state = "awaiting_documents"
@@ -1513,9 +1544,26 @@ async def handle_agentic_onboarding_step(
 
     session = _get_or_create_session(db, user)
 
+    # --- Seed WhatsApp profile name on first turn (Gap 1 fix) ---
+    # The webhook provides the user's WhatsApp display name in message_data.
+    # Store it in collected_data so the LLM knows it from the first message.
+    cd = session.collected_data
+    if not cd.get("user", {}).get("whatsapp_name"):
+        profile_name = message_data.get("profile_name") or ""
+        if profile_name:
+            cd.setdefault("user", {})["whatsapp_name"] = profile_name
+
+    # --- Path A detection (Gap 2 fix) ---
+    # If the user replies "1" and no path is set yet, record Path A immediately
+    # before the agent loop runs so the session state JSON reflects it.
+    text_preview = (message_data.get("text") or "").strip()
+    if text_preview == "1" and not cd.get("path"):
+        cd["path"] = "A"
+    elif text_preview == "2" and not cd.get("path"):
+        cd["path"] = "B"
+
     # --- Preprocess media before building the user turn ---
     injected_context: str | None = None
-    cd = session.collected_data
 
     if msg_type == "image":
         current_step = cd.get("current_step", "entry")
@@ -1562,6 +1610,121 @@ async def handle_agentic_onboarding_step(
     # --- Persist session ---
     _save_session(db, session)
 
-    # --- Send reply ---
+    # --- Send dashboard image card on onboarding completion (Gap 3) ---
+    # If complete_onboarding just fired this turn, og_image_url will be set.
+    # Send the image card first, then the text closing message follows.
+    if cd.get("onboarding_complete") and mobile:
+        og_url = cd.get("og_image_url")
+        if og_url:
+            pet_name = cd.get("pet", {}).get("name", "")
+            try:
+                from app.services.whatsapp_sender import send_image_message
+                await send_image_message(
+                    db, mobile, og_url,
+                    caption=f"{pet_name}'s dashboard is ready!",
+                )
+            except Exception as e:
+                logger.warning("Failed to send dashboard image card: %s", str(e))
+
+    # --- Send text reply ---
     if reply_text and mobile:
         await send_fn(db, mobile, reply_text)
+
+
+# ---------------------------------------------------------------------------
+# Grooming nudge runner (Gap 4)
+# ---------------------------------------------------------------------------
+
+
+async def run_grooming_nudges(db: Session) -> dict:
+    """
+    Find onboarding sessions that have been stuck at the grooming step for
+    30+ minutes with no nudge sent yet, and dispatch one nudge per session.
+
+    Called by POST /internal/run-grooming-nudges (GitHub Actions cron,
+    every 15 minutes). Safe to call repeatedly — the nudge_sent flag
+    prevents duplicates.
+
+    Returns:
+        Dict with keys: checked, nudges_sent, errors.
+    """
+    from datetime import timedelta
+    from sqlalchemy import text as sa_text
+    from app.models.user import User
+    from app.core.encryption import decrypt_field
+    from app.services.whatsapp_sender import send_text_message
+
+    NUDGE_AFTER_MINUTES = 30
+    cutoff = datetime.utcnow() - timedelta(minutes=NUDGE_AFTER_MINUTES)
+
+    checked = 0
+    nudges_sent = 0
+    errors = 0
+
+    try:
+        sessions = (
+            db.query(AgentOnboardingSession)
+            .filter(
+                AgentOnboardingSession.is_complete == False,  # noqa: E712
+                sa_text("collected_data->>'current_step' = 'grooming'"),
+                # nudge_sent absent (NULL) or explicitly false — either way, not yet sent
+                sa_text(
+                    "(collected_data->>'nudge_sent') IS NULL "
+                    "OR (collected_data->>'nudge_sent') = 'false'"
+                ),
+                AgentOnboardingSession.updated_at < cutoff,
+            )
+            .all()
+        )
+    except Exception as e:
+        logger.error("Grooming nudge query failed: %s", str(e))
+        return {"checked": 0, "nudges_sent": 0, "errors": 1}
+
+    for session in sessions:
+        checked += 1
+        try:
+            user = db.query(User).filter(User.id == session.user_id).first()
+            if not user or user.is_deleted:
+                continue
+
+            mobile = decrypt_field(user.mobile)
+            if not mobile:
+                logger.warning(
+                    "Grooming nudge: could not decrypt mobile for user_id=%s", str(user.id)
+                )
+                continue
+
+            pet_name = session.collected_data.get("pet", {}).get("name") or "your pet"
+            nudge_text = (
+                f"Still here! 🐾 Just waiting on {pet_name}'s grooming details — "
+                f"take your time. Reply SKIP if you'd like to finish here and add this later."
+            )
+
+            await send_text_message(db, mobile, nudge_text)
+
+            # Mark nudge as sent so it is never repeated
+            session.collected_data["nudge_sent"] = True
+            flag_modified(session, "collected_data")
+            db.commit()
+
+            nudges_sent += 1
+            logger.info(
+                "Grooming nudge sent: user_id=%s, pet=%s", str(user.id), pet_name
+            )
+
+        except Exception as e:
+            errors += 1
+            logger.error(
+                "Grooming nudge failed for session_id=%s: %s",
+                str(session.id), str(e),
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+    logger.info(
+        "Grooming nudge run complete: checked=%d, sent=%d, errors=%d",
+        checked, nudges_sent, errors,
+    )
+    return {"checked": checked, "nudges_sent": nudges_sent, "errors": errors}

@@ -181,3 +181,26 @@ def execute_reminder_engine(db: Session = Depends(get_db)):
             "inactivity_nudges": inactivity_error,
         },
     }
+
+
+@router.post("/run-grooming-nudges")
+async def execute_grooming_nudges(db: Session = Depends(get_db)):
+    """
+    Send grooming nudges for agentic onboarding sessions that have been
+    stuck at the grooming step for 30+ minutes with no nudge sent yet.
+
+    Called by GitHub Actions cron every 15 minutes. Safe to call repeatedly
+    — the nudge_sent flag in collected_data prevents duplicates.
+
+    Returns:
+        Dict with checked, nudges_sent, and errors counts.
+    """
+    from app.services.agentic_onboarding import run_grooming_nudges
+
+    try:
+        results = await run_grooming_nudges(db)
+        logger.info("Grooming nudge run: %s", results)
+        return results
+    except Exception as e:
+        logger.error("Grooming nudge run failed: %s", str(e), exc_info=True)
+        return {"checked": 0, "nudges_sent": 0, "errors": 1}

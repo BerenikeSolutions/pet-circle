@@ -177,6 +177,51 @@ async def send_text_message(
     return result
 
 
+async def send_image_message(
+    db: Session,
+    to_number: str,
+    image_url: str,
+    caption: str = "",
+) -> dict | None:
+    """
+    Send a WhatsApp image message using a publicly accessible URL.
+
+    Used to send the dashboard snapshot card after onboarding completion.
+    The image is fetched by WhatsApp servers from image_url — the URL must
+    be publicly reachable (e.g. a Next.js /api/og edge route on Vercel).
+
+    Args:
+        db:         SQLAlchemy session (for logging).
+        to_number:  Recipient's WhatsApp phone number.
+        image_url:  Publicly accessible URL of the image to send.
+        caption:    Optional caption text displayed below the image.
+
+    Returns:
+        API response dict on success, None on failure.
+    """
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_number,
+        "type": "image",
+        "image": {"link": image_url, "caption": caption},
+    }
+
+    if not rate_limiter.check_rate_limit(to_number):
+        logger.warning("Outgoing rate limited (image) for %s", mask_phone(to_number))
+        return None
+
+    result = await _send_whatsapp_request(payload)
+
+    _log_outgoing_message(db, to_number, "image", payload)
+
+    if result:
+        logger.info("Image message sent to %s", mask_phone(to_number))
+    else:
+        logger.warning("Image message failed to %s", mask_phone(to_number))
+
+    return result
+
+
 async def send_template_message(
     db: Session,
     to_number: str,
