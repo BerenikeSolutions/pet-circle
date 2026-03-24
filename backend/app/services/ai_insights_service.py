@@ -386,7 +386,7 @@ async def get_or_generate_insight(
         db.execute(
             text("""
                 INSERT INTO pet_ai_insights (pet_id, insight_type, content_json, generated_at)
-                VALUES (:pet_id, :insight_type, :content_json::jsonb, NOW())
+                VALUES (:pet_id, :insight_type, CAST(:content_json AS jsonb), NOW())
                 ON CONFLICT (pet_id, insight_type)
                 DO UPDATE SET content_json = EXCLUDED.content_json,
                               generated_at = NOW()
@@ -498,7 +498,7 @@ async def get_or_generate_nutrition_importance(db: Session, pet_id: UUID) -> dic
         db.execute(
             text("""
                 INSERT INTO pet_ai_insights (pet_id, insight_type, content_json, generated_at)
-                VALUES (:pet_id, :insight_type, :content_json::jsonb, NOW())
+                VALUES (:pet_id, :insight_type, CAST(:content_json AS jsonb), NOW())
                 ON CONFLICT (pet_id, insight_type)
                 DO UPDATE SET content_json = EXCLUDED.content_json,
                               generated_at = NOW()
