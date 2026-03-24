@@ -337,6 +337,16 @@ export const FREQ_MODAL_OPTIONS: Record<string, number[]> = { day: [1, 2, 3], we
 export const VAX_FREQ_OPTS = [6, 9, 12, 18, 24];
 export const VAX_FREQ_LABELS: Record<number, string> = { 6: 'Every 6 months', 9: 'Every 9 months', 12: 'Yearly', 18: 'Every 18 months', 24: 'Every 2 years' };
 
+export function formatFrequency(days: number): string {
+  if (days >= 360) return 'Yearly';
+  if (days >= 175 && days <= 195) return 'Every 6 months';
+  if (days >= 85 && days <= 95) return 'Every 3 months';
+  if (days >= 28 && days <= 32) return 'Monthly';
+  if (days === 14) return 'Every 2 weeks';
+  if (days === 7) return 'Weekly';
+  return `Every ${days} days`;
+}
+
 export const DASHBOARD_TABS: [string, string][] = [
   ['overview', 'Overview'],
   ['medical', 'Health'],

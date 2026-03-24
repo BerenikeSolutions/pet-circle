@@ -268,11 +268,13 @@ def get_dashboard_data(db: Session, token: str) -> dict:
 
     reminder_data = []
     for reminder, record, master in reminders:
+        effective_recurrence = record.custom_recurrence_days or master.recurrence_days
         reminder_data.append({
             "item_name": master.item_name,
             "next_due_date": str(reminder.next_due_date),
             "status": reminder.status,
             "sent_at": str(reminder.sent_at) if reminder.sent_at else None,
+            "recurrence_days": effective_recurrence,
         })
 
     # --- Load documents (metadata only — no storage URLs) ---

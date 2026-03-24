@@ -58,6 +58,7 @@ export interface ReminderItem {
   next_due_date: string;
   status: string;
   sent_at: string | null;
+  recurrence_days: number;
 }
 
 export interface DocumentItem {

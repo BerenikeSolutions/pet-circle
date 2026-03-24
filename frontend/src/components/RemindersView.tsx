@@ -4,7 +4,7 @@ import { useState } from 'react';
 import type { DashboardData } from '@/lib/api';
 import {
   WA_REMINDER_COLORS, WA_REMINDER_BG, WA_REMINDER_LABELS,
-  REMINDER_EXPLAINER,
+  REMINDER_EXPLAINER, formatFrequency,
 } from '@/lib/dashboard-utils';
 
 interface RemindersViewProps {
@@ -34,6 +34,7 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
     title: r.title || r.item_name || 'Reminder',
     body: r.body || '',
     actions: r.actions || [],
+    recurrence_days: r.recurrence_days ?? 0,
   }));
 
   const filtered = filter === 'all'
@@ -157,9 +158,16 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
                   >
                     <div className="flex items-center gap-2.5 min-w-0">
                       <span className="text-lg shrink-0">{rem.icon || '🔔'}</span>
-                      <span className="text-xs font-semibold truncate" style={{ color }}>
-                        {rem.title}
-                      </span>
+                      <div className="min-w-0">
+                        <span className="text-xs font-semibold truncate block" style={{ color }}>
+                          {rem.title}
+                        </span>
+                        {rem.recurrence_days > 0 && (
+                          <span className="text-[9px] text-gray-400 block leading-tight">
+                            🔁 {formatFrequency(rem.recurrence_days)}
+                          </span>
+                        )}
+                      </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       <span
@@ -195,12 +203,17 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
                         </div>
                       )}
                       {/* Timing info */}
-                      <div className="mt-3 pt-2 border-t border-gray-100 flex items-center gap-1.5">
+                      <div className="mt-3 pt-2 border-t border-gray-100 flex items-center justify-between gap-1.5">
                         <span className="text-[10px] text-gray-400">
                           {rem.daysOut > 0 ? `${rem.daysOut} day${rem.daysOut !== 1 ? 's' : ''} from now` :
                            rem.daysOut === 0 ? 'Due today' :
                            `${Math.abs(rem.daysOut)} day${Math.abs(rem.daysOut) !== 1 ? 's' : ''} overdue`}
                         </span>
+                        {rem.recurrence_days > 0 && (
+                          <span className="text-[9px] font-semibold px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">
+                            🔁 {formatFrequency(rem.recurrence_days)}
+                          </span>
+                        )}
                       </div>
                     </div>
                   )}
