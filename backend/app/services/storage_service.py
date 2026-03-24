@@ -276,6 +276,56 @@ async def download_file(
     return await _download_supabase_raw(storage_path)
 
 
+async def _delete_from_gcp(storage_path: str) -> bool:
+    """
+    Delete a file from GCP Cloud Storage.
+
+    Args:
+        storage_path: Object path within the bucket.
+
+    Returns:
+        True on success, False on failure.
+    """
+    gcp_client = _get_gcp_client()
+    if gcp_client is None:
+        return False
+
+    bucket_name = settings.GCP_BUCKET_NAME
+
+    def _sync_gcp_delete():
+        bucket = gcp_client.bucket(bucket_name)
+        blob = bucket.blob(storage_path)
+        blob.delete()
+
+    try:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, _sync_gcp_delete)
+        logger.info("Deleted from GCP: path=%s", storage_path)
+        return True
+    except Exception as e:
+        logger.error("GCP delete failed: path=%s, error=%s", storage_path, str(e))
+        return False
+
+
+async def delete_file(storage_path: str, backend: str) -> bool:
+    """
+    Delete a document file from the appropriate storage backend.
+
+    Routes to GCP or Supabase based on the backend argument.
+    Never raises — returns False on failure so callers can proceed with DB cleanup.
+
+    Args:
+        storage_path: Object path within the bucket.
+        backend: 'gcp' or 'supabase'.
+
+    Returns:
+        True on success, False on failure.
+    """
+    if backend == "gcp":
+        return await _delete_from_gcp(storage_path)
+    return await delete_from_supabase(storage_path)
+
+
 async def delete_from_supabase(storage_path: str) -> bool:
     """
     Delete a file from Supabase storage bucket.

@@ -295,6 +295,7 @@ export function countOverdue(records: PreventiveRecord[]): number {
 
 export function getStatusForRecord(record: PreventiveRecord): string {
   if (record.status === 'cancelled') return 'cancelled';
+  if (!record.last_done_date) return 'missing';
   return record.status || deriveStatus(record.last_done_date, record.next_due_date);
 }
 

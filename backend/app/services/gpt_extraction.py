@@ -1533,41 +1533,46 @@ async def extract_and_process_document(
 
         # --- Non-pet document check ---
         # If GPT determined this is not a pet/veterinary document,
-        # mark as success (it was processed) but return early with message.
+        # mark as rejected with a reason so the dashboard can show the user why.
         if metadata["document_type"] == "not_pet_related":
             logger.info(
-                "Document classified as not pet-related: document_id=%s",
+                "Document classified as not pet-related: document_id=%s — marking rejected.",
                 str(document_id),
             )
-            document.extraction_status = "success"
-            db.commit()
-            results["errors"].append(
-                "This doesn't appear to be a pet/veterinary document. "
-                "Please upload veterinary records, vaccination certificates, "
-                "or prescription documents."
+            document.extraction_status = "rejected"
+            document.rejection_reason = (
+                "This document does not appear to be a pet or veterinary record. "
+                "Please upload vet records, vaccination certificates, lab reports, or prescriptions."
             )
+            db.commit()
+            results["document_type"] = "not_pet_related"
+            results["status"] = "rejected"
+            results["errors"].append(document.rejection_reason)
             return results
 
         # --- Pet name mismatch check ---
         # If GPT extracted a pet name from the document, verify it matches
-        # the registered pet name. If not, flag the document and skip extraction.
+        # the registered pet name. If not, reject and surface the reason.
         if extracted_pet_name and pet.name:
             if not _pet_name_matches_document_name(extracted_pet_name, pet.name):
                 logger.warning(
                     "Pet name mismatch: document says '%s', registered pet is '%s'. "
-                    "Flagging document %s — skipping extraction.",
+                    "Flagging document %s — marking rejected.",
                     extracted_pet_name,
                     pet.name,
                     str(document_id),
                 )
-                document.extraction_status = "failed"
-                db.commit()
-                results["status"] = "failed"
-                results["errors"].append(
-                    f"Pet name mismatch: document mentions '{extracted_pet_name}' "
-                    f"but this upload is for '{pet.name}'. "
-                    f"Please upload documents that belong to {pet.name}."
+                reason = (
+                    f"This document appears to be for '{extracted_pet_name}', "
+                    f"not for {pet.name}. Please upload documents that belong to {pet.name}."
                 )
+                document.extraction_status = "rejected"
+                document.rejection_reason = reason
+                db.commit()
+                results["document_type"] = "pet_name_mismatch"
+                results["status"] = "rejected"
+                results["pet_name"] = pet.name
+                results["errors"].append(reason)
                 return results
 
         if not extracted_items:

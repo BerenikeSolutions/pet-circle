@@ -1121,6 +1121,11 @@ async def _delayed_batch_extraction(
                         doc_label = doc.document_name or doc.file_path.split("/")[-1]
                         # Only show document name — no error details to the user.
                         failed_doc_names.append(doc_label)
+                    elif result.get("status") == "rejected":
+                        # Rejected docs (not pet-related or wrong pet name) are
+                        # shown on dashboard with reason; counted separately so they
+                        # don't inflate fail_count or trigger the failure-only message.
+                        pass
                     else:
                         last_result = result
                         success_count += 1
@@ -1510,19 +1515,31 @@ async def _send_batch_summary(
     """
     total = success_count + fail_count
 
-    # --- Check for non-pet document results ---
-    # If any result indicates a non-pet document, send a specific message.
-    not_pet_results = [
-        r for r in all_results
-        if r.get("document_type") == "not_pet_related"
-    ]
+    # --- Check for rejected documents (not pet-related or wrong pet name) ---
+    # Send one WhatsApp message per rejection type if any were found.
+    not_pet_results = [r for r in all_results if r.get("document_type") == "not_pet_related"]
+    mismatch_results = [r for r in all_results if r.get("document_type") == "pet_name_mismatch"]
+
     if not_pet_results:
-        not_pet_errors = []
-        for r in not_pet_results:
-            errs = [e for e in r.get("errors", []) if "pet/veterinary" in e]
-            not_pet_errors.extend(errs)
-        if not_pet_errors:
-            await send_text_message(db, from_number, not_pet_errors[0])
+        await send_text_message(
+            db, from_number,
+            "⚠️ One or more documents you sent don't appear to be pet or veterinary records "
+            "(e.g. a human medical report, invoice, or unrelated photo). "
+            "Please only upload vet records, vaccination certificates, lab reports, or prescriptions. "
+            "These documents have been removed from the dashboard."
+        )
+
+    if mismatch_results:
+        # Use the reason from the first mismatch result for a specific message.
+        reason = (mismatch_results[0].get("errors") or [""])[0]
+        msg = (
+            f"⚠️ A document you uploaded could not be added to *{mismatch_results[0].get('pet_name', 'your pet')}*'s records "
+            f"because it appears to belong to a different pet."
+        )
+        if reason:
+            msg += f"\n\n_{reason}_"
+        msg += "\n\nPlease upload documents that belong to this pet only."
+        await send_text_message(db, from_number, msg)
 
     if success_count == 0 and fail_count > 0:
         # Entire batch failed — one error message.

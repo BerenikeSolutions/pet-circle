@@ -281,7 +281,7 @@ def get_dashboard_data(db: Session, token: str) -> dict:
         db.query(Document)
         .filter(
             Document.pet_id == pet_id,
-            Document.extraction_status.in_(["pending", "success", "failed"]),
+            Document.extraction_status.in_(["pending", "success", "failed", "rejected"]),
         )
         .order_by(Document.created_at.desc())
         .all()
@@ -304,6 +304,7 @@ def get_dashboard_data(db: Session, token: str) -> dict:
             "hospital_name": doc.hospital_name,
             "mime_type": doc.mime_type,
             "extraction_status": doc.extraction_status,
+            "rejection_reason": doc.rejection_reason,
             "uploaded_at": str(doc.created_at) if doc.created_at else None,
             "event_date": str(doc.event_date) if doc.event_date else None,
         })

@@ -392,6 +392,55 @@ async def dashboard_retry_extraction(
         )
 
 
+@router.delete("/{token}/document/{document_id}")
+async def dashboard_delete_document(
+    token: str,
+    document_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Delete a document from the dashboard — removes from storage and DB.
+
+    Args:
+        token: Dashboard access token from URL path.
+        document_id: UUID of the document to delete.
+        db: SQLAlchemy database session (injected).
+
+    Returns:
+        { "deleted": true }
+
+    Raises:
+        HTTPException 404: If token invalid or document not found for this pet.
+    """
+    from app.models.document import Document
+    from app.services.storage_service import delete_file
+
+    try:
+        dt = validate_dashboard_token(db, token)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+
+    document = (
+        db.query(Document)
+        .filter(Document.id == document_id, Document.pet_id == dt.pet_id)
+        .first()
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found.")
+
+    # Delete from storage (best-effort — proceed with DB delete even if storage fails)
+    await delete_file(document.file_path, document.storage_backend or "supabase")
+
+    db.delete(document)
+    db.commit()
+    logger.info(
+        "Document deleted via dashboard: document_id=%s, pet_id=%s",
+        document_id,
+        str(dt.pet_id),
+    )
+    return {"deleted": True}
+
+
 @router.post("/{token}/upload-document")
 async def dashboard_upload_document(
     token: str,

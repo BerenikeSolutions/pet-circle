@@ -336,7 +336,7 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
             <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap', marginBottom: 3 }}>
               <span style={{ fontSize: 12, fontWeight: 600, color: '#1A1A1A' }}>{item.name}</span>
               {item.source === 'petcircle' ? (
-                <span style={{ background: '#FFF3EE', color: '#D44800', borderRadius: 20, padding: '1px 7px', fontSize: 9, fontWeight: 700 }}>🐾 PetCircle</span>
+                <span style={{ background: '#FFF3EE', color: '#D44800', borderRadius: 20, padding: '1px 7px', fontSize: 9, fontWeight: 700 }}>🐾 PetCircle Recommended</span>
               ) : (
                 <span style={{ background: '#F0F6FF', color: '#007AFF', borderRadius: 20, padding: '1px 7px', fontSize: 9, fontWeight: 700 }}>Vet Prescribed</span>
               )}

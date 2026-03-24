@@ -834,6 +834,7 @@ export default function ConditionsTab({ data, token, onCartClick }: ConditionsTa
     } catch (err) {
       console.error('PDF generation failed:', err);
       setPdfState('idle');
+      alert('Could not generate PDF. Please try again.');
     }
   };
 

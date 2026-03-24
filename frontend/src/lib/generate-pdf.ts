@@ -312,8 +312,8 @@ class PdfBuilder {
 export function generateHealthPdf(data: DashboardData): void {
   const builder = new PdfBuilder();
   const doc = builder.pdf;
-  const pet = data.pet;
-  const owner = data.owner;
+  const pet = data.pet ?? { name: 'Pet', species: '', breed: '', gender: '', dob: null, weight: null };
+  const owner = data.owner ?? { full_name: null, pincode: null };
 
   // ── Cover Header ──────────────────────────────────────────────────────
   // Orange background bar

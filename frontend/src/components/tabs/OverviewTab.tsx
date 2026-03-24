@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import type { DashboardData, ContactItem, DocumentItem, NutritionAnalysis, NudgeItem, BackendDietItem } from '@/lib/api';
-import { addContact, updateContact, deleteContact, getNutritionAnalysis, getNutritionImportance, getNudges, dismissNudge, uploadDocument, retryExtraction, getDietItems, addToCart } from '@/lib/api';
+import { addContact, updateContact, deleteContact, getNutritionAnalysis, getNutritionImportance, getNudges, dismissNudge, uploadDocument, retryExtraction, deleteDocument, getDietItems, addToCart } from '@/lib/api';
 import StatusBadge from '@/components/ui/StatusBadge';
 import CollapsibleCard from '@/components/ui/CollapsibleCard';
 import AddRow from '@/components/ui/AddRow';
@@ -112,6 +112,7 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
   const [uploading, setUploading] = useState(false);
   const [viewingDoc, setViewingDoc] = useState<DocumentItem | null>(null);
   const [retryingDoc, setRetryingDoc] = useState<string | null>(null);
+  const [deletingDoc, setDeletingDoc] = useState<string | null>(null);
 
   // Fetch nutrition analysis, diet items, nudges, and importance note on mount
   useEffect(() => {
@@ -158,6 +159,19 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
     }
   }, [token, onUpdated]);
 
+  const handleDeleteDoc = useCallback(async (docId: string) => {
+    if (!confirm('Delete this document? This cannot be undone.')) return;
+    setDeletingDoc(docId);
+    try {
+      await deleteDocument(token, docId);
+      onUpdated?.();
+    } catch (err: any) {
+      alert(err.message || 'Failed to delete document');
+    } finally {
+      setDeletingDoc(null);
+    }
+  }, [token, onUpdated]);
+
   const handleRetryExtraction = useCallback(async (docId: string) => {
     setRetryingDoc(docId);
     try {
@@ -170,8 +184,9 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
     }
   }, [token, onUpdated]);
 
-  // Group documents by category, sorted by event_date (most recent first)
-  const allDocs = data.documents || [];
+  // Split documents: rejected ones shown as alerts, rest shown in grouped list
+  const allDocs = (data.documents || []).filter(d => d.extraction_status !== 'rejected');
+  const rejectedDocs = (data.documents || []).filter(d => d.extraction_status === 'rejected');
   const groupedDocs: Record<string, DocumentItem[]> = {};
   for (const cat of DOC_CATEGORIES) groupedDocs[cat] = [];
   groupedDocs['Other'] = [];
@@ -525,9 +540,39 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
       <CollapsibleCard
         icon="📁"
         title="Uploaded Documents"
-        subtitle={`${allDocs.length} files`}
+        subtitle={`${allDocs.length} file${allDocs.length !== 1 ? 's' : ''}${rejectedDocs.length > 0 ? ` · ${rejectedDocs.length} rejected` : ''}`}
       >
         <div className="p-4 space-y-4">
+          {/* Rejected document alerts */}
+          {rejectedDocs.length > 0 && (
+            <div className="space-y-2">
+              {rejectedDocs.map(doc => (
+                <div
+                  key={doc.id}
+                  className="rounded-xl p-3 flex items-start gap-2.5"
+                  style={{ background: '#FFF6ED', border: '1.5px solid #FF950044' }}
+                >
+                  <span className="text-base shrink-0 mt-0.5">⚠️</span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold text-gray-800 truncate">
+                      {doc.document_name || 'Uploaded document'} — Not accepted
+                    </p>
+                    <p className="text-[11px] text-gray-600 mt-0.5 leading-snug">
+                      {doc.rejection_reason || 'This document could not be added to your pet\'s records.'}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => handleDeleteDoc(doc.id)}
+                    disabled={deletingDoc === doc.id}
+                    className="text-[11px] font-semibold px-2.5 py-1 rounded-full shrink-0 disabled:opacity-40"
+                    style={{ background: '#FF9500', color: 'white' }}
+                  >
+                    {deletingDoc === doc.id ? '…' : 'Got it'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
           {allDocs.length > 0 ? (
             activeDocCategories.map(cat => {
               const catStyle = DOC_CATEGORY_COLORS[cat] || { color: '#8E8E93', bg: '#F2F2F7' };

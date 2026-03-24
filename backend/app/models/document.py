@@ -66,10 +66,16 @@ class Document(Base):
     hospital_name = Column(String(200), nullable=True)
 
     # GPT extraction pipeline status:
-    # 'pending' — uploaded, awaiting extraction
-    # 'success' — extraction completed, structured data saved
-    # 'failed' — extraction failed after retries, user notified
+    # 'pending'  — uploaded, awaiting extraction
+    # 'success'  — extraction completed, structured data saved
+    # 'failed'   — extraction failed after retries, user notified
+    # 'rejected' — document is not pet-related or is for a different pet
     extraction_status = Column(String(20), nullable=False)
+
+    # Human-readable reason set when extraction_status='rejected'.
+    # Displayed on the dashboard so the user understands why the document
+    # was not accepted. Null for all non-rejected documents.
+    rejection_reason = Column(String(200), nullable=True)
 
     # Date when the medical event (vaccination, test, etc.) occurred.
     # Extracted from document content by GPT. Distinct from created_at (upload date).

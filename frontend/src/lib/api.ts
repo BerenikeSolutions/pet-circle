@@ -68,6 +68,7 @@ export interface DocumentItem {
   hospital_name: string | null;
   mime_type: string;
   extraction_status: string;
+  rejection_reason: string | null;
   uploaded_at: string | null;
   event_date: string | null;
 }
@@ -697,6 +698,20 @@ export async function uploadDocument(
     throw e;
   } finally {
     clearTimeout(timeoutId);
+  }
+}
+
+export async function deleteDocument(
+  token: string,
+  documentId: string
+): Promise<void> {
+  const res = await fetch(
+    `${API_BASE}/dashboard/${token}/document/${documentId}`,
+    { method: "DELETE" }
+  );
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    throw new Error(data?.detail || `Failed to delete document: ${res.status}`);
   }
 }
 
