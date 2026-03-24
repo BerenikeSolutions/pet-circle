@@ -659,8 +659,8 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
           </div>
         )}
 
-        {/* Bar chart (zayn style) */}
-        {chartEntries.length >= 1 && (
+        {/* Bar chart — only when 3+ entries */}
+        {effectiveHistory.length >= 3 && (
           <>
             <div style={{ position: 'relative', marginBottom: 4 }}>
               {/* Ideal range band */}
@@ -728,30 +728,39 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
           </>
         )}
 
-        {/* Log table */}
-        {weightLoading ? (
-          <p className="text-xs text-gray-400 py-2 text-center">Loading history...</p>
-        ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 }}>
-            {[...effectiveHistory].reverse().slice(0, 5).map((e, i) => (
-              <div key={e.id} style={{
-                display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px',
-                background: i === 0 ? '#F0F6FF' : '#FAFAF9',
-                borderRadius: 8,
-                border: i === 0 ? '1px solid #007AFF22' : '1px solid #F0EDE8',
-              }}>
-                <div style={{ fontSize: 11, color: '#8E8E93', width: 80, flexShrink: 0, fontWeight: 600 }}>
-                  {e.recorded_at ? formatApiDate(e.recorded_at) : '—'}
-                </div>
-                <div style={{ fontWeight: 700, fontSize: 13, color: '#1A1A1A', flexShrink: 0 }}>{e.weight} kg</div>
-                {e.note && <div style={{ fontSize: 11, color: '#AEAEB2', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.note}</div>}
-                {i === 0 && <div style={{ fontSize: 10, fontWeight: 700, color: '#007AFF', flexShrink: 0 }}>Latest</div>}
-              </div>
-            ))}
-            {effectiveHistory.length === 0 && (
-              <p className="text-xs text-gray-400 py-3 text-center">No weight entries yet</p>
+        {/* Log table — only when 2+ entries */}
+        {!weightLoading && effectiveHistory.length >= 2 && (
+          <>
+            {effectiveHistory.length >= 3 && (
+              <div style={{ height: 1, background: '#F0EDE8', marginBottom: 12 }} />
             )}
-          </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 12 }}>
+              {[...effectiveHistory].reverse().slice(0, 5).map((e, i) => (
+                <div key={e.id} style={{
+                  display: 'flex', alignItems: 'center', gap: 10, padding: '7px 10px',
+                  background: i === 0 ? '#F0F6FF' : '#FAFAF9',
+                  borderRadius: 8,
+                  border: i === 0 ? '1px solid #007AFF22' : '1px solid #F0EDE8',
+                }}>
+                  <div style={{ fontSize: 11, color: '#8E8E93', width: 80, flexShrink: 0, fontWeight: 600 }}>
+                    {e.recorded_at ? formatApiDate(e.recorded_at) : '—'}
+                  </div>
+                  <div style={{ fontWeight: 700, fontSize: 13, color: '#1A1A1A', flexShrink: 0 }}>{e.weight} kg</div>
+                  {e.note && <div style={{ fontSize: 11, color: '#AEAEB2', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.note}</div>}
+                  {i === 0 && <div style={{ fontSize: 10, fontWeight: 700, color: '#007AFF', flexShrink: 0 }}>Latest</div>}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        {/* Empty state — fewer than 2 entries */}
+        {!weightLoading && effectiveHistory.length < 2 && (
+          <p className="text-xs text-gray-400 py-3 text-center mb-2">
+            {effectiveHistory.length === 0
+              ? 'No weight entries yet. Log your first entry below.'
+              : 'Log one more weight entry to see history.'}
+          </p>
         )}
 
         {/* Log weight input */}

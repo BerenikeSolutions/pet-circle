@@ -404,37 +404,19 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
             <div className="rounded-xl p-3" style={{ backgroundColor: '#FFF6ED', borderLeft: '3px solid #FF9500' }}>
               <p className="text-xs font-semibold text-amber-800 mb-1">Overall Diet</p>
               <p className="text-xs text-amber-700">
-                {nutritionData.calories.actual}/{nutritionData.calories.target} kcal/day — {nutritionData.overall_label.toLowerCase()}.
+                {data.pet.name} is getting {nutritionData.calories.actual} kcal/day out of a target of {nutritionData.calories.target} kcal — {nutritionData.overall_label.toLowerCase()}.
               </p>
               <p className="text-xs text-amber-600 mt-1">
                 {(nutritionData as any).diet_summary || (
                   nutritionData.overall_label === 'Good' || nutritionData.overall_label === 'Excellent'
-                    ? 'Calorie intake matches daily energy needs, supporting healthy weight maintenance and sustained energy levels.'
+                    ? `${data.pet.name}'s calorie intake matches daily energy needs, supporting healthy weight and sustained energy.`
                     : nutritionData.calories.actual < nutritionData.calories.target
-                      ? 'Calorie intake is below the recommended level, which may lead to energy deficiency, muscle loss, and weakened immunity over time.'
-                      : 'Calorie intake exceeds the recommended level, which can contribute to weight gain, joint stress, and increased health risks.'
+                      ? `${data.pet.name} is eating below the recommended level, which may lead to energy deficiency and weakened immunity over time.`
+                      : `${data.pet.name} is eating above the recommended level, which can contribute to weight gain and increased health risks.`
                 )}
               </p>
             </div>
-            {dietItems.length > 0 && (
-              <div className="rounded-xl p-3" style={{ backgroundColor: '#F7F7F8', borderLeft: '3px solid #8E8E93' }}>
-                <p className="text-xs font-semibold text-gray-800 mb-2">Current Diet</p>
-                <div className="space-y-1.5">
-                  {dietItems.map((item) => (
-                    <div key={item.id} className="flex items-start gap-2 text-xs">
-                      <span className="shrink-0">{item.icon}</span>
-                      <div className="min-w-0">
-                        <span className="font-medium text-gray-800">{item.label}</span>
-                        {item.detail && (
-                          <span className="text-gray-500 ml-1">— {item.detail}</span>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-            {nutritionData.improvements.length > 0 && (
+{nutritionData.improvements.length > 0 && (
               <div className="rounded-xl p-3" style={{ backgroundColor: '#F0F6FF', borderLeft: '3px solid #007AFF' }}>
                 <p className="text-xs font-semibold text-blue-800 mb-1">What to Improve</p>
                 <ul className="space-y-1">
