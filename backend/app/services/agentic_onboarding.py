@@ -1304,6 +1304,8 @@ async def _finalize_agentic_onboarding(
         return "Error: pet name is missing. Ask the user for their pet's name before completing."
     if pet_data.get("species") not in ("dog", "cat"):
         return "Error: pet species must be 'dog' or 'cat'. Confirm with the user before completing."
+    if pet_data.get("gender") not in ("male", "female"):
+        return "Error: pet gender is missing. Ask the user whether their pet is male or female before completing."
 
     try:
         # --- Write user fields ---
@@ -1439,7 +1441,7 @@ async def _finalize_agentic_onboarding(
                 logger.error("Health record backfill failed: %s", str(e))
 
         # --- Generate dashboard token ---
-        dashboard_url = f"petcircle.app/dashboard/{pet.name.lower()}"
+        dashboard_url = ""
         token = None
         try:
             token = generate_dashboard_token(db, pet.id)
@@ -1554,7 +1556,7 @@ async def _dispatch_tool_call(
     elif tool_name == "set_pet_info":
         data = session.collected_data.setdefault("pet", {})
         for field in ("name", "species", "gender", "dob", "weight", "neutered"):
-            if field in args:
+            if field in args and args[field] is not None:
                 data[field] = args[field]
         # Normalize breed to canonical form before storing.
         if "breed" in args and args.get("breed"):

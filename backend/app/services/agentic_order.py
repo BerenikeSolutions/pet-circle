@@ -456,6 +456,8 @@ async def _finalize_agentic_order(
         if len(pets) == 1:
             pet_id = str(pets[0].id)
             pet = pets[0]
+        elif len(pets) == 0:
+            return "Error: no pet profile found. The user cannot place an order without adding a pet first. Let them know they need to complete pet onboarding before ordering."
         elif len(pets) > 1:
             return "Error: multiple pets found but no pet selected. Ask the user which pet this is for."
     else:
