@@ -31,6 +31,7 @@ IMPORTANT — JSONB mutation tracking:
     modifying session.messages or session.collected_data.
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -46,10 +47,12 @@ from app.models.agent_onboarding_session import AgentOnboardingSession
 from app.models.user import User
 from app.services.onboarding import (
     _get_openai_onboarding_client,
+    _ai_check_weight,
     _ai_identify_pet_from_photo,
     generate_dashboard_token,
     seed_preventive_records_for_pet,
 )
+from app.utils.breed_normalizer import normalize_breed
 from app.utils.retry import retry_openai_call
 
 logger = logging.getLogger(__name__)
@@ -60,6 +63,17 @@ logger = logging.getLogger(__name__)
 
 _openai_health_cache: dict = {"result": None, "checked_at": None}
 _OPENAI_HEALTH_TTL = 300  # seconds — re-check every 5 minutes
+
+# ---------------------------------------------------------------------------
+# Document batch debounce (Path B multi-upload)
+# ---------------------------------------------------------------------------
+# When a user uploads multiple docs in quick succession, each webhook fires
+# separately. We buffer extraction results per user and only run the agent
+# loop once after uploads settle (_DOC_DEBOUNCE_SECONDS of silence).
+
+_pending_doc_contexts: dict[str, list[str]] = {}  # key: str(user.id)
+_doc_timers: dict[str, asyncio.Task] = {}          # key: str(user.id)
+_DOC_DEBOUNCE_SECONDS: int = 12
 
 
 def is_openai_available() -> bool:
@@ -409,6 +423,66 @@ def _build_session_state_for_prompt(session: "AgentOnboardingSession") -> dict:
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Greeting resume helper
+# ---------------------------------------------------------------------------
+
+
+def _build_agentic_progress_summary(session: "AgentOnboardingSession") -> str:
+    """
+    Build a bullet-point progress summary from the session's collected_data.
+
+    Returns a non-empty string when at least one field has been collected
+    (indicating the session is in progress), or an empty string if nothing
+    has been collected yet (so greetings on a fresh session are handled by
+    the LLM as a normal opening turn).
+    """
+    cd = session.collected_data
+    user_data = cd.get("user", {})
+    pet_data = cd.get("pet", {})
+    diet = cd.get("diet", {})
+    grooming = cd.get("grooming", [])
+
+    lines = []
+
+    if user_data.get("full_name"):
+        lines.append(f"Your name: {user_data['full_name']}")
+    if user_data.get("pincode"):
+        lines.append("Pincode: Provided")
+
+    if pet_data.get("name"):
+        lines.append(f"Pet name: {pet_data['name']}")
+    if pet_data.get("photo_path"):
+        lines.append("Photo: Uploaded")
+    if pet_data.get("species") and pet_data["species"] not in ("_pending", ""):
+        lines.append(f"Species: {pet_data['species']}")
+    if pet_data.get("breed"):
+        lines.append(f"Breed: {pet_data['breed']}")
+    if pet_data.get("gender"):
+        lines.append(f"Gender: {pet_data['gender']}")
+    if pet_data.get("dob"):
+        lines.append(f"Date of birth: {pet_data['dob']}")
+    if pet_data.get("weight") is not None:
+        lines.append(f"Weight: {pet_data['weight']} kg")
+    if pet_data.get("neutered") is not None:
+        lines.append(f"Neutered: {'Yes' if pet_data['neutered'] else 'No'}")
+
+    total_diet = (
+        len(diet.get("packaged", []))
+        + len(diet.get("homemade", []))
+        + len(diet.get("supplements", []))
+    )
+    if total_diet > 0:
+        lines.append(f"Diet/supplements: {total_diet} item(s) recorded")
+    if grooming:
+        lines.append(f"Grooming: {len(grooming)} item(s) recorded")
+
+    if not lines:
+        return ""
+    return "\n".join(f"  • {line}" for line in lines)
+
+
+# ---------------------------------------------------------------------------
 # Tool definitions
 # ---------------------------------------------------------------------------
 
@@ -739,7 +813,10 @@ async def _preprocess_pet_photo(
         if ai_result.get("species") in ("dog", "cat"):
             pet_data.setdefault("species", ai_result["species"])
         if ai_result.get("breed"):
-            pet_data.setdefault("breed", ai_result["breed"])
+            pet_data.setdefault(
+                "breed",
+                normalize_breed(ai_result["breed"], species=ai_result.get("species")),
+            )
 
         species_str = ai_result.get("species") or "unknown"
         breed_str = ai_result.get("breed") or "unknown breed"
@@ -814,10 +891,15 @@ async def _preprocess_health_document(
                         f"Veterinary document text:\n\n{pdf_text}"
                     )
                 else:
-                    # Scanned PDF — use vision
-                    from app.utils.file_reader import encode_image_base64
-                    data_uri = encode_image_base64(file_bytes, "image/jpeg")
-                    raw_json = await _call_openai_extraction_vision(data_uri)
+                    # Scanned PDF or PDF with unextractable text — render pages
+                    # as actual JPEG images using PyMuPDF, then pass to vision API.
+                    # NOTE: raw PDF bytes cannot be sent directly to the vision API;
+                    # only PNG/JPEG/GIF/WEBP are accepted.
+                    from app.utils.file_reader import render_pdf_pages_as_images
+                    page_images = render_pdf_pages_as_images(file_bytes, max_pages=3)
+                    if page_images:
+                        raw_json = await _call_openai_extraction_vision(page_images[0])
+                    # else: raw_json stays None, handled by the if not raw_json check below
 
         except Exception as e:
             logger.warning("GPT extraction during onboarding failed: %s", str(e))
@@ -976,9 +1058,31 @@ async def _call_openai_with_tools(messages: list) -> object:
         return await client.chat.completions.create(
             model="gpt-4.1",
             temperature=0,
-            max_tokens=500,
+            max_tokens=1000,
             tools=_ONBOARDING_TOOLS,
             tool_choice="auto",
+            messages=messages,
+        )
+
+    return await retry_openai_call(_make_call)
+
+
+async def _call_openai_text_only(messages: list) -> object:
+    """
+    OpenAI call that forces a plain text response (tool_choice='none').
+
+    Used exclusively for the closing message after complete_onboarding fires,
+    so the model cannot call another tool and produce a blank reply.
+    """
+    client = _get_openai_onboarding_client()
+
+    async def _make_call():
+        return await client.chat.completions.create(
+            model="gpt-4.1",
+            temperature=0,
+            max_tokens=1000,
+            tools=_ONBOARDING_TOOLS,
+            tool_choice="none",
             messages=messages,
         )
 
@@ -1224,14 +1328,29 @@ async def _finalize_agentic_onboarding(
             return "__COMPLETE__::petcircle.app/dashboard"
 
         # --- Parse DOB ---
+        # First try deterministic parsing; fall back to AI for fuzzy inputs
+        # like "3 years ago" or "around 2022".
+        # If parsing fails entirely AND the user provided a value, block finalization
+        # and return an error so the LLM re-asks — never store None for a given DOB.
         dob = None
-        if pet_data.get("dob"):
+        raw_dob = pet_data.get("dob", "").strip()
+        if raw_dob:
             try:
-                dob = parse_date(pet_data["dob"])
+                dob = parse_date(raw_dob)
             except Exception:
-                dob = None
+                try:
+                    from app.utils.date_utils import parse_date_with_ai
+                    dob = await parse_date_with_ai(raw_dob)
+                except Exception:
+                    return (
+                        f"Error: could not parse the date of birth '{raw_dob}' into a valid date. "
+                        "Ask the user to re-enter the date in DD/MM/YYYY format, "
+                        "or ask them to type 'skip' if they don't know it."
+                    )
 
         # --- Create Pet row ---
+        # weight_flagged is set by the set_pet_info tool when _ai_check_weight
+        # deems the weight unusual. Default False if the check was skipped/passed.
         pet = Pet(
             user_id=user.id,
             name=pet_data["name"],
@@ -1242,10 +1361,36 @@ async def _finalize_agentic_onboarding(
             weight=pet_data.get("weight"),
             neutered=pet_data.get("neutered"),
             photo_path=pet_data.get("photo_path"),
-            weight_flagged=False,
+            weight_flagged=pet_data.get("weight_flagged", False),
         )
         db.add(pet)
         db.flush()  # Assign pet.id before referencing it below
+
+        # --- Relocate pet photo from temp path to permanent pet-linked path ---
+        # _preprocess_pet_photo stores photos as "{user_id}/pending_photo_{media_id}.{ext}"
+        # because pet.id is not yet known at upload time. Now that pet.id is assigned,
+        # move the file to the canonical "{user_id}/{pet_id}/pet_photo.{ext}" path.
+        raw_photo_path = pet_data.get("photo_path", "")
+        if raw_photo_path and "pending_photo_" in raw_photo_path:
+            ext = raw_photo_path.rsplit(".", 1)[-1] if "." in raw_photo_path else "jpg"
+            permanent_path = f"{user.id}/{pet.id}/pet_photo.{ext}"
+            mime_type = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
+            try:
+                from app.services.document_upload import _download_supabase_raw, upload_to_supabase
+                photo_bytes = await _download_supabase_raw(raw_photo_path)
+                if photo_bytes:
+                    await upload_to_supabase(photo_bytes, permanent_path, mime_type)
+                    pet.photo_path = permanent_path
+                    logger.info(
+                        "Pet photo relocated: %s → %s", raw_photo_path, permanent_path
+                    )
+                else:
+                    logger.warning("Photo relocation: download returned empty for %s", raw_photo_path)
+            except Exception as e:
+                logger.warning(
+                    "Pet photo relocation failed (%s → %s): %s — keeping temp path",
+                    raw_photo_path, permanent_path, str(e),
+                )
 
         # --- Diet items ---
         diet = cd.get("diet", {})
@@ -1310,6 +1455,26 @@ async def _finalize_agentic_onboarding(
         if og_url:
             cd["og_image_url"] = og_url
 
+        # --- Count active reminders (mirrors deterministic _finalize_onboarding) ---
+        # Store count in collected_data so the LLM closing message can confirm
+        # the reminder schedule was set up — same checklist line as deterministic flow.
+        reminders_count = 0
+        try:
+            from app.models.reminder import Reminder
+            from app.models.preventive_record import PreventiveRecord
+            reminders_count = (
+                db.query(Reminder)
+                .join(PreventiveRecord, Reminder.preventive_record_id == PreventiveRecord.id)
+                .filter(
+                    PreventiveRecord.pet_id == pet.id,
+                    Reminder.status.in_(["pending", "sent"]),
+                )
+                .count()
+            )
+            cd["reminders_count"] = reminders_count
+        except Exception as e:
+            logger.warning("Failed to count active reminders: %s", str(e))
+
         # --- Transition to awaiting_documents ---
         user.onboarding_state = "awaiting_documents"
         user.doc_upload_deadline = datetime.now(timezone.utc) + timedelta(
@@ -1327,7 +1492,14 @@ async def _finalize_agentic_onboarding(
             pet.name,
             pet.species,
         )
-        return f"__COMPLETE__::{dashboard_url}"
+        # Include reminders status in the completion context so the LLM
+        # includes it in the closing WhatsApp message.
+        reminder_note = (
+            f" Reminder schedule: {reminders_count} active reminder(s) mapped."
+            if reminders_count > 0
+            else " Reminder engine is ready."
+        )
+        return f"__COMPLETE__::{dashboard_url}::{reminder_note}"
 
     except Exception as e:
         logger.error("Agentic finalization failed: %s", str(e), exc_info=True)
@@ -1370,14 +1542,58 @@ async def _dispatch_tool_call(
         if args.get("full_name"):
             data["full_name"] = args["full_name"]
         if args.get("pincode"):
-            data["pincode"] = args["pincode"]
+            pincode = str(args["pincode"]).strip()
+            if not (pincode.isdigit() and len(pincode) == 6):
+                return (
+                    f"Error: pincode must be exactly 6 digits. Got '{pincode}'. "
+                    "Ask the user to re-enter their pincode or type skip."
+                )
+            data["pincode"] = pincode
         return f"Stored user info: {args}"
 
     elif tool_name == "set_pet_info":
         data = session.collected_data.setdefault("pet", {})
-        for field in ("name", "species", "breed", "gender", "dob", "weight", "neutered"):
+        for field in ("name", "species", "gender", "dob", "weight", "neutered"):
             if field in args:
                 data[field] = args[field]
+        # Normalize breed to canonical form before storing.
+        if "breed" in args and args.get("breed"):
+            data["breed"] = normalize_breed(args["breed"], species=data.get("species"))
+
+        # Run AI weight validation when weight is provided (mirrors deterministic flow).
+        # Stores weight_flagged=True in collected_data so _finalize_agentic_onboarding
+        # can write the correct value to the DB.
+        if "weight" in args and args["weight"] is not None:
+            try:
+                from app.utils.date_utils import parse_date
+                dob_val = None
+                if data.get("dob"):
+                    try:
+                        dob_val = parse_date(data["dob"])
+                    except Exception:
+                        dob_val = None
+                ai_result = await _ai_check_weight(
+                    species=data.get("species"),
+                    breed=data.get("breed"),
+                    dob=dob_val,
+                    weight_kg=float(args["weight"]),
+                )
+                flagged = ai_result is not None and not ai_result.get("reasonable", True)
+                data["weight_flagged"] = flagged
+                if flagged:
+                    expected = ai_result.get("expected_range", "unknown")
+                    reason = ai_result.get("reason", "")
+                    flag_note = (
+                        f" NOTE: AI flagged this weight as unusual for a "
+                        f"{data.get('breed') or data.get('species', 'pet')}. "
+                        f"Expected range: {expected}."
+                        f"{' Reason: ' + reason if reason else ''} "
+                        f"Please confirm this weight with the user before completing."
+                    )
+                    return f"Stored pet info: {args}.{flag_note}"
+            except Exception as e:
+                logger.warning("Agentic onboarding: weight AI check failed: %s", str(e))
+
         return f"Stored pet info: {args}"
 
     elif tool_name == "add_health_records":
@@ -1395,26 +1611,35 @@ async def _dispatch_tool_call(
             "diet", {"packaged": [], "homemade": [], "supplements": []}
         )
         items = args.get("items", [])
+        added = 0
         for item in items:
             bucket = item.get("type", "packaged")
-            diet.setdefault(bucket, []).append(
-                {"label": item["label"], "detail": item.get("detail", "")}
-            )
+            existing_labels = {i["label"].lower() for i in diet.get(bucket, [])}
+            if item.get("label", "").lower() not in existing_labels:
+                diet.setdefault(bucket, []).append(
+                    {"label": item["label"], "detail": item.get("detail", "")}
+                )
+                added += 1
         # Advance step
         if session.collected_data.get("current_step") in ("entry", "health"):
             session.collected_data["current_step"] = "nutrition"
-        return f"Stored {len(items)} diet item(s)."
+        return f"Stored {added} diet item(s) (skipped duplicates)."
 
     elif tool_name == "add_grooming_items":
         grooming = session.collected_data.setdefault("grooming", [])
         items = args.get("items", [])
+        added = 0
+        existing_names = {g["name"].lower() for g in grooming}
         for item in items:
-            grooming.append(
-                {"name": item["name"], "freq": item["freq"], "unit": item["unit"]}
-            )
+            if item.get("name", "").lower() not in existing_names:
+                grooming.append(
+                    {"name": item["name"], "freq": item["freq"], "unit": item["unit"]}
+                )
+                existing_names.add(item["name"].lower())
+                added += 1
         if session.collected_data.get("current_step") in ("entry", "health", "nutrition"):
             session.collected_data["current_step"] = "grooming"
-        return f"Stored {len(items)} grooming item(s)."
+        return f"Stored {added} grooming item(s) (skipped duplicates)."
 
     elif tool_name == "set_pet_photo":
         pet_data = session.collected_data.setdefault("pet", {})
@@ -1492,10 +1717,14 @@ async def _run_agent_loop(
             )
             if result and result.startswith("__COMPLETE__::"):
                 completion_triggered = True
-                dashboard_url = result.split("::", 1)[1] if "::" in result else dashboard_url
+                # Sentinel format: "__COMPLETE__::<url>::<reminder_note>"
+                parts = result.split("::")
+                dashboard_url = parts[1] if len(parts) > 1 else dashboard_url
+                reminder_note = parts[2] if len(parts) > 2 else " Reminder engine is ready."
                 result = (
                     f"Onboarding records written to database successfully. "
-                    f"Dashboard URL: {dashboard_url}"
+                    f"Dashboard URL: {dashboard_url}.{reminder_note} "
+                    f"Mention the reminder schedule status in your closing message."
                 )
 
             session.messages.append(
@@ -1508,8 +1737,8 @@ async def _run_agent_loop(
 
         if completion_triggered:
             # Let the model produce the closing message to the user.
-            # Pass the full session messages (not trimmed) so it has all context.
-            final_response = await _call_openai_with_tools(
+            # Use tool_choice="none" to guarantee a text reply — never a blank message.
+            final_response = await _call_openai_text_only(
                 _trim_messages(session.messages, session)
             )
             final_text = final_response.choices[0].message.content or ""
@@ -1520,6 +1749,66 @@ async def _run_agent_loop(
     return (
         "I had trouble processing that. Please reply *hi* to continue where you left off."
     )
+
+
+# ---------------------------------------------------------------------------
+# Delayed document processing (debounce helper for Path B multi-upload)
+# ---------------------------------------------------------------------------
+
+
+async def _delayed_agentic_doc_processing(
+    user_id: str,
+    mobile: str,
+    send_fn,
+) -> None:
+    """
+    Run after the debounce window expires. Combines all buffered document
+    extraction contexts for a user into one agent turn and runs the loop once.
+
+    Called via asyncio.create_task() — never raises; all errors are logged.
+    """
+    await asyncio.sleep(_DOC_DEBOUNCE_SECONDS)
+
+    contexts = _pending_doc_contexts.pop(str(user_id), [])
+    _doc_timers.pop(str(user_id), None)
+
+    if not contexts:
+        return
+
+    from app.database import get_fresh_session
+
+    bg_db = get_fresh_session()
+    try:
+        user = bg_db.query(User).filter(User.id == user_id).first()
+        if not user:
+            logger.warning("Delayed doc processing: user %s not found", user_id)
+            return
+
+        session = _get_or_create_session(bg_db, user)
+        combined_context = "\n\n".join(contexts)
+        session.messages.append({"role": "user", "content": combined_context})
+
+        reply_text: str | None = None
+        try:
+            reply_text = await _run_agent_loop(bg_db, user, session)
+        except Exception as loop_err:
+            logger.error(
+                "Agent loop failed (delayed doc) for user %s: %s",
+                user_id, str(loop_err), exc_info=True,
+            )
+            reply_text = "I ran into a problem processing your documents. Please reply *hi* to continue."
+        finally:
+            _save_session(bg_db, session)
+
+        if reply_text and mobile:
+            await send_fn(bg_db, mobile, reply_text)
+    except Exception as e:
+        logger.error(
+            "Delayed agentic doc processing failed for user %s: %s",
+            user_id, str(e), exc_info=True,
+        )
+    finally:
+        bg_db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1550,6 +1839,15 @@ async def handle_agentic_onboarding_step(
     """
     mobile = getattr(user, "_plaintext_mobile", None)
     msg_type = message_data.get("type", "text")
+
+    # Guard: only process if still in agentic_onboarding state.
+    # Prevents stale routing after state has already transitioned (e.g., awaiting_documents).
+    if user.onboarding_state != "agentic_onboarding":
+        logger.warning(
+            "handle_agentic_onboarding_step called for user %s in state '%s' — skipping",
+            str(user.id), user.onboarding_state,
+        )
+        return
 
     session = _get_or_create_session(db, user)
 
@@ -1585,19 +1883,64 @@ async def handle_agentic_onboarding_step(
         if not pet_has_species and current_step == "entry":
             injected_context = await _preprocess_pet_photo(db, user, session, message_data)
         elif path == "B" and not cd.get("health"):
-            # Vet record image sent during Path B
-            injected_context = await _preprocess_health_document(user, session, message_data)
+            # Vet record image sent during Path B — buffer and debounce.
+            doc_context = await _preprocess_health_document(user, session, message_data)
+            user_key = str(user.id)
+            _pending_doc_contexts.setdefault(user_key, []).append(doc_context)
+            if user_key in _doc_timers:
+                _doc_timers[user_key].cancel()
+            _doc_timers[user_key] = asyncio.create_task(
+                _delayed_agentic_doc_processing(user.id, mobile, send_fn)
+            )
+            _save_session(db, session)  # persist records_shared=True
+            return  # no immediate reply; delayed task sends one message after all docs settle
         else:
             # Default: treat as pet photo (user may be adding one later)
             injected_context = await _preprocess_pet_photo(db, user, session, message_data)
 
     elif msg_type == "document":
-        # All documents during onboarding are treated as vet records (Path B)
+        # All documents during onboarding are treated as vet records (Path B).
+        # Buffer extraction result and debounce — only run the agent loop once
+        # after all uploads in a burst have settled.
         cd["path"] = "B"
-        injected_context = await _preprocess_health_document(user, session, message_data)
+        doc_context = await _preprocess_health_document(user, session, message_data)
+        user_key = str(user.id)
+        _pending_doc_contexts.setdefault(user_key, []).append(doc_context)
+        if user_key in _doc_timers:
+            _doc_timers[user_key].cancel()
+        _doc_timers[user_key] = asyncio.create_task(
+            _delayed_agentic_doc_processing(user.id, mobile, send_fn)
+        )
+        _save_session(db, session)  # persist path="B" and records_shared=True
+        return  # no immediate reply; delayed task sends one message after all docs settle
 
     # Build user-turn content
     text = (message_data.get("text") or "").strip()
+
+    # --- Greeting detection + progress resume (mirrors deterministic flow) ---
+    # If the user sends a greeting while onboarding is in progress and there is
+    # already some data collected, send a structured progress summary and re-ask
+    # the current step — instead of passing the greeting into the LLM as-is.
+    if msg_type == "text" and not injected_context:
+        from app.core.constants import GREETINGS
+        if text.lower() in GREETINGS:
+            progress = _build_agentic_progress_summary(session)
+            if progress:
+                # Determine current step to re-ask
+                current_step = cd.get("current_step", "entry")
+                step_label = {
+                    "entry": "Let's continue with your pet's profile setup.",
+                    "health": "Let's continue with your pet's health records.",
+                    "nutrition": "Let's continue with your pet's nutrition details.",
+                    "grooming": "Let's continue with your pet's grooming routine.",
+                }.get(current_step, "Let's continue where we left off.")
+                resume_msg = (
+                    f"Welcome back! 👋\n\n"
+                    f"Here's what we have so far:\n{progress}\n\n"
+                    f"{step_label}"
+                )
+                await send_fn(db, mobile, resume_msg)
+                return
 
     if injected_context and text:
         user_content = f"{injected_context}\n\nUser message: {text}"
@@ -1614,10 +1957,17 @@ async def handle_agentic_onboarding_step(
     session.messages.append({"role": "user", "content": user_content})
 
     # --- Run the agent loop ---
-    reply_text = await _run_agent_loop(db, user, session)
-
-    # --- Persist session ---
-    _save_session(db, session)
+    reply_text: str | None = None
+    try:
+        reply_text = await _run_agent_loop(db, user, session)
+    except Exception as e:
+        logger.error(
+            "Agent loop failed for user %s: %s", str(user.id), str(e), exc_info=True
+        )
+        reply_text = "I ran into a problem. Please reply *hi* to continue where you left off."
+    finally:
+        # Always persist — even on failure, saves partial state (path, records_shared, etc.)
+        _save_session(db, session)
 
     # --- Send dashboard image card on onboarding completion (Gap 3) ---
     # If complete_onboarding just fired this turn, og_image_url will be set.

@@ -1466,6 +1466,22 @@ async def _try_agentic_finalization(
             db, user.id, getattr(pet, "breed", None), pet.species or "dog"
         )
 
+        # Count active reminders (mirrors deterministic _finalize_onboarding checklist).
+        reminders_count = 0
+        try:
+            from app.models.reminder import Reminder
+            reminders_count = (
+                db.query(Reminder)
+                .join(PreventiveRecord, Reminder.preventive_record_id == PreventiveRecord.id)
+                .filter(
+                    PreventiveRecord.pet_id == pet.id,
+                    Reminder.status.in_(["pending", "sent"]),
+                )
+                .count()
+            )
+        except Exception as _rem_err:
+            logger.warning("Could not count reminders for finalization: %s", _rem_err)
+
         composed = await compose_finalization_message(
             pet_name=pet.name,
             species=pet.species or "dog",
@@ -1476,6 +1492,7 @@ async def _try_agentic_finalization(
             dashboard_url=dashboard_url,
             extraction_failed=fail_count > 0,
             fun_fact=fun_fact,
+            reminders_count=reminders_count,
         )
 
         if not composed:

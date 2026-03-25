@@ -26,6 +26,7 @@ IMPORTANT — JSONB mutation tracking:
 import asyncio
 import json
 import logging
+from datetime import datetime
 
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
@@ -78,7 +79,10 @@ CATEGORIES:
 
 RECOMMENDATIONS:
 - After calling get_recommendations, present the results naturally (not as a numbered menu).
+- Results have a "source" field: "preference" = from past orders, "ai" = AI suggestion.
 - User can say "add all", select by name, or skip suggestions.
+- When adding items that came from get_recommendations results, call set_items with source="recommendation".
+- When adding items the user typed themselves, call set_items with source="custom" (the default).
 
 IMPORTANT:
 - Never confirm an order without items.
@@ -98,7 +102,9 @@ _ORDER_TOOLS = [
             "description": (
                 "Store the list of items the user wants to order. "
                 "Call this as soon as the user mentions what they want. "
-                "Each item should be a plain string (e.g., 'Nexgard 3 tablets', 'Royal Canin 1kg')."
+                "Each item should be a plain string (e.g., 'Nexgard 3 tablets', 'Royal Canin 1kg'). "
+                "Use source='recommendation' when items were selected from get_recommendations results. "
+                "Use source='custom' (default) when the user typed items themselves."
             ),
             "parameters": {
                 "type": "object",
@@ -107,6 +113,11 @@ _ORDER_TOOLS = [
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "List of item names/descriptions.",
+                    },
+                    "source": {
+                        "type": "string",
+                        "enum": ["custom", "recommendation"],
+                        "description": "How these items were identified. Default: custom.",
                     },
                 },
                 "required": ["items"],
@@ -223,12 +234,20 @@ _ORDER_TOOLS = [
 # ---------------------------------------------------------------------------
 
 
+_SESSION_TTL_DAYS = 7  # Abandon incomplete sessions older than this
+
+
 def _get_or_create_session(db: Session, user: User) -> AgentOrderSession:
     """
     Load the active agentic order session for the user, or create a new one.
 
-    A new session starts with the system prompt as the first message.
+    Stale sessions (older than _SESSION_TTL_DAYS) are expired so the user
+    always starts fresh after abandoning an order. A new session also creates
+    a draft Order row and sets user.active_order_id so the order is visible
+    to admin tooling and external checks throughout the conversation.
     """
+    from datetime import timezone as _tz
+
     session = (
         db.query(AgentOrderSession)
         .filter(
@@ -237,15 +256,72 @@ def _get_or_create_session(db: Session, user: User) -> AgentOrderSession:
         )
         .first()
     )
+
+    # Expire sessions older than TTL so abandoned conversations don't persist.
+    if session is not None:
+        cutoff = datetime.now(_tz.utc).replace(tzinfo=None)  # naive UTC
+        created = session.created_at
+        if created and hasattr(created, "tzinfo") and created.tzinfo:
+            created = created.replace(tzinfo=None)  # normalise to naive
+        if created and (cutoff - created).days >= _SESSION_TTL_DAYS:
+            logger.info(
+                "Expiring stale agentic order session %s for user %s (age %d days)",
+                str(session.id), str(user.id),
+                (cutoff - created).days,
+            )
+            session.is_complete = True
+            # Delete the associated draft Order (no items, never confirmed).
+            if user.active_order_id:
+                stale_order = (
+                    db.query(Order).filter(Order.id == user.active_order_id).first()
+                )
+                if stale_order and not stale_order.items_description:
+                    db.delete(stale_order)
+            user.order_state = None
+            user.active_order_id = None
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+            session = None  # Fall through to create a fresh session
+
     if session is None:
+        # Create a draft Order row immediately so user.active_order_id is
+        # always set for the lifetime of the agentic order conversation.
+        # items_description is empty until confirm_order fires.
+        draft_order = Order(
+            user_id=user.id,
+            category="medicines",   # default; overwritten by set_category tool
+            items_description="",
+            status="pending",
+            payment_status="pending",
+        )
+        db.add(draft_order)
+        db.flush()  # Assign draft_order.id before setting active_order_id
+
+        user.active_order_id = draft_order.id
+        user.order_state = "awaiting_agentic_order"
+
         session = AgentOrderSession(
             user_id=user.id,
             messages=[{"role": "system", "content": _SYSTEM_PROMPT}],
-            collected_data={"pet_id": None, "category": None, "items": []},
+            collected_data={
+                "pet_id": None,
+                "category": None,
+                "items": [],
+                "items_sources": {},   # {item_name: "custom" | "recommendation"}
+                "draft_order_id": str(draft_order.id),
+            },
             is_complete=False,
         )
         db.add(session)
         db.flush()
+        try:
+            db.commit()
+        except Exception as e:
+            logger.error("Failed to create agentic order session: %s", str(e))
+            db.rollback()
+
     return session
 
 
@@ -307,6 +383,30 @@ async def _call_openai_with_tools(messages: list) -> object:
     return await retry_openai_call(_make_call)
 
 
+async def _call_openai_text_only(messages: list) -> object:
+    """
+    OpenAI call that forces a plain text response (tool_choice='none').
+
+    Used exclusively for the closing message after confirm_order / cancel_order
+    fires, so the model cannot call another tool and produce a blank reply.
+    """
+    from app.services.onboarding import _get_openai_onboarding_client
+
+    client = _get_openai_onboarding_client()
+
+    async def _make_call():
+        return await client.chat.completions.create(
+            model="gpt-4.1",
+            temperature=0,
+            max_tokens=500,
+            tools=_ORDER_TOOLS,
+            tool_choice="none",
+            messages=messages,
+        )
+
+    return await retry_openai_call(_make_call)
+
+
 # ---------------------------------------------------------------------------
 # Finalization
 # ---------------------------------------------------------------------------
@@ -318,27 +418,28 @@ async def _finalize_agentic_order(
     session: AgentOrderSession,
 ) -> str:
     """
-    Create the Order row atomically and trigger post-order tasks.
+    Finalise the order atomically and trigger post-order tasks.
 
     Steps:
         1. Validate mandatory fields (items non-empty).
         2. Resolve pet_id: if not set and user has exactly 1 pet, auto-select.
-        3. Create Order row (status=pending, payment_status=pending).
-        4. Notify admin via WhatsApp.
-        5. Schedule post-order recommendations background task.
-        6. Clear user.order_state and mark session complete.
+        3. Update the draft Order row created by _get_or_create_session.
+        4. Record per-item preferences with correct source (recommendation/custom).
+        5. Notify admin via WhatsApp.
+        6. Schedule post-order recommendations background task.
+        7. Clear user.order_state / active_order_id and mark session complete.
 
     Returns:
         "__COMPLETE__" sentinel on success, or an error string if mandatory
         fields are missing (model will ask again).
     """
-    from app.core.constants import ORDER_CATEGORY_MAP
     from app.services.order_service import _notify_admin_whatsapp, _send_post_order_recommendations
 
     cd = session.collected_data
     items: list = cd.get("items") or []
     pet_id = cd.get("pet_id")
     category = cd.get("category") or "medicines"
+    items_sources: dict = cd.get("items_sources", {})
 
     # --- Validate items ---
     if not items:
@@ -369,27 +470,50 @@ async def _finalize_agentic_order(
     if category not in valid_categories:
         category = "medicines"
 
+    order = None
     try:
         mobile = getattr(user, "_plaintext_mobile", None) or decrypt_field(user.mobile_number)
 
-        # --- Create Order row ---
-        order = Order(
-            user_id=user.id,
-            pet_id=pet.id if pet else None,
-            category=category,
-            items_description=", ".join(items)[:2000],
-            status="pending",
-            payment_status="pending",
-        )
-        db.add(order)
+        # --- Update the draft Order row (created by _get_or_create_session) ---
+        # Prefer the draft order tracked in collected_data; fall back to active_order_id.
+        from uuid import UUID as _UUID
+        draft_order_id_str = cd.get("draft_order_id")
+        order = None
+        if draft_order_id_str:
+            try:
+                order = db.query(Order).filter(Order.id == _UUID(draft_order_id_str)).first()
+            except Exception:
+                order = None
+        if order is None and user.active_order_id:
+            order = db.query(Order).filter(Order.id == user.active_order_id).first()
 
-        # --- Record preferences for personalization ---
+        if order is not None:
+            # Update the draft in place.
+            order.pet_id = pet.id if pet else None
+            order.category = category
+            order.items_description = ", ".join(items)[:2000]
+            order.status = "pending"
+            order.payment_status = "pending"
+        else:
+            # No draft found (e.g., expired or deleted) — create a fresh row.
+            order = Order(
+                user_id=user.id,
+                pet_id=pet.id if pet else None,
+                category=category,
+                items_description=", ".join(items)[:2000],
+                status="pending",
+                payment_status="pending",
+            )
+            db.add(order)
+
+        # --- Record preferences with correct source per item ---
         if pet:
             from app.services.recommendation_service import record_preference
             for item in items:
                 item_str = str(item).strip()
                 if item_str:
-                    record_preference(db, pet.id, category, item_str, "custom")
+                    source = items_sources.get(item_str, "custom")
+                    record_preference(db, pet.id, category, item_str, source)
 
         # --- Clear user state and mark session complete ---
         user.order_state = None
@@ -404,16 +528,11 @@ async def _finalize_agentic_order(
             str(user.id),
         )
 
-        # --- Notify admin (non-blocking) ---
-        await _notify_admin_whatsapp(db, order, user, pet)
-
         # --- Post-order recommendations (non-blocking background task) ---
         if pet is not None:
             asyncio.create_task(
                 _send_post_order_recommendations(db, user, order, pet, mobile)
             )
-
-        return "__COMPLETE__"
 
     except Exception as e:
         logger.error("Agentic order finalization failed: %s", str(e), exc_info=True)
@@ -422,6 +541,20 @@ async def _finalize_agentic_order(
         except Exception:
             pass
         return f"Error during order placement: {str(e)}. Please try again."
+
+    # --- Notify admin after successful commit (best-effort, outside commit try/except) ---
+    # Kept separate so a notification failure never rolls back an already-committed order
+    # or causes the LLM to tell the user "please try again" for a placed order.
+    if order is not None:
+        try:
+            await _notify_admin_whatsapp(db, order, user, pet)
+        except Exception as e:
+            logger.warning(
+                "Admin WhatsApp notification failed for order %s (order still placed): %s",
+                str(order.id), str(e),
+            )
+
+    return "__COMPLETE__"
 
 
 # ---------------------------------------------------------------------------
@@ -455,9 +588,16 @@ async def _dispatch_tool_call(
 
     if tool_name == "set_items":
         items = args.get("items", [])
-        # Replace — caller can refine by calling again
-        session.collected_data["items"] = [str(i).strip() for i in items if str(i).strip()]
-        return f"Items stored: {session.collected_data['items']}"
+        source = args.get("source", "custom")
+        if source not in ("custom", "recommendation"):
+            source = "custom"
+        clean_items = [str(i).strip() for i in items if str(i).strip()]
+        # Replace items list; update per-item source map.
+        session.collected_data["items"] = clean_items
+        sources: dict = session.collected_data.setdefault("items_sources", {})
+        for item in clean_items:
+            sources[item] = source
+        return f"Items stored: {clean_items} (source={source})"
 
     elif tool_name == "set_category":
         category = args.get("category")
@@ -495,21 +635,49 @@ async def _dispatch_tool_call(
 
         try:
             from uuid import UUID as _UUID
-            from app.services.recommendation_service import get_or_generate_recommendations
-            recs = await get_or_generate_recommendations(
+            from app.services.recommendation_service import (
+                get_or_generate_recommendations,
+                get_pet_top_preferences,
+            )
+            pet_uuid = _UUID(pet_id)
+
+            # Build merged list: saved order history first, then AI recs.
+            # Mirrors deterministic _get_numbered_suggestions in order_service.py.
+            combined = []
+            seen: set = set()
+
+            preferences = get_pet_top_preferences(db, pet_uuid, category, limit=5)
+            for pref in preferences:
+                name = str(pref.get("name", "")).strip()
+                if not name or name.lower() in seen:
+                    continue
+                seen.add(name.lower())
+                combined.append({
+                    "name": name,
+                    "reason": f"Previously ordered {pref.get('used_count', 0)} time(s)",
+                    "source": "preference",
+                })
+
+            ai_recs = await get_or_generate_recommendations(
                 db,
-                pet_id=_UUID(pet_id),
+                pet_id=pet_uuid,
                 category=category,
                 increment_on_hit=True,
             )
-            if not recs:
+            for rec in (ai_recs or []):
+                name = str(rec.get("name", "")).strip()
+                if not name or name.lower() in seen:
+                    continue
+                seen.add(name.lower())
+                combined.append({
+                    "name": name,
+                    "reason": rec.get("reason", ""),
+                    "source": "ai",
+                })
+
+            if not combined:
                 return "[]"
-            # Return as JSON list of {name, reason}
-            simplified = [
-                {"name": r.get("name", ""), "reason": r.get("reason", "")}
-                for r in recs
-            ]
-            return json.dumps(simplified)
+            return json.dumps(combined)
         except Exception as e:
             logger.warning("Agentic order: recommendation fetch failed: %s", str(e))
             return "[]"
@@ -518,7 +686,24 @@ async def _dispatch_tool_call(
         return await _finalize_agentic_order(db, user, session)
 
     elif tool_name == "cancel_order":
-        # Mark session complete so it won't be reused
+        # Delete the draft Order row (no items were confirmed — nothing to keep).
+        from uuid import UUID as _UUID
+        draft_order_id_str = session.collected_data.get("draft_order_id")
+        if draft_order_id_str:
+            try:
+                draft = db.query(Order).filter(Order.id == _UUID(draft_order_id_str)).first()
+                if draft and not draft.items_description:
+                    db.delete(draft)
+            except Exception as e:
+                logger.warning("Cancel: could not delete draft order: %s", str(e))
+        elif user.active_order_id:
+            try:
+                draft = db.query(Order).filter(Order.id == user.active_order_id).first()
+                if draft and not draft.items_description:
+                    db.delete(draft)
+            except Exception as e:
+                logger.warning("Cancel: could not delete draft order via active_order_id: %s", str(e))
+
         session.is_complete = True
         user.order_state = None
         user.active_order_id = None
@@ -604,7 +789,11 @@ async def _run_agent_loop(
 
         if terminal_signal:
             # Let the model produce the closing message to the user.
-            final_response = await _call_openai_with_tools(session.messages)
+            # Use tool_choice="none" to guarantee a text reply — never a blank message.
+            # Trim to avoid sending unbounded history.
+            final_response = await _call_openai_text_only(
+                _trim_messages(session.messages)
+            )
             final_text = final_response.choices[0].message.content or ""
             session.messages.append({"role": "assistant", "content": final_text})
             return final_text
@@ -659,10 +848,17 @@ async def handle_agentic_order_step(
     session.messages.append({"role": "user", "content": user_content})
 
     # --- Run the agent loop ---
-    reply_text = await _run_agent_loop(db, user, session)
-
-    # --- Persist session ---
-    _save_session(db, session)
+    reply_text: str | None = None
+    try:
+        reply_text = await _run_agent_loop(db, user, session)
+    except Exception as e:
+        logger.error(
+            "Agent order loop failed for user %s: %s", str(user.id), str(e), exc_info=True
+        )
+        reply_text = "I ran into a problem. Please type *order* to try again."
+    finally:
+        # Always persist — even on failure, saves partial state (items, category, etc.)
+        _save_session(db, session)
 
     # --- Send reply ---
     if reply_text and mobile:

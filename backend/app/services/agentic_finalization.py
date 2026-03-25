@@ -107,6 +107,7 @@ async def compose_finalization_message(
     dashboard_url: str,
     extraction_failed: bool,
     fun_fact: str,
+    reminders_count: int = 0,
 ) -> str | None:
     """
     Compose a warm, personalised finalization message via a single LLM call.
@@ -127,17 +128,24 @@ async def compose_finalization_message(
         dashboard_url:     Full URL to the pet's dashboard.
         extraction_failed: True if at least one document failed extraction.
         fun_fact:          Pre-fetched breed fun fact string to include.
+        reminders_count:   Number of active WhatsApp reminders scheduled (0 if none).
     """
     if not _should_use_agentic_finalization():
         return None
 
     # Build a compact context string for the LLM.
+    reminder_status = (
+        f"{reminders_count} active reminder(s) scheduled"
+        if reminders_count > 0
+        else "Reminder engine ready"
+    )
     context_lines = [
         f"Pet name: {pet_name}",
         f"Species: {species}",
         f"Breed: {breed or 'unknown'}",
         f"Documents uploaded: {docs_uploaded}",
         f"Diet/supplement items recorded: {diet_count}",
+        f"WhatsApp reminder schedule: {reminder_status}",
         f"Dashboard URL: {dashboard_url}",
         f"Fun fact (include verbatim, prefixed with ✨): {fun_fact}",
     ]
