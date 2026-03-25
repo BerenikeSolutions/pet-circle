@@ -110,7 +110,7 @@ def is_openai_available() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# System prompt (v3 — aligned with PetConcierge WhatsApp Flows v4)
+# System prompt 
 # ---------------------------------------------------------------------------
 
 # Base prompt text — never injected alone. Always use _build_system_prompt().
@@ -952,7 +952,16 @@ def _trim_messages(
     # Strip any stored system messages (backward compat with old sessions
     # that may have stored the system prompt in messages[0])
     turn_msgs = [m for m in messages if m.get("role") != "system"]
-    return [{"role": "system", "content": system_content}] + turn_msgs[-max_turns:]
+    sliced = turn_msgs[-max_turns:]
+
+    # A `tool` message must always be preceded by an `assistant` message that
+    # contains `tool_calls`. Slicing can orphan `tool` messages at the start of
+    # the window. Drop messages from the front until the first message is not a
+    # `tool` role (ensuring the pair is intact).
+    while sliced and sliced[0].get("role") == "tool":
+        sliced = sliced[1:]
+
+    return [{"role": "system", "content": system_content}] + sliced
 
 
 async def _call_openai_with_tools(messages: list) -> object:

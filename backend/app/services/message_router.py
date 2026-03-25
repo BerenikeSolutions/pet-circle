@@ -281,9 +281,10 @@ async def route_message(db: Session, message_data: dict) -> None:
                 return
 
             # --- Transition from deterministic to agentic after consent step ---
-            # The deterministic _step_consent() has already asked "What is your name?"
-            # and set state=awaiting_name. The user's reply to that question becomes
-            # the first input to the agentic session.
+            # When agentic is enabled, _step_consent() sets state=agentic_onboarding
+            # directly and the handler below (after handle_onboarding_step) fires.
+            # This branch is a fallback: if a user is somehow stuck in awaiting_name
+            # (e.g. legacy row), their next text message transitions them to agentic.
             if user.onboarding_state == "awaiting_name" and _should_use_agentic_onboarding():
                 user.onboarding_state = "agentic_onboarding"
                 db.commit()
@@ -318,6 +319,12 @@ async def route_message(db: Session, message_data: dict) -> None:
                     )
                 return
             await handle_onboarding_step(db, user, text, send_text_message, message_data=message_data)
+            # _step_consent() may have transitioned directly to agentic_onboarding
+            # without sending a reply. Call the agentic handler now so the LLM
+            # sends Step 1 in the same request (avoids the double "thank you" bug).
+            if user.onboarding_state == "agentic_onboarding":
+                from app.services.agentic_onboarding import handle_agentic_onboarding_step
+                await handle_agentic_onboarding_step(db, user, message_data, send_text_message)
             return
 
         # --- Step 3: User is fully onboarded — route by message type ---

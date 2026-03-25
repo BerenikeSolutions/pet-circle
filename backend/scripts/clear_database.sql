@@ -1,5 +1,21 @@
 -- Clear all data from the database (keeps preventive_master, product_catalog, nudge_config reference data).
 -- Truncates tables in FK-safe order (children first) using CASCADE.
+--
+-- TARGETED RESET (single test number — replace phone number below):
+-- Resets onboarding session and user state without wiping the full DB.
+--
+--   DO $$
+--   DECLARE v_uid UUID;
+--   BEGIN
+--     SELECT id INTO v_uid FROM users WHERE phone_number = '919XXXXXXXXX';
+--     DELETE FROM agent_onboarding_sessions WHERE user_id = v_uid;
+--     DELETE FROM agent_order_sessions       WHERE user_id = v_uid;
+--     UPDATE users
+--        SET onboarding_state        = 'awaiting_consent',
+--            dashboard_link_pending  = FALSE
+--      WHERE id = v_uid;
+--   END $$;
+--
 
 -- Logs & engagement
 TRUNCATE TABLE message_logs CASCADE;

@@ -453,6 +453,22 @@ async def _step_consent(db, user, text_lower, send_fn, message_data: dict | None
     """Handle consent step."""
     if text_lower in _YES_INPUTS:
         user.consent_given = True
+
+        # When agentic onboarding is enabled, hand off immediately.
+        # Set state to agentic_onboarding and return without sending a reply —
+        # message_router will call handle_agentic_onboarding_step() in the same
+        # request so the LLM sends Step 1 once (no duplicate "thank you" message).
+        from app.config import settings
+        agentic_enabled = (
+            getattr(settings, "AGENTIC_ONBOARDING_ENABLED", "false").lower() == "true"
+            and bool(getattr(settings, "OPENAI_API_KEY", None))
+        )
+        if agentic_enabled:
+            user.onboarding_state = "agentic_onboarding"
+            db.commit()
+            return
+
+        # Deterministic fallback: send the name question directly.
         user.onboarding_state = "awaiting_name"
         db.commit()
 
