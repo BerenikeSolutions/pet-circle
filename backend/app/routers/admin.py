@@ -856,6 +856,31 @@ async def trigger_gcp_sync(
     return {"status": "started", "dry_run": body.dry_run, "limit": body.limit}
 
 
+@router.get("/chat-link")
+def generate_chat_link(db: Session = Depends(get_db)):
+    """
+    Generate a WhatsApp Click-to-Chat URL.
+
+    Returns a wa.me link with "Hi" prefilled so users only need to tap Send.
+    The conversation then follows the standard welcome + consent onboarding flow.
+
+    Raises:
+        503 if WHATSAPP_BUSINESS_PHONE is not configured.
+    """
+    from urllib.parse import quote
+
+    business_phone = getattr(settings, "WHATSAPP_BUSINESS_PHONE", None)
+    if not business_phone:
+        raise HTTPException(
+            status_code=503,
+            detail="WHATSAPP_BUSINESS_PHONE is not configured. Set it in .env.",
+        )
+
+    phone_digits = "".join(ch for ch in business_phone if ch.isdigit())
+    url = f"https://wa.me/{phone_digits}?text={quote('Hi', safe='')}"
+    return {"url": url}
+
+
 @router.get("/storage-stats")
 def get_storage_stats(db: Session = Depends(get_db)):
     """

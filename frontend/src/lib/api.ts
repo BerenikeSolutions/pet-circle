@@ -843,7 +843,7 @@ export async function getNutritionAnalysis(token: string): Promise<NutritionAnal
   const timeoutId = setTimeout(() => controller.abort(), 30000); // Longer timeout — AI calls involved
   try {
     const res = await fetch(`${API_BASE}/dashboard/${token}/nutrition-analysis`, {
-      cache: "no-store",
+      next: { revalidate: 300 }, // 5-min client cache — analysis is AI-generated and slow
       signal: controller.signal,
     });
     if (!res.ok) {
@@ -862,7 +862,7 @@ export async function getNutritionAnalysis(token: string): Promise<NutritionAnal
 export async function getNutritionImportance(token: string): Promise<{ note: string }> {
   try {
     const res = await fetch(`${API_BASE}/dashboard/${token}/nutrition-importance`, {
-      cache: "no-store",
+      next: { revalidate: 300 }, // 5-min client cache — AI-generated, rarely changes
     });
     if (!res.ok) return { note: "" };
     return res.json();
@@ -1135,6 +1135,7 @@ export async function getConditionTimeline(
   const timeoutId = setTimeout(() => controller.abort(), 15000);
   try {
     const res = await fetch(`${API_BASE}/dashboard/${token}/condition-timeline`, {
+      cache: "no-store",
       signal: controller.signal,
     });
     if (!res.ok) {
@@ -1179,6 +1180,7 @@ export async function getLastVetVisit(
   const timeoutId = setTimeout(() => controller.abort(), 15000);
   try {
     const res = await fetch(`${API_BASE}/dashboard/${token}/last-vet-visit`, {
+      cache: "no-store",
       signal: controller.signal,
     });
     if (!res.ok) {
@@ -1369,6 +1371,7 @@ export async function getHealthSummary(
   const timeoutId = setTimeout(() => controller.abort(), 30000);
   try {
     const res = await fetch(`${API_BASE}/dashboard/${token}/health-summary`, {
+      next: { revalidate: 300 }, // 5-min client cache — AI-generated, 7-day server cache
       signal: controller.signal,
     });
     if (!res.ok) return { summary: "" };
@@ -1386,6 +1389,7 @@ export async function getVetQuestions(token: string): Promise<VetQuestion[]> {
   const timeoutId = setTimeout(() => controller.abort(), 30000);
   try {
     const res = await fetch(`${API_BASE}/dashboard/${token}/vet-questions`, {
+      next: { revalidate: 300 }, // 5-min client cache — AI-generated, 7-day server cache
       signal: controller.signal,
     });
     if (!res.ok) return [];

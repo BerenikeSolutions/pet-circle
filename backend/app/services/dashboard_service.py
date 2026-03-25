@@ -423,13 +423,10 @@ def get_dashboard_data(db: Session, token: str) -> dict:
     # --- Load pending conflict flags ---
     # Fetches conflicts for all preventive records belonging to this pet.
     # Only 'pending' conflicts are surfaced — resolved/auto-resolved are historical.
-    conflict_record_ids = [
-        rec["id"] for rec in preventive_records if rec.get("id")
-    ]
+    # Reuse already-loaded preventive_data ORM tuples to avoid a redundant full table scan.
     conflict_rows = []
-    if conflict_record_ids:
-        # Reuse already-loaded preventive_data tuples — avoids a redundant full table scan
-        pet_rec_map = {str(r.id): r for r, _ in preventive_data}
+    pet_rec_map = {str(r.id): r for r, _ in preventive_data}
+    if pet_rec_map:
         cf_rows = (
             db.query(ConflictFlag)
             .filter(

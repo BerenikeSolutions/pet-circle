@@ -62,6 +62,127 @@ function monStatus(nextDue: string | null, lastDone: string | null): string {
   return diff < 0 ? 'overdue' : diff <= 30 ? 'upcoming' : 'done';
 }
 
+// ─── VaxRow — must be defined outside HealthTab so React keeps a stable
+//     component identity across re-renders (avoids unmount/remount on every
+//     parent state change which resets all internal useState values).
+interface VaxRowProps {
+  vax: { item_name: string; last_done_date: string | null; next_due_date: string | null; custom_recurrence_days: number | null; recurrence_days: number; [key: string]: unknown };
+  isOptional: boolean;
+  onEditVax: (name: string) => void;
+  onFreqChange: (name: string, months: number, unit: string) => void;
+}
+function VaxRow({ vax, isOptional, onEditVax, onFreqChange }: VaxRowProps) {
+  const status = getStatusForRecord(vax as Parameters<typeof getStatusForRecord>[0]);
+  const initialFreq = daysToFreq(vax.custom_recurrence_days ?? vax.recurrence_days);
+  const [reminderOn, setReminderOn] = useState(true);
+  const [freq, setFreq] = useState(initialFreq.freq);
+  const [freqUnit, setFreqUnit] = useState(initialFreq.unit);
+  const [showVaxFreq, setShowVaxFreq] = useState(false);
+  const currentDays = vax.custom_recurrence_days ?? vax.recurrence_days;
+  const currentMonths = Math.round(currentDays / 30) || 12;
+  const vaxFreqLabel = VAX_FREQ_LABELS[currentMonths] || `Every ${currentMonths} months`;
+
+  return (
+    <div className="py-3 border-b border-gray-50 last:border-0">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: getColor(status) }} />
+          <div>
+            <p className="text-sm font-medium text-gray-900">{vax.item_name}</p>
+            <p className="text-[11px] text-gray-500">
+              Given: {formatApiDate(vax.last_done_date)} · Next: {formatApiDate(vax.next_due_date)}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <StatusBadge status={status} />
+          <button onClick={() => onEditVax(vax.item_name)} className="text-xs text-brand font-semibold">Edit</button>
+        </div>
+      </div>
+      {isOptional && (
+        <div className="mt-1 pl-4 flex items-center justify-between py-2">
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500">Reminder</span>
+            <button
+              onClick={() => setShowVaxFreq(true)}
+              className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200"
+            >
+              {vaxFreqLabel}
+            </button>
+          </div>
+          <Toggle checked={reminderOn} onChange={setReminderOn} />
+          <VaxFreqModal
+            open={showVaxFreq}
+            onClose={() => setShowVaxFreq(false)}
+            currentMonths={currentMonths}
+            onSave={(months) => { onFreqChange(vax.item_name, months, 'month'); }}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── BundleSubItem — must be defined outside HealthTab for the same reason.
+type SubItemProps = {
+  item: {
+    key: string;
+    name: string;
+    source: 'petcircle' | 'vet';
+    status: string;
+    lastDone: string | null;
+    nextDue: string | null;
+    note?: string;
+    onLog: () => void;
+  };
+};
+function BundleSubItem({ item }: SubItemProps) {
+  const [reminderOn, setReminderOn] = useState(true);
+  const [rFreq, setRFreq] = useState(1);
+  const [rUnit, setRUnit] = useState('month');
+  const c = getColor(item.status);
+  const bg = getBg(item.status);
+  const lbl = getLabel(item.status);
+  return (
+    <div style={{ borderTop: '1px solid #F0EDE8', padding: '9px 12px 0' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+        <div style={{ width: 2, alignSelf: 'stretch', background: c + '44', borderRadius: 2, flexShrink: 0, marginTop: 3, marginLeft: 6 }} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap', marginBottom: 3 }}>
+            <span style={{ fontSize: 12, fontWeight: 600, color: '#1A1A1A' }}>{item.name}</span>
+            {item.source === 'petcircle' ? (
+              <span style={{ background: '#FFF3EE', color: '#D44800', borderRadius: 20, padding: '1px 7px', fontSize: 9, fontWeight: 700 }}>🐾 PetCircle Recommended</span>
+            ) : (
+              <span style={{ background: '#F0F6FF', color: '#007AFF', borderRadius: 20, padding: '1px 7px', fontSize: 9, fontWeight: 700 }}>Vet Prescribed</span>
+            )}
+          </div>
+          <div style={{ fontSize: 10.5, color: '#AEAEB2', lineHeight: 1.4, marginBottom: 4 }}>
+            {item.lastDone
+              ? `Last: ${formatApiDate(item.lastDone)}${item.nextDue ? ' · Next: ' + formatApiDate(item.nextDue) : ''}`
+              : (item.note || 'No record')}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+            <div style={{ background: bg, color: c, borderRadius: 20, padding: '2px 8px', fontSize: 10, fontWeight: 700 }}>{lbl}</div>
+            <button
+              onClick={item.onLog}
+              style={{ background: '#F2EDE8', border: 'none', borderRadius: 7, padding: '3px 7px', fontSize: 10, color: '#555', cursor: 'pointer', fontWeight: 600 }}
+            >
+              ✎ Log
+            </button>
+          </div>
+        </div>
+      </div>
+      <div style={{ marginLeft: 16, marginBottom: 8 }}>
+        <ReminderBar
+          enabled={reminderOn} onToggle={setReminderOn}
+          freq={rFreq} unit={rUnit}
+          onFreqChange={(f, u) => { setRFreq(f); setRUnit(u); }}
+        />
+      </div>
+    </div>
+  );
+}
+
 export default function HealthTab({ data, token, onUpdated, onCartClick }: HealthTabProps) {
   const [editingVax, setEditingVax] = useState<string | null>(null);
   const [editingCheckup, setEditingCheckup] = useState<string | null>(null);
@@ -255,118 +376,8 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
     } catch { setWeightMsg('Failed to save'); } finally { setWeightSaving(false); }
   };
 
-  // ── VaxRow sub-component ──────────────────────────────────────────────────
-  const VaxRow = ({ vax, isOptional }: { vax: typeof records[0]; isOptional: boolean }) => {
-    const status = getStatusForRecord(vax);
-    const initialFreq = daysToFreq(vax.custom_recurrence_days ?? vax.recurrence_days);
-    const [reminderOn, setReminderOn] = useState(true);
-    const [freq, setFreq] = useState(initialFreq.freq);
-    const [freqUnit, setFreqUnit] = useState(initialFreq.unit);
-    const [showVaxFreq, setShowVaxFreq] = useState(false);
-    const currentDays = vax.custom_recurrence_days ?? vax.recurrence_days;
-    const currentMonths = Math.round(currentDays / 30) || 12;
-    const vaxFreqLabel = VAX_FREQ_LABELS[currentMonths] || `Every ${currentMonths} months`;
-
-    return (
-      <div className="py-3 border-b border-gray-50 last:border-0">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: getColor(status) }} />
-            <div>
-              <p className="text-sm font-medium text-gray-900">{vax.item_name}</p>
-              <p className="text-[11px] text-gray-500">
-                Given: {formatApiDate(vax.last_done_date)} · Next: {formatApiDate(vax.next_due_date)}
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <StatusBadge status={status} />
-            <button onClick={() => setEditingVax(vax.item_name)} className="text-xs text-brand font-semibold">Edit</button>
-          </div>
-        </div>
-        {isOptional && (
-          <div className="mt-1 pl-4 flex items-center justify-between py-2">
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-gray-500">Reminder</span>
-              <button
-                onClick={() => setShowVaxFreq(true)}
-                className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200"
-              >
-                {vaxFreqLabel}
-              </button>
-            </div>
-            <Toggle checked={reminderOn} onChange={setReminderOn} />
-            <VaxFreqModal
-              open={showVaxFreq}
-              onClose={() => setShowVaxFreq(false)}
-              currentMonths={currentMonths}
-              onSave={(months) => { handleFreqChange(vax.item_name, months, 'month'); }}
-            />
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  // ── BundleSubItem — owns its own reminder state ───────────────────────────
-  type SubItemProps = {
-    item: {
-      key: string;
-      name: string;
-      source: 'petcircle' | 'vet';
-      status: string;
-      lastDone: string | null;
-      nextDue: string | null;
-      note?: string;
-      onLog: () => void;
-    };
-  };
-  const BundleSubItem = ({ item }: SubItemProps) => {
-    const [reminderOn, setReminderOn] = useState(true);
-    const [rFreq, setRFreq] = useState(1);
-    const [rUnit, setRUnit] = useState('month');
-    const c = getColor(item.status);
-    const bg = getBg(item.status);
-    const lbl = getLabel(item.status);
-    return (
-      <div style={{ borderTop: '1px solid #F0EDE8', padding: '9px 12px 0' }}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-          <div style={{ width: 2, alignSelf: 'stretch', background: c + '44', borderRadius: 2, flexShrink: 0, marginTop: 3, marginLeft: 6 }} />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap', marginBottom: 3 }}>
-              <span style={{ fontSize: 12, fontWeight: 600, color: '#1A1A1A' }}>{item.name}</span>
-              {item.source === 'petcircle' ? (
-                <span style={{ background: '#FFF3EE', color: '#D44800', borderRadius: 20, padding: '1px 7px', fontSize: 9, fontWeight: 700 }}>🐾 PetCircle Recommended</span>
-              ) : (
-                <span style={{ background: '#F0F6FF', color: '#007AFF', borderRadius: 20, padding: '1px 7px', fontSize: 9, fontWeight: 700 }}>Vet Prescribed</span>
-              )}
-            </div>
-            <div style={{ fontSize: 10.5, color: '#AEAEB2', lineHeight: 1.4, marginBottom: 4 }}>
-              {item.lastDone
-                ? `Last: ${formatApiDate(item.lastDone)}${item.nextDue ? ' · Next: ' + formatApiDate(item.nextDue) : ''}`
-                : (item.note || 'No record')}
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-              <div style={{ background: bg, color: c, borderRadius: 20, padding: '2px 8px', fontSize: 10, fontWeight: 700 }}>{lbl}</div>
-              <button
-                onClick={item.onLog}
-                style={{ background: '#F2EDE8', border: 'none', borderRadius: 7, padding: '3px 7px', fontSize: 10, color: '#555', cursor: 'pointer', fontWeight: 600 }}
-              >
-                ✎ Log
-              </button>
-            </div>
-          </div>
-        </div>
-        <div style={{ marginLeft: 16, marginBottom: 8 }}>
-          <ReminderBar
-            enabled={reminderOn} onToggle={setReminderOn}
-            freq={rFreq} unit={rUnit}
-            onFreqChange={(f, u) => { setRFreq(f); setRUnit(u); }}
-          />
-        </div>
-      </div>
-    );
-  };
+  // VaxRow and BundleSubItem are defined above HealthTab (module level)
+  // to give them stable identities and prevent remount on every parent re-render.
 
   // ── Bundle sub-component ──────────────────────────────────────────────────
   const CheckupBundle = ({
@@ -437,13 +448,13 @@ export default function HealthTab({ data, token, onUpdated, onCartClick }: Healt
         {mandatoryVax.length > 0 && (
           <div className="mb-3">
             <p className="text-[10px] font-bold text-gray-400 uppercase mb-1">Mandatory</p>
-            {mandatoryVax.map(v => <VaxRow key={v.item_name} vax={v} isOptional={false} />)}
+            {mandatoryVax.map(v => <VaxRow key={v.item_name} vax={v} isOptional={false} onEditVax={setEditingVax} onFreqChange={handleFreqChange} />)}
           </div>
         )}
         {optionalVax.length > 0 && (
           <div>
             <p className="text-[10px] font-bold text-gray-400 uppercase mb-1">Optional</p>
-            {optionalVax.map(v => <VaxRow key={v.item_name} vax={v} isOptional={true} />)}
+            {optionalVax.map(v => <VaxRow key={v.item_name} vax={v} isOptional={true} onEditVax={setEditingVax} onFreqChange={handleFreqChange} />)}
           </div>
         )}
         {vaccines.length === 0 && (

@@ -393,6 +393,7 @@ SEED_DATA: list[dict] = [
     # Optional vaccine covering Bordetella bronchiseptica + Parainfluenza.
     # Brand: Nobivac KC. Annual recurrence (365 days).
     # Recommended for dogs that board, attend daycare, or visit dog parks.
+    # Category: 'complete' (optional) — not universally required.
     {
         "item_name": "Kennel Cough (Nobivac KC)",
         "category": "complete",
@@ -406,6 +407,7 @@ SEED_DATA: list[dict] = [
     # --- Canine Coronavirus / CCoV (Dogs only) ---
     # Optional vaccine. Annual recurrence (365 days).
     # Protects against canine enteric coronavirus causing gastroenteritis.
+    # Category: 'complete' (optional) — not universally required.
     {
         "item_name": "Canine Coronavirus (CCoV)",
         "category": "complete",

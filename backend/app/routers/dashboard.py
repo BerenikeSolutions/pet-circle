@@ -1487,19 +1487,7 @@ async def dashboard_health_summary(
     """
     try:
         dt = validate_dashboard_token(db, token)
-        stale_cutoff = datetime.utcnow() - timedelta(days=AI_INSIGHT_CACHE_DAYS)
-        cached = (
-            db.query(PetAiInsight)
-            .filter(
-                PetAiInsight.pet_id == dt.pet_id,
-                PetAiInsight.insight_type == "conditions_summary",
-                PetAiInsight.generated_at >= stale_cutoff,
-            )
-            .first()
-        )
-        if cached:
-            return cached.content_json
-        # Cache miss — load full dashboard data for GPT context
+        # get_or_generate_insight handles cache check internally — no need to duplicate it here
         data = get_dashboard_data(db, token)
         return await get_or_generate_insight(
             db=db,
@@ -1532,20 +1520,7 @@ async def dashboard_vet_questions(
     """
     try:
         dt = validate_dashboard_token(db, token)
-        stale_cutoff = datetime.utcnow() - timedelta(days=AI_INSIGHT_CACHE_DAYS)
-        cached = (
-            db.query(PetAiInsight)
-            .filter(
-                PetAiInsight.pet_id == dt.pet_id,
-                PetAiInsight.insight_type == "vet_questions",
-                PetAiInsight.generated_at >= stale_cutoff,
-            )
-            .first()
-        )
-        if cached:
-            result = cached.content_json
-            return result if isinstance(result, list) else []
-        # Cache miss — load full dashboard data for GPT context
+        # get_or_generate_insight handles cache check internally — no need to duplicate it here
         data = get_dashboard_data(db, token)
         result = await get_or_generate_insight(
             db=db,

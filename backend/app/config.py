@@ -105,6 +105,12 @@ class Settings(BaseSettings):
     # Optional — if not set, only dashboard notification (no WhatsApp alert).
     ORDER_NOTIFICATION_PHONE: str | None = None
 
+    # --- Click-to-Chat ---
+    # Dialable WhatsApp Business phone number for wa.me link generation.
+    # Digits only, no + prefix (e.g. "919876543210").
+    # Optional — only used by /admin/chat-link. App runs without it.
+    WHATSAPP_BUSINESS_PHONE: str | None = None
+
     # --- Feature Flags ---
     # Set to 'true' to enable AI-driven conversational onboarding.
     # Requires OPENAI_API_KEY. Falls back to deterministic flow if either is absent

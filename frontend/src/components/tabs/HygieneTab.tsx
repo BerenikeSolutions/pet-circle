@@ -96,6 +96,10 @@ export default function HygieneTab({ data, token, onUpdated, onCartClick }: Hygi
   const [addCategory, setAddCategory] = useState<'daily' | 'periodic'>('daily');
   const [addForm, setAddForm] = useState({ name: '', icon: '🧹', freq: 1, unit: 'month' });
 
+  // Must be declared before any conditional return (Rules of Hooks)
+  const [freqSheetItem, setFreqSheetItem] = useState<HygienePreference | null>(null);
+  const [freqSheetValues, setFreqSheetValues] = useState({ freq: 1, unit: 'day' });
+
 
   const loadData = useCallback(async () => {
     try {
@@ -202,9 +206,6 @@ export default function HygieneTab({ data, token, onUpdated, onCartClick }: Hygi
       </div>
     );
   }
-
-  const [freqSheetItem, setFreqSheetItem] = useState<HygienePreference | null>(null);
-  const [freqSheetValues, setFreqSheetValues] = useState({ freq: 1, unit: 'day' });
 
   const renderDailyItem = (item: HygienePreference) => {
     const status = computeStatus(item);

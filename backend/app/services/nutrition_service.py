@@ -13,8 +13,11 @@ Pipeline:
     4. Aggregate, compare against targets, generate recommendations
 """
 
+import asyncio
 import json
 import logging
+import hashlib
+import time
 from datetime import datetime, date, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import func as sqlfunc
@@ -38,6 +41,12 @@ from app.core.constants import (
 from app.utils.retry import retry_openai_call
 
 logger = logging.getLogger(__name__)
+
+# In-process TTL cache for nutrition recommendations.
+# Key: SHA-256 of (pet_name, breed, sorted_conditions, gap_summary).
+# Value: (recommendation_text, timestamp). TTL = 4 hours.
+_REC_CACHE: dict[str, tuple[str, float]] = {}
+_REC_CACHE_TTL_SECONDS = 4 * 3600
 
 # Default targets used as fallback when GPT call fails
 DEFAULT_TARGETS = {
@@ -272,66 +281,48 @@ async def _call_openai_nutrition_targets(
 
 # ─── Step 3b: Product Catalog Matching ──────────────────────────────
 
-def _match_product(db: Session, label: str, item_type: str) -> ProductCatalog | None:
+def _match_product_from_catalog(catalog: list, label: str, item_type: str) -> "ProductCatalog | None":
     """
-    Multi-strategy matching of a diet item label to the product catalog.
+    In-memory multi-strategy matching against a pre-loaded product catalog slice.
+    The caller loads the catalog once; this function never issues DB queries.
 
     Strategies (in order):
-    1. Exact brand+product match (label contains brand AND product_name)
-    2. Product name keyword match (split label into words, match against product_name)
-    3. Brand-only match (label contains brand)
-    4. For supplements, also search supplement-related products
+    1. Exact product_name match (label ⊆ product_name or product_name ⊆ label)
+    2. Keyword match — any significant word in label appears in product_name
+    3. Brand-only match — first word of label matches brand
+    4. Reverse match — brand or product_name contained in label
     """
     label_lower = label.lower().strip()
-
-    # Strategy 1: product_name contains label (or label contains product_name)
-    product = (
-        db.query(ProductCatalog)
-        .filter(
-            ProductCatalog.category == "food",
-            sqlfunc.lower(ProductCatalog.product_name).contains(label_lower[:50])
-        )
-        .first()
-    )
-    if product:
-        return product
-
-    # Strategy 2: keyword match — try matching individual significant words
     words = [w for w in label_lower.split() if len(w) > 2]
-    for word in words:
-        product = (
-            db.query(ProductCatalog)
-            .filter(
-                ProductCatalog.category == "food",
-                sqlfunc.lower(ProductCatalog.product_name).contains(word)
-            )
-            .first()
-        )
-        if product:
-            return product
 
-    # Strategy 3: brand match
-    product = (
-        db.query(ProductCatalog)
-        .filter(
-            ProductCatalog.category == "food",
-            sqlfunc.lower(ProductCatalog.brand).contains(label_lower.split()[0] if label_lower.split() else "")
-        )
-        .first()
-    )
-    if product:
-        return product
-
-    # Strategy 4: reverse match — brand or product_name contained in label
-    products = (
-        db.query(ProductCatalog)
-        .filter(ProductCatalog.category == "food")
-        .all()
-    )
-    for p in products:
-        if p.brand and p.brand.lower() in label_lower:
+    for p in catalog:
+        name_l = (p.product_name or "").lower()
+        brand_l = (p.brand or "").lower()
+        # Strategy 1: exact substring match
+        if label_lower[:50] in name_l or name_l[:50] in label_lower:
             return p
-        if p.product_name and p.product_name.lower()[:30] in label_lower:
+
+    for p in catalog:
+        name_l = (p.product_name or "").lower()
+        # Strategy 2: any significant keyword
+        for word in words:
+            if word in name_l:
+                return p
+
+    first_word = label_lower.split()[0] if label_lower.split() else ""
+    for p in catalog:
+        brand_l = (p.brand or "").lower()
+        # Strategy 3: brand match on first word
+        if first_word and first_word in brand_l:
+            return p
+
+    for p in catalog:
+        brand_l = (p.brand or "").lower()
+        name_l = (p.product_name or "").lower()
+        # Strategy 4: reverse — brand/name contained in label
+        if brand_l and brand_l in label_lower:
+            return p
+        if name_l and name_l[:30] in label_lower:
             return p
 
     return None
@@ -435,8 +426,18 @@ async def generate_recommendation(
     """
     Generate a personalized 1-2 sentence nutrition recommendation via GPT.
 
-    Falls back to a template string on failure.
+    Results are cached in-process for 4 hours keyed by inputs to avoid
+    redundant OpenAI calls when multiple tabs trigger analyze_nutrition()
+    in the same session. Falls back to a template string on failure.
     """
+    # Build a stable cache key from all inputs
+    key_raw = f"{pet_name}|{breed}|{','.join(sorted(conditions))}|{gap_summary}"
+    cache_key = hashlib.sha256(key_raw.encode()).hexdigest()
+
+    cached = _REC_CACHE.get(cache_key)
+    if cached and (time.time() - cached[1]) < _REC_CACHE_TTL_SECONDS:
+        return cached[0]
+
     try:
         client = _get_openai_client()
         context = f"Pet: {pet_name}, Breed: {breed}"
@@ -455,11 +456,12 @@ async def generate_recommendation(
         )
         text = response.choices[0].message.content.strip()
         if text:
+            _REC_CACHE[cache_key] = (text, time.time())
             return text
     except Exception as e:
         logger.error("Nutrition recommendation generation failed: %s", e)
 
-    # Fallback
+    # Fallback (not cached — allow retry on next call)
     return f"Consider consulting your vet about {pet_name}'s nutritional needs based on breed-specific requirements."
 
 
@@ -506,10 +508,7 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
 
     breed_key = (pet.breed or "").lower().strip()
 
-    # Get breed-specific targets via AI (cached)
-    targets = await get_nutrition_targets(db, pet.species, pet.breed, pet.dob)
-
-    # Get conditions for context-aware analysis
+    # All DB reads done synchronously up front
     conditions = (
         db.query(Condition)
         .filter(Condition.pet_id == pet_id, Condition.is_active == True)
@@ -518,12 +517,35 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
     condition_names = [c.name.lower() for c in conditions]
     has_hip_dysplasia = any("hip" in c or "dysplasia" in c for c in condition_names)
 
-    # Get diet items
     diet_items = (
         db.query(DietItem)
         .filter(DietItem.pet_id == pet_id)
         .all()
     )
+
+    # Load the food product catalog once — avoids N+1 queries in per-item matching
+    food_catalog = db.query(ProductCatalog).filter(ProductCatalog.category == "food").all()
+
+    # Separate items needing AI estimation from those matched in the product catalog
+    catalog_items: list[tuple] = []   # (item, product)
+    unmatched_items: list = []        # items needing AI estimation
+    for item in diet_items:
+        product = _match_product_from_catalog(food_catalog, item.label, item.type)
+        if product:
+            catalog_items.append((item, product))
+        else:
+            unmatched_items.append(item)
+
+    # Fire breed-targets lookup and all per-item AI estimations in parallel
+    targets_coro = get_nutrition_targets(db, pet.species, pet.breed, pet.dob)
+    estimation_coros = [estimate_food_nutrition(db, item.label, item.type) for item in unmatched_items]
+
+    results = await asyncio.gather(targets_coro, *estimation_coros, return_exceptions=True)
+    targets = results[0] if not isinstance(results[0], Exception) else dict(DEFAULT_TARGETS)
+    estimations = [
+        r if not isinstance(r, Exception) else None
+        for r in results[1:]
+    ]
 
     # Aggregate nutritional values
     actual = {
@@ -532,19 +554,13 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
         "vitamin_e": 0, "vitamin_d3": 0, "glucosamine": 0, "probiotics": False,
     }
 
-    matched_count = 0
-    for item in diet_items:
-        # Try product catalog match first
-        product = _match_product(db, item.label, item.type)
+    matched_count = len(catalog_items)
+    for _, product in catalog_items:
+        _accumulate_from_product(actual, product)
 
-        if product:
-            matched_count += 1
-            _accumulate_from_product(actual, product)
-        else:
-            # AI estimation for unmatched items
-            estimated = await estimate_food_nutrition(db, item.label, item.type)
-            if estimated:
-                _accumulate_from_estimation(actual, estimated)
+    for estimated in estimations:
+        if estimated:
+            _accumulate_from_estimation(actual, estimated)
 
     # If no items at all, provide minimal estimates
     if not diet_items:

@@ -160,29 +160,33 @@ Step 1 — Confirm parent name:
   {whatsapp_name}. Should I use this as your name? Reply yes or enter a
   different name."
 
-Step 2 — Pet name and species:
-  "Thanks, {parent_name}! What is your pet's name, and is it a dog or a cat?"
+Step 2 — Pet name:
+  "Thanks, {parent_name}! What is your pet's name?"
 
 Step 3 — Photo request:
   "Love that name! Do you have a photo of {pet_name} you'd like to share?
   We'd love to meet them!"
 
 Step 3a — If photo shared:
-  Analyse breed from image. Respond warmly and personally.
+  The system will analyse the image and inject a [System: AI detected: species=..., breed=...] context.
+  Use the detected species and breed silently — do NOT tell the user you identified them from the photo.
+  Respond warmly and personally about the photo.
   CRITICAL: NEVER assume or imply the pet's sex/gender at this point — you
   do not know it yet. Use neutral language only: {pet_name}, "they",
   "this one", "absolutely adorable", "what a face".
   NEVER say: "gorgeous boy", "good girl", "he", "she" before sex is confirmed.
   CORRECT: "Oh, what a happy dog! Look at that face! {pet_name} looks like
   a Golden Retriever — absolutely adorable. They are going to get the best care."
-  Then ask: "I have noted the breed. Just two more quick things — is {pet_name}
-  male or female, and what is the date of birth? (approximately is fine)"
+  If AI detected species and breed confidently: ask only gender and DOB.
+  If AI could NOT detect species (species=unknown or null): ask species, breed, gender, and DOB.
+  If AI detected species but NOT breed (breed=unknown): ask breed, gender, and DOB.
 
-Step 3b — If no photo:
+Step 3b — If no photo (user declines or says skip/later):
   "No worries — you can always add one later! A couple of quick questions:
-  1. What breed is {pet_name}?
-  2. Is {pet_name} male or female?
-  3. Date of birth? (approximately is fine)"
+  1. Is {pet_name} a dog or a cat?
+  2. What breed is {pet_name}?
+  3. Is {pet_name} male or female?
+  4. Date of birth? (approximately is fine)"
 
 Step 4 — Present setup options (ALWAYS exactly 2, never 3):
   "Perfect! Setting up {pet_name}'s profile takes less than a minute —
@@ -197,13 +201,58 @@ Step 4 — Present setup options (ALWAYS exactly 2, never 3):
 ## PATH A — GUIDED SETUP
 
 Round 1 of 3 — Health:
-  "Let's start with {pet_name}'s health. Answer here on WhatsApp —
-  skip anything you're not sure of:
-  1. Last vaccination date and type?
-  2. Last deworming date?
-  3. Flea and tick prevention — product used and last dose?
-  4. Any recent blood tests? (date and key findings)
-  5. Any allergies or ongoing medications?"
+  Always list vaccine names explicitly. Use the pet's species from session state.
+
+  FOR DOGS (adult, age ≥ 1 year):
+    "Let's start with {pet_name}'s health. Answer here on WhatsApp —
+    skip anything you're not sure of:
+    1. Mandatory vaccines — Rabies, DHPPi (7-in-1 / 9-in-1). When was each last
+       given? (If both were done on the same date, just share that one date!)
+    2. Optional vaccines — Kennel Cough (Nobivac KC), Canine Coronavirus (CCoV),
+       Leptospirosis, Canine Influenza. Has {pet_name} had any of these? If yes,
+       when?
+    3. Last deworming date?
+    4. Flea and tick prevention — product used and last dose?
+    5. Any recent blood tests? (date and key findings)
+    6. Any allergies or ongoing medications?"
+
+  FOR DOGS (puppy, age < 1 year — infer from DOB in session state):
+    "Let's start with {pet_name}'s health. Answer here on WhatsApp —
+    skip anything you're not sure of:
+    1. Puppy mandatory vaccines — DHPPi 1st Dose, DHPPi 2nd Dose, DHPPi 3rd
+       Dose, Puppy Booster, Rabies. Which have been given and when?
+       (If multiple doses were given on the same date, just share that one date!)
+    2. Optional vaccines — Kennel Cough (Nobivac KC), Canine Coronavirus (CCoV),
+       Leptospirosis, Canine Influenza. Has {pet_name} had any of these? If yes,
+       when?
+    3. Last deworming date?
+    4. Flea and tick prevention — product used and last dose?
+    5. Any recent blood tests? (date and key findings)
+    6. Any allergies or ongoing medications?"
+
+  FOR CATS:
+    "Let's start with {pet_name}'s health. Answer here on WhatsApp —
+    skip anything you're not sure of:
+    1. Mandatory vaccines — Rabies, Feline Core (FVRCP). When was each last given?
+       (If both were done on the same date, just share that one date!)
+    2. Optional vaccines — FeLV Vaccine, FIV Vaccine. Has {pet_name} had any of
+       these? If yes, when?
+    3. Last deworming date?
+    4. Flea and tick prevention — product used and last dose?
+    5. Any recent blood tests? (date and key findings)
+    6. Any allergies or ongoing medications?"
+
+  VACCINE DATE INFERENCE RULES (apply to all species):
+  - If user gives ONE date for mandatory vaccines with no per-vaccine breakdown →
+    assume that date applies to ALL mandatory vaccines and record it for each.
+    Do NOT ask them to repeat it per vaccine.
+  - If user gives ONE date for optional vaccines with no per-vaccine breakdown →
+    ask once to confirm: "Was that date for both [optional vaccine names]?" then
+    apply accordingly based on the reply.
+  - If user mentions a specific vaccine name along with a date → record it
+    immediately; do NOT ask about that vaccine again separately.
+  - If user says a vaccine was not given / they don't have it → skip it cleanly;
+    do not push.
 
   After response: "All saved! Moving on."
 
@@ -215,7 +264,7 @@ Round 2 of 3 — Nutrition:
   4. Any treats or toppers?
   5. Any food sensitivities or foods you avoid?"
 
-  After response: "Perfect! {pet_name}'s nutrition profile is saved."
+  After response: "Got it! {pet_name}'s current diet is saved. You'll be able to see the full nutrition profile on the dashboard."
 
 Round 3 of 3 — Grooming:
   "Last one — a couple of quick questions about {pet_name}'s grooming:
@@ -328,7 +377,8 @@ dashboard link. Use it directly in your closing message.
 
 - Never repeat a question already answered earlier in the conversation
 - Always use the pet's name — never "your pet" or "it"
-- Infer safely: if the user said "Bruno, dog" do not ask species again
+- Species detection priority: (1) AI photo analysis result (system-injected), (2) user explicitly states it, (3) inferred from breed name. Only ask the user directly if none of these yield a species.
+- Infer safely: if the user said "Bruno, dog" or the photo was already analysed, do not ask species again
 - If the user says "not sure" or "skip", accept it and move on without pushing
 - Store all collected data using the available tools the moment it is provided
 - Species: only "dog" or "cat". Politely clarify if the user says something else.
@@ -1036,12 +1086,22 @@ def _trim_messages(
     turn_msgs = [m for m in messages if m.get("role") != "system"]
     sliced = turn_msgs[-max_turns:]
 
-    # A `tool` message must always be preceded by an `assistant` message that
-    # contains `tool_calls`. Slicing can orphan `tool` messages at the start of
-    # the window. Drop messages from the front until the first message is not a
-    # `tool` role (ensuring the pair is intact).
-    while sliced and sliced[0].get("role") == "tool":
-        sliced = sliced[1:]
+    # A `tool` message must always follow an `assistant` message that contains
+    # `tool_calls` with a matching tool_call_id. Slicing can orphan `tool`
+    # messages at ANY position in the window — not just the front — if the
+    # session accumulated many turns and the backing assistant was pushed out.
+    # Collect every tool_call_id that has a backing assistant in this slice,
+    # then drop any tool message whose id is not in that set.
+    backed_ids: set[str] = set()
+    for msg in sliced:
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            for tc in msg["tool_calls"]:
+                backed_ids.add(tc["id"])
+
+    sliced = [
+        msg for msg in sliced
+        if msg.get("role") != "tool" or msg.get("tool_call_id") in backed_ids
+    ]
 
     return [{"role": "system", "content": system_content}] + sliced
 
@@ -1395,11 +1455,16 @@ async def _finalize_agentic_onboarding(
                 )
 
         # --- Diet items ---
+        # Buckets match the keys used by add_diet_items tool ("packaged", "homemade",
+        # "supplement" singular). food_type must be "packaged", "homemade", or "supplement"
+        # so classify_food returns the correct type stored in the DB and shown by the
+        # NutritionTab filter (type === 'packaged' || type === 'homemade').
         diet = cd.get("diet", {})
         for bucket, food_type in (
-            ("packaged", "packaged_food"),
-            ("homemade", "homemade_food"),
-            ("supplements", "supplement"),
+            ("packaged", "packaged"),
+            ("homemade", "homemade"),
+            ("supplements", "supplement"),  # legacy plural key
+            ("supplement", "supplement"),   # singular key from tool enum
         ):
             for item in diet.get(bucket, []):
                 try:
@@ -1873,6 +1938,7 @@ async def handle_agentic_onboarding_step(
 
     # --- Preprocess media before building the user turn ---
     injected_context: str | None = None
+    _thinking_sent = False  # guard — ensures at most one "thinking" message per turn
 
     if msg_type == "image":
         current_step = cd.get("current_step", "entry")
@@ -1883,9 +1949,15 @@ async def handle_agentic_onboarding_step(
         # - If path is B and health is not yet complete → treat as vet record image
         pet_has_species = bool(cd.get("pet", {}).get("species"))
         if not pet_has_species and current_step == "entry":
+            if mobile:
+                await send_fn(db, mobile, "Aww, let me take a look! 🐾")
+                _thinking_sent = True
             injected_context = await _preprocess_pet_photo(db, user, session, message_data)
         elif path == "B" and not cd.get("health"):
             # Vet record image sent during Path B — buffer and debounce.
+            if mobile:
+                await send_fn(db, mobile, "Got it! Reading your records, give me a moment... 📄")
+                _thinking_sent = True
             doc_context = await _preprocess_health_document(user, session, message_data)
             user_key = str(user.id)
             _pending_doc_contexts.setdefault(user_key, []).append(doc_context)
@@ -1898,6 +1970,9 @@ async def handle_agentic_onboarding_step(
             return  # no immediate reply; delayed task sends one message after all docs settle
         else:
             # Default: treat as pet photo (user may be adding one later)
+            if mobile:
+                await send_fn(db, mobile, "Aww, let me take a look! 🐾")
+                _thinking_sent = True
             injected_context = await _preprocess_pet_photo(db, user, session, message_data)
 
     elif msg_type == "document":
@@ -1905,6 +1980,9 @@ async def handle_agentic_onboarding_step(
         # Buffer extraction result and debounce — only run the agent loop once
         # after all uploads in a burst have settled.
         cd["path"] = "B"
+        if mobile:
+            await send_fn(db, mobile, "Got it! Reading your records, give me a moment... 📄")
+            _thinking_sent = True
         doc_context = await _preprocess_health_document(user, session, message_data)
         user_key = str(user.id)
         _pending_doc_contexts.setdefault(user_key, []).append(doc_context)
@@ -1957,6 +2035,10 @@ async def handle_agentic_onboarding_step(
         return
 
     session.messages.append({"role": "user", "content": user_content})
+
+    # --- Send a single "thinking" indicator before any slow AI call ---
+    if mobile and not _thinking_sent:
+        await send_fn(db, mobile, "Give me a moment... ⏳")
 
     # --- Run the agent loop ---
     reply_text: str | None = None

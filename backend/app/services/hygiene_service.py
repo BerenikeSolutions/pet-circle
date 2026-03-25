@@ -104,25 +104,22 @@ async def _generate_hygiene_tips(
     """
     breed_norm = breed.lower().strip() if breed else "mixed breed"
     tips: dict[str, str] = {}
-    uncached: list[tuple[str, str]] = []
 
-    # Check cache for each item
+    # Batch cache lookup — one query for all items instead of N queries
     cutoff = datetime.utcnow() - timedelta(days=HYGIENE_TIP_CACHE_DAYS)
-    for item_id, name in item_ids_and_names:
-        cached = (
-            db.query(HygieneTipCache)
-            .filter(
-                HygieneTipCache.species == species,
-                HygieneTipCache.breed_normalized == breed_norm,
-                HygieneTipCache.item_id == item_id,
-                HygieneTipCache.created_at >= cutoff,
-            )
-            .first()
+    item_ids = [item_id for item_id, _ in item_ids_and_names]
+    cached_rows = (
+        db.query(HygieneTipCache)
+        .filter(
+            HygieneTipCache.species == species,
+            HygieneTipCache.breed_normalized == breed_norm,
+            HygieneTipCache.item_id.in_(item_ids),
+            HygieneTipCache.created_at >= cutoff,
         )
-        if cached:
-            tips[item_id] = cached.tip
-        else:
-            uncached.append((item_id, name))
+        .all()
+    )
+    tips = {row.item_id: row.tip for row in cached_rows}
+    uncached = [(iid, name) for iid, name in item_ids_and_names if iid not in tips]
 
     if not uncached:
         return tips
@@ -170,34 +167,32 @@ async def _generate_hygiene_tips(
 
         generated: dict = json.loads(raw)
 
-        # Save to cache and collect results
+        # Collect newly generated tips
+        new_tips: dict[str, str] = {}
         for item_id, name in uncached:
             tip = generated.get(item_id, "")
             if tip:
-                # Truncate to 300 chars
-                tip = tip[:300]
-                tips[item_id] = tip
-                # Upsert cache entry
-                existing = (
-                    db.query(HygieneTipCache)
-                    .filter(
-                        HygieneTipCache.species == species,
-                        HygieneTipCache.breed_normalized == breed_norm,
-                        HygieneTipCache.item_id == item_id,
-                    )
-                    .first()
+                new_tips[item_id] = tip[:300]
+
+        if new_tips:
+            tips.update(new_tips)
+            # Batch upsert: delete stale rows then bulk-insert fresh ones
+            stale_ids = list(new_tips.keys())
+            db.query(HygieneTipCache).filter(
+                HygieneTipCache.species == species,
+                HygieneTipCache.breed_normalized == breed_norm,
+                HygieneTipCache.item_id.in_(stale_ids),
+            ).delete(synchronize_session=False)
+            db.add_all([
+                HygieneTipCache(
+                    species=species,
+                    breed_normalized=breed_norm,
+                    item_id=item_id,
+                    tip=tip,
                 )
-                if existing:
-                    existing.tip = tip
-                    existing.created_at = datetime.utcnow()
-                else:
-                    db.add(HygieneTipCache(
-                        species=species,
-                        breed_normalized=breed_norm,
-                        item_id=item_id,
-                        tip=tip,
-                    ))
-        db.commit()
+                for item_id, tip in new_tips.items()
+            ])
+            db.commit()
 
     except Exception as e:
         logger.warning("Failed to generate hygiene tips: %s", str(e))
