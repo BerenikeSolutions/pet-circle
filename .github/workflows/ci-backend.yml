@@ -35,4 +35,9 @@ jobs:
       - name: Run tests
         env:
           APP_ENV: test
-        run: pytest tests/ -v --tb=short
+        run: |
+          # Run only unit tests and isolated integration tests.
+          # test_dashboard_endpoints.py needs a live server + .tokens file.
+          # test_extraction_local.py needs OpenAI API + sample report files.
+          # Both are excluded here and run manually outside of CI.
+          pytest tests/unit/ tests/test_message_router_error_throttle.py -v --tb=short

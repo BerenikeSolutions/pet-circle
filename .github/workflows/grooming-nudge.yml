@@ -15,13 +15,23 @@ jobs:
   run-grooming-nudges:
     runs-on: ubuntu-latest
     timeout-minutes: 2
-
+    env:
+      API_URL: ${{ secrets.PRODUCTION_API_URL }}
+      ADMIN_KEY: ${{ secrets.ADMIN_SECRET_KEY }}
     steps:
+      - name: Check required secrets
+        run: |
+          if [ -z "$API_URL" ]; then
+            echo "ERROR: PRODUCTION_API_URL secret is not set."
+            echo "Add it under: GitHub repo → Settings → Secrets and variables → Actions → Secrets"
+            exit 1
+          fi
+
       - name: Trigger grooming nudge check
         run: |
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X POST "${{ secrets.PRODUCTION_API_URL }}/internal/run-grooming-nudges" \
-            -H "X-ADMIN-KEY: ${{ secrets.ADMIN_SECRET_KEY }}" \
+            -X POST "$API_URL/internal/run-grooming-nudges" \
+            -H "X-ADMIN-KEY: $ADMIN_KEY" \
             -H "Content-Type: application/json" \
             --max-time 30)
           echo "HTTP status: $STATUS"

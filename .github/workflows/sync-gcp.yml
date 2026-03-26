@@ -11,12 +11,27 @@ jobs:
   sync-gcp:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      API_URL: ${{ secrets.PRODUCTION_API_URL }}
+      ADMIN_KEY: ${{ secrets.ADMIN_SECRET_KEY }}
     steps:
+      - name: Check required secrets
+        run: |
+          if [ -z "$API_URL" ]; then
+            echo "ERROR: PRODUCTION_API_URL secret is not set."
+            echo "Add it under: GitHub repo → Settings → Secrets and variables → Actions → Secrets"
+            exit 1
+          fi
+          if [ -z "$ADMIN_KEY" ]; then
+            echo "ERROR: ADMIN_SECRET_KEY secret is not set."
+            exit 1
+          fi
+
       - name: Trigger GCP sync
         run: |
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X POST "${{ secrets.PRODUCTION_API_URL }}/admin/trigger-gcp-sync" \
-            -H "X-ADMIN-KEY: ${{ secrets.ADMIN_SECRET_KEY }}" \
+            -X POST "$API_URL/admin/trigger-gcp-sync" \
+            -H "X-ADMIN-KEY: $ADMIN_KEY" \
             -H "Content-Type: application/json" \
             -d '{"dry_run": false, "limit": 500}' \
             --max-time 30)
