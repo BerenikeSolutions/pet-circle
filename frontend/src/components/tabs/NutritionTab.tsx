@@ -387,7 +387,7 @@ export default function NutritionTab({ data, token, onCartClick, onUpdated }: Nu
                 <div style={{ background: '#FFF6ED', border: '1px solid #FF950044', borderRadius: 10, padding: '10px 12px', marginBottom: 8 }}>
                   <div style={{ fontSize: 10, fontWeight: 700, color: '#8B5E00', textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 3 }}>Nutrition info missing</div>
                   <div style={{ fontSize: 12, color: '#3A3A3A', lineHeight: 1.5 }}>
-                    No diet recorded yet. Add food items in the Current Diet section above to unlock your pet's full nutrition analysis.
+                    No diet recorded yet. Add food items in the Current Diet section above to unlock your pet&apos;s full nutrition analysis.
                   </div>
                 </div>
 

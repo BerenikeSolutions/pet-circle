@@ -194,14 +194,6 @@ export default memo(function DocumentsSection({
     };
   }, [selectedDoc]);
 
-  if (documents.length === 0) {
-    return (
-      <div className="rounded-lg border bg-white p-6 text-center text-gray-400">
-        No documents uploaded yet.
-      </div>
-    );
-  }
-
   // Group documents by category, sorted by uploaded_at (most recent first) within each.
   const grouped = useMemo(() => {
     const groups: Record<string, DocumentItem[]> = {};
@@ -228,6 +220,14 @@ export default memo(function DocumentsSection({
 
   // Only show categories that have documents.
   const activeCategories = CATEGORY_ORDER.filter((cat) => grouped[cat].length > 0);
+
+  if (documents.length === 0) {
+    return (
+      <div className="rounded-lg border bg-white p-6 text-center text-gray-400">
+        No documents uploaded yet.
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">

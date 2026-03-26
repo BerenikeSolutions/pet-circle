@@ -443,7 +443,7 @@ export default function OverviewTab({ data, token, onTabChange, onCartClick, onU
           <>
             <div className="rounded-xl p-3" style={{ backgroundColor: '#FFF6ED', borderLeft: '3px solid #FF9500' }}>
               <p className="text-xs font-semibold text-amber-800 mb-1">Nutrition Info Missing</p>
-              <p className="text-xs text-amber-700">No diet recorded yet. Head to the Nutrition tab to add food items and unlock your pet's full nutrition analysis.</p>
+              <p className="text-xs text-amber-700">No diet recorded yet. Head to the Nutrition tab to add food items and unlock your pet&apos;s full nutrition analysis.</p>
             </div>
             {nutritionImportanceNote && (
               <div className="rounded-xl p-3" style={{ backgroundColor: '#F0F6FF', borderLeft: '3px solid #007AFF' }}>
