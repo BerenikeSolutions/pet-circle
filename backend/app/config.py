@@ -61,28 +61,23 @@ class Settings(BaseSettings):
 
     # --- WhatsApp Template Names ---
     # Templates are loaded from environment to allow changes without code deploys.
-    WHATSAPP_TEMPLATE_REMINDER: str
-    WHATSAPP_TEMPLATE_OVERDUE: str
-    WHATSAPP_TEMPLATE_NUDGE: str
+
+    # Transactional
     WHATSAPP_TEMPLATE_CONFLICT: str
-    WHATSAPP_TEMPLATE_ONBOARDING_COMPLETE: str
     WHATSAPP_TEMPLATE_ORDER_FULFILLMENT_CHECK: str
     WHATSAPP_TEMPLATE_BIRTHDAY: str
 
     # --- 4-Stage Reminder Templates (Excel v5) ---
-    # Register these with Meta before enabling the new reminder engine.
-    # Optional at startup — falls back to legacy templates if not set.
-    WHATSAPP_TEMPLATE_REMINDER_T7: str | None = None      # petcircle_reminder_t7_v1
-    WHATSAPP_TEMPLATE_REMINDER_DUE: str | None = None     # petcircle_reminder_due_v1
-    WHATSAPP_TEMPLATE_REMINDER_D3: str | None = None      # petcircle_reminder_d3_v1
-    WHATSAPP_TEMPLATE_REMINDER_OVERDUE: str | None = None # petcircle_reminder_overdue_v1
+    WHATSAPP_TEMPLATE_REMINDER_T7: str | None = None
+    WHATSAPP_TEMPLATE_REMINDER_DUE: str | None = None
+    WHATSAPP_TEMPLATE_REMINDER_D3: str | None = None
+    WHATSAPP_TEMPLATE_REMINDER_OVERDUE: str | None = None
 
-    # --- Nudge Scheduler Templates (Excel v5) ---
-    WHATSAPP_TEMPLATE_NUDGE_ENGAGEMENT: str | None = None       # petcircle_nudge_engagement_v1
-    WHATSAPP_TEMPLATE_NUDGE_BREED: str | None = None            # petcircle_nudge_breed_v1
-    WHATSAPP_TEMPLATE_NUDGE_BREED_DATA: str | None = None       # petcircle_nudge_breed_data_v1
-    WHATSAPP_TEMPLATE_NUDGE_VALUE_ADD_STATIC: str | None = None # petcircle_nudge_va_static_v1
-    WHATSAPP_TEMPLATE_NUDGE_VALUE_ADD_PERSONAL: str | None = None # petcircle_nudge_va_personal_v1
+    # --- Nudge Scheduler Templates ---
+    WHATSAPP_TEMPLATE_NUDGE_VALUE_ADD_PERSONAL: str | None = None
+    WHATSAPP_TEMPLATE_NUDGE_ENGAGEMENT: str | None = None
+    WHATSAPP_TEMPLATE_NUDGE_BREED: str | None = None
+    WHATSAPP_TEMPLATE_NUDGE_BREED_DATA: str | None = None
 
     # --- Admin ---
     # Secret key for admin API authentication via X-ADMIN-KEY header.

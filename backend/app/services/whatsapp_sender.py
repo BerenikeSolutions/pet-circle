@@ -381,51 +381,6 @@ async def send_interactive_buttons(
     return result
 
 
-async def send_reminder_message(
-    db: Session,
-    to_number: str,
-    pet_name: str,
-    item_name: str,
-    due_date: str,
-    record_status: str,
-) -> dict | None:
-    """
-    Send a reminder or overdue template message with interactive buttons.
-
-    Template selection:
-        - record_status == 'upcoming' → WHATSAPP_TEMPLATE_REMINDER
-        - record_status == 'overdue'  → WHATSAPP_TEMPLATE_OVERDUE
-
-    After sending the template, sends interactive buttons for the user
-    to respond (Done, Snooze, Reschedule, Cancel).
-
-    Args:
-        db: SQLAlchemy database session.
-        to_number: Recipient's WhatsApp phone number.
-        pet_name: Name of the pet.
-        item_name: Name of the preventive item.
-        due_date: Due date as string.
-        record_status: 'upcoming' or 'overdue'.
-
-    Returns:
-        API response dict on success, None on failure.
-    """
-    # Select template based on record status.
-    if record_status == "overdue":
-        template_name = settings.WHATSAPP_TEMPLATE_OVERDUE
-    else:
-        template_name = settings.WHATSAPP_TEMPLATE_REMINDER
-
-    # Send the template message with parameters.
-    result = await send_template_message(
-        db=db,
-        to_number=to_number,
-        template_name=template_name,
-        parameters=[pet_name, item_name, due_date],
-    )
-
-    return result
-
 
 async def send_conflict_notification(
     db: Session,
