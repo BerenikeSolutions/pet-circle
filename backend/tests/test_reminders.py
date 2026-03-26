@@ -97,10 +97,21 @@ def create_test_pet(db, user):
 
 
 def create_test_preventive_records(db, pet):
-    """Create preventive records with different statuses for testing."""
+    """
+    Create preventive records with due dates that exactly match the engine's
+    trigger conditions for today.
+
+    Trigger rules (exact-date matching in _determine_stage_simple):
+        t7:             today == due_date - 7   → due_date = today + 7
+        up_to_date:     due far in future        → no stage fires
+        overdue:        today >= due_date + 7    → due_date = today - 10
+                        (but requires prior 'due' reminder sent — engine skips it;
+                         reminder is pre-seeded directly in seed_test_reminders)
+        upcoming_snooze/upcoming/upcoming_cancel: non-triggering due dates
+                        (reminders pre-seeded directly in seed_test_reminders)
+    """
     today = get_today_ist()
 
-    # Get a real preventive master from DB for the pet's species
     masters = db.query(PreventiveMaster).filter(
         PreventiveMaster.species == pet.species
     ).all()
@@ -111,73 +122,125 @@ def create_test_preventive_records(db, pet):
 
     records = []
 
-    # Record 1: Overdue (due date in the past)
+    # Record 1 (t7): due = today+7 — engine fires T-7 stage today
     if len(masters) > 0:
         rec = PreventiveRecord(
             id=uuid.uuid4(),
             pet_id=pet.id,
             preventive_master_id=masters[0].id,
-            last_done_date=today - timedelta(days=400),
-            next_due_date=today - timedelta(days=35),
-            status="overdue",
+            last_done_date=today - timedelta(days=358),
+            next_due_date=today + timedelta(days=7),
+            status="upcoming",
         )
         db.add(rec)
-        records.append(("overdue", rec, masters[0]))
+        records.append(("t7", rec, masters[0]))
 
-    # Record 2: Upcoming (due date within reminder window)
+    # Record 2 (up_to_date): due far ahead — engine ignores (status filter)
     if len(masters) > 1:
         rec = PreventiveRecord(
             id=uuid.uuid4(),
             pet_id=pet.id,
             preventive_master_id=masters[1].id,
-            last_done_date=today - timedelta(days=350),
-            next_due_date=today + timedelta(days=5),
-            status="upcoming",
-        )
-        db.add(rec)
-        records.append(("upcoming", rec, masters[1]))
-
-    # Record 3: Up-to-date (should NOT get a reminder)
-    if len(masters) > 2:
-        rec = PreventiveRecord(
-            id=uuid.uuid4(),
-            pet_id=pet.id,
-            preventive_master_id=masters[2].id,
             last_done_date=today - timedelta(days=30),
             next_due_date=today + timedelta(days=335),
             status="up_to_date",
         )
         db.add(rec)
-        records.append(("up_to_date", rec, masters[2]))
+        records.append(("up_to_date", rec, masters[1]))
 
-    # Record 4: Another upcoming for snooze test
+    # Record 3 (overdue - for DONE test): overdue but no prior reminder in DB,
+    # so engine skips it. Reminder pre-seeded by seed_test_reminders.
+    if len(masters) > 2:
+        rec = PreventiveRecord(
+            id=uuid.uuid4(),
+            pet_id=pet.id,
+            preventive_master_id=masters[2].id,
+            last_done_date=today - timedelta(days=400),
+            next_due_date=today - timedelta(days=10),
+            status="overdue",
+        )
+        db.add(rec)
+        records.append(("overdue", rec, masters[2]))
+
+    # Record 4 (upcoming_snooze): non-triggering due date; reminder pre-seeded
     if len(masters) > 3:
         rec = PreventiveRecord(
             id=uuid.uuid4(),
             pet_id=pet.id,
             preventive_master_id=masters[3].id,
-            last_done_date=today - timedelta(days=355),
-            next_due_date=today + timedelta(days=10),
+            last_done_date=today - timedelta(days=335),
+            next_due_date=today + timedelta(days=30),
             status="upcoming",
         )
         db.add(rec)
         records.append(("upcoming_snooze", rec, masters[3]))
 
-    # Record 5: Another upcoming for cancel test
+    # Record 5 (upcoming - for RESCHEDULE test): non-triggering; reminder pre-seeded
     if len(masters) > 4:
         rec = PreventiveRecord(
             id=uuid.uuid4(),
             pet_id=pet.id,
             preventive_master_id=masters[4].id,
-            last_done_date=today - timedelta(days=360),
-            next_due_date=today + timedelta(days=3),
+            last_done_date=today - timedelta(days=320),
+            next_due_date=today + timedelta(days=45),
             status="upcoming",
         )
         db.add(rec)
-        records.append(("upcoming_cancel", rec, masters[4]))
+        records.append(("upcoming", rec, masters[4]))
+
+    # Record 6 (upcoming_cancel): non-triggering; reminder pre-seeded
+    if len(masters) > 5:
+        rec = PreventiveRecord(
+            id=uuid.uuid4(),
+            pet_id=pet.id,
+            preventive_master_id=masters[5].id,
+            last_done_date=today - timedelta(days=305),
+            next_due_date=today + timedelta(days=60),
+            status="upcoming",
+        )
+        db.add(rec)
+        records.append(("upcoming_cancel", rec, masters[5]))
 
     db.flush()
     return records
+
+
+def seed_test_reminders(db, pet, records):
+    """
+    Pre-seed Reminder rows directly for response-flow tests (TEST 3–6).
+    Bypasses the engine for records whose due dates don't trigger any stage today.
+    Returns a dict keyed by label.
+    """
+    today = get_today_ist()
+    seeded = {}
+
+    label_to_stage = {
+        "overdue": "overdue_insight",
+        "upcoming_snooze": "t7",
+        "upcoming": "t7",
+        "upcoming_cancel": "t7",
+    }
+
+    for label, rec, _ in records:
+        if label not in label_to_stage:
+            continue
+        stage = label_to_stage[label]
+        reminder = Reminder(
+            id=uuid.uuid4(),
+            preventive_record_id=rec.id,
+            pet_id=pet.id,
+            source_type="preventive_record",
+            source_id=rec.id,
+            next_due_date=rec.next_due_date,
+            stage=stage,
+            status="pending",
+            item_desc=f"Test item ({label})",
+        )
+        db.add(reminder)
+        seeded[label] = reminder
+
+    db.flush()
+    return seeded
 
 
 def cleanup_test_data(db, user_id):
@@ -232,6 +295,13 @@ def main():
 
         records = create_test_preventive_records(db, pet)
         test("Preventive records created", len(records) >= 3, f"got {len(records)}")
+
+        seeded = seed_test_reminders(db, pet, records)
+        test(
+            "Pre-seeded reminders for response tests",
+            len(seeded) >= 4,
+            f"got {len(seeded)}"
+        )
         db.commit()
 
         for label, rec, master in records:
@@ -255,48 +325,21 @@ def main():
               f"skipped={results['reminders_skipped']}, "
               f"errors={results['errors']}")
 
-        # Verify reminders in DB
-        reminders = (
-            db.query(Reminder)
-            .join(PreventiveRecord)
-            .filter(PreventiveRecord.pet_id == pet.id)
-            .all()
-        )
-        test("Reminders exist in DB", len(reminders) > 0, f"got {len(reminders)}")
+        # The t7 record (due=today+7) should have gotten a new engine-created reminder
+        t7_rec_id = next(rec.id for label, rec, _ in records if label == "t7")
+        engine_reminder = db.query(Reminder).filter(
+            Reminder.preventive_record_id == t7_rec_id,
+            Reminder.stage == "t7",
+        ).first()
+        test("T-7 reminder created by engine", engine_reminder is not None)
+        test("T-7 reminder is pending", engine_reminder is not None and engine_reminder.status == "pending")
 
-        # Only upcoming/overdue records should have reminders
-        reminder_record_ids = {r.preventive_record_id for r in reminders}
-        overdue_upcoming_ids = {
-            rec.id for label, rec, _ in records
-            if label in ("overdue", "upcoming", "upcoming_snooze", "upcoming_cancel")
-        }
-        up_to_date_ids = {
-            rec.id for label, rec, _ in records if label == "up_to_date"
-        }
-
-        test(
-            "Upcoming/overdue records got reminders",
-            overdue_upcoming_ids.issubset(reminder_record_ids),
-            f"expected {len(overdue_upcoming_ids)}, "
-            f"found {len(overdue_upcoming_ids & reminder_record_ids)}"
-        )
-        test(
-            "Up-to-date records did NOT get reminders",
-            not up_to_date_ids.intersection(reminder_record_ids),
-        )
-
-        # All reminders should be 'pending'
-        all_pending = all(r.status == "pending" for r in reminders)
-        test("All reminders have status 'pending'", all_pending)
-
-        for r in reminders:
-            rec_label = next(
-                (l for l, rec, _ in records if rec.id == r.preventive_record_id),
-                "unknown"
-            )
-            print(f"    Reminder: id={str(r.id)[:8]}..., "
-                  f"record=[{rec_label}], status={r.status}, "
-                  f"due={r.next_due_date}")
+        # Up-to-date record must not have gotten a new reminder
+        up_to_date_id = next(rec.id for label, rec, _ in records if label == "up_to_date")
+        up_to_date_reminder = db.query(Reminder).filter(
+            Reminder.preventive_record_id == up_to_date_id
+        ).first()
+        test("Up-to-date record did NOT get a reminder", up_to_date_reminder is None)
 
         # ==================================================================
         print("\n" + "=" * 60)
@@ -324,13 +367,9 @@ def main():
         print("=" * 60)
         # ==================================================================
 
-        # Find the overdue reminder
-        overdue_rec_id = next(
-            rec.id for label, rec, _ in records if label == "overdue"
-        )
-        overdue_reminder = db.query(Reminder).filter(
-            Reminder.preventive_record_id == overdue_rec_id
-        ).first()
+        # Use the pre-seeded overdue reminder
+        overdue_rec_id = next(rec.id for label, rec, _ in records if label == "overdue")
+        overdue_reminder = seeded["overdue"]
 
         # Simulate: mark as 'sent' (as if WhatsApp delivered it)
         overdue_reminder.status = "sent"
@@ -371,13 +410,9 @@ def main():
         print("=" * 60)
         # ==================================================================
 
-        # Find the snooze reminder
-        snooze_rec_id = next(
-            rec.id for label, rec, _ in records if label == "upcoming_snooze"
-        )
-        snooze_reminder = db.query(Reminder).filter(
-            Reminder.preventive_record_id == snooze_rec_id
-        ).first()
+        # Use the pre-seeded snooze reminder
+        snooze_rec_id = next(rec.id for label, rec, _ in records if label == "upcoming_snooze")
+        snooze_reminder = seeded["upcoming_snooze"]
         snooze_rec = db.query(PreventiveRecord).get(snooze_rec_id)
         old_due = snooze_rec.next_due_date
 
@@ -410,13 +445,9 @@ def main():
         print("=" * 60)
         # ==================================================================
 
-        # Find the upcoming reminder
-        upcoming_rec_id = next(
-            rec.id for label, rec, _ in records if label == "upcoming"
-        )
-        upcoming_reminder = db.query(Reminder).filter(
-            Reminder.preventive_record_id == upcoming_rec_id
-        ).first()
+        # Use the pre-seeded upcoming reminder
+        upcoming_rec_id = next(rec.id for label, rec, _ in records if label == "upcoming")
+        upcoming_reminder = seeded["upcoming"]
 
         # Mark as sent
         upcoming_reminder.status = "sent"
@@ -457,13 +488,9 @@ def main():
         print("=" * 60)
         # ==================================================================
 
-        # Find the cancel reminder
-        cancel_rec_id = next(
-            rec.id for label, rec, _ in records if label == "upcoming_cancel"
-        )
-        cancel_reminder = db.query(Reminder).filter(
-            Reminder.preventive_record_id == cancel_rec_id
-        ).first()
+        # Use the pre-seeded cancel reminder
+        cancel_rec_id = next(rec.id for label, rec, _ in records if label == "upcoming_cancel")
+        cancel_reminder = seeded["upcoming_cancel"]
 
         # Mark as sent
         cancel_reminder.status = "sent"
