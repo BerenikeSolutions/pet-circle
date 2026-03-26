@@ -306,7 +306,8 @@ def _select_level0_message(
 
     pet_name = pet.name or "your pet"
     tip = lib_row.template_var_1 or ""
-    return (template_key, [pet_name, tip])
+    # {{1}} = pet_name, {{2}} = tip, {{3}} = pet_name (used in closing line)
+    return (template_key, [pet_name, tip, pet_name])
 
 
 def _count_level0_rows(db: Session) -> int:
@@ -410,7 +411,8 @@ def _build_l1_message(
         return None
     pet_name = pet.name or "your pet"
     tip = lib_row.template_var_1 or ""
-    return (template_key, [pet_name, tip])
+    # {{1}} = pet_name, {{2}} = tip, {{3}} = pet_name (used in closing line)
+    return (template_key, [pet_name, tip, pet_name])
 
 
 # ---- Level 2 ----
@@ -487,11 +489,13 @@ def _build_breed_data_message(
     if not template_key or not lib_row:
         return None
 
-    var1 = (lib_row.template_var_1 or "").replace("{breed}", breed).replace("{pet_name}", pet.name or "your pet")
-    var2 = (lib_row.template_var_2 or "").replace("{pet_name}", pet.name or "your pet")
-    var3 = lib_row.template_var_3 or category
-    var4 = lib_row.template_var_4 or ""
-    return (template_key, [var1, var2, var3, var4])
+    pet_name = pet.name or "your pet"
+    # Template: {{1}}=pet_name, {{2}}=insight, {{3}}=health_area, {{4}}=CTA, {{5}}=breed
+    # var_1 is the insight text; var_3 is category label; var_4 is CTA text.
+    insight = (lib_row.template_var_1 or "").replace("{pet_name}", pet_name)
+    health_area = lib_row.template_var_3 or category
+    cta = lib_row.template_var_4 or ""
+    return (template_key, [pet_name, insight, health_area, cta, breed])
 
 
 def _pick_data_category(db: Session, pet: Pet, slot_idx: int) -> str:
@@ -585,7 +589,8 @@ def _build_personalized_message(
         return None
 
     pet_name = pet.name or "your pet"
-    return (template_key, [pet_name, insight])
+    # {{1}} = pet_name, {{2}} = insight, {{3}} = pet_name (used in closing line)
+    return (template_key, [pet_name, insight, pet_name])
 
 
 def _get_or_generate_nudge_insight(db: Session, user: User, pet: Pet) -> str | None:

@@ -237,10 +237,13 @@ ORDER_CONFIRM_PAYLOADS: frozenset[str] = frozenset({
     ORDER_CONFIRM, ORDER_CANCEL,
 })
 
-# Prefixes for dynamic order fulfillment payloads sent to admin number.
-# Full payload format:
-#   ORDER_FULFILL_YES:{order_id}
-#   ORDER_FULFILL_NO:{order_id}
+# Fixed button payload IDs embedded in the order_fulfillment_check_v1 template.
+# Template Quick Reply buttons have fixed payloads — no order_id in payload.
+# The handler resolves the order by looking up the most recent pending order.
+ORDER_FULFILL_YES: str = "ORDER_FULFILL_YES"
+ORDER_FULFILL_NO: str = "ORDER_FULFILL_NO"
+
+# Kept for backwards-compatibility with any legacy interactive messages already sent.
 ORDER_FULFILL_YES_PREFIX: str = "ORDER_FULFILL_YES:"
 ORDER_FULFILL_NO_PREFIX: str = "ORDER_FULFILL_NO:"
 

@@ -34,7 +34,9 @@ from app.core.constants import (
     ORDER_CATEGORY_LABELS,
     ORDER_CATEGORY_MAP,
     ORDER_CONFIRM,
+    ORDER_FULFILL_NO,
     ORDER_FULFILL_NO_PREFIX,
+    ORDER_FULFILL_YES,
     ORDER_FULFILL_YES_PREFIX,
 )
 from app.core.encryption import decrypt_field
@@ -661,24 +663,45 @@ async def cancel_order_flow(db: Session, user) -> None:
 
 
 async def handle_admin_order_status_feedback(db: Session, from_number: str, payload: str) -> None:
-    """Handle admin WhatsApp fulfillment feedback and update order status."""
+    """
+    Handle admin WhatsApp fulfillment feedback and update order status.
 
-    is_yes = payload.startswith(ORDER_FULFILL_YES_PREFIX)
-    is_no = payload.startswith(ORDER_FULFILL_NO_PREFIX)
+    Supports two payload formats:
+      - Fixed template button payloads: ORDER_FULFILL_YES / ORDER_FULFILL_NO
+        (embedded in order_fulfillment_check_v1 template). Resolves the most
+        recent pending order since template buttons cannot carry dynamic IDs.
+      - Legacy dynamic payloads: ORDER_FULFILL_YES:{order_id} / ORDER_FULFILL_NO:{order_id}
+        (kept for backwards-compatibility with any previously sent messages).
+    """
+    is_yes = payload == ORDER_FULFILL_YES or payload.startswith(ORDER_FULFILL_YES_PREFIX)
+    is_no = payload == ORDER_FULFILL_NO or payload.startswith(ORDER_FULFILL_NO_PREFIX)
+
     if not (is_yes or is_no):
         await send_text_message(db, from_number, "I couldn't process that response.")
         return
 
-    order_id_str = payload.split(":", 1)[1] if ":" in payload else ""
-    try:
-        order_id = UUID(order_id_str)
-    except Exception:
-        await send_text_message(db, from_number, "I couldn't identify that order. Please contact support.")
-        return
+    # Resolve the order: prefer dynamic payload with embedded order_id,
+    # fall back to most recently created pending order for fixed template buttons.
+    order = None
+    if ":" in payload:
+        order_id_str = payload.split(":", 1)[1]
+        try:
+            order_id = UUID(order_id_str)
+            order = db.query(Order).filter(Order.id == order_id).first()
+        except Exception:
+            pass
 
-    order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
-        await send_text_message(db, from_number, "Order not found.")
+        # Fixed template button — resolve the most recent pending order.
+        order = (
+            db.query(Order)
+            .filter(Order.status == "pending")
+            .order_by(Order.created_at.desc())
+            .first()
+        )
+
+    if not order:
+        await send_text_message(db, from_number, "No pending orders found.")
         return
 
     if is_yes:

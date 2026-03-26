@@ -148,7 +148,7 @@ Hi! Here's something worth knowing for {{1}} 🐾
 
 {{2}}
 
-Reply anytime to ask a question about {{1}}'s health.
+Reply anytime to ask a question about {{3}}'s health.
 ```
 
 **Sample Variables:**
@@ -156,6 +156,7 @@ Reply anytime to ask a question about {{1}}'s health.
 |----------|---------|
 | `{{1}}` | Bruno |
 | `{{2}}` | Labradors are prone to obesity — keeping Bruno's meals measured and walks consistent after age 2 makes a big difference in joint health long-term. |
+| `{{3}}` | Bruno |
 
 ---
 
@@ -169,6 +170,8 @@ Reply anytime to ask a question about {{1}}'s health.
 {{1}}
 
 {{2}}
+
+We are here to help you.
 ```
 
 **Sample Variables:**
@@ -187,6 +190,8 @@ Reply anytime to ask a question about {{1}}'s health.
 🐾 Did you know this about {{1}}?
 
 {{2}}
+
+PetCircle is here for you.
 ```
 
 **Sample Variables:**
@@ -202,22 +207,25 @@ Reply anytime to ask a question about {{1}}'s health.
 
 **Body:**
 ```
-🐾 Health update for {{1}}
+🐾PetCircle has a Health update for {{1}} who is a {{5}}
 
 {{2}}
 
 Health area: {{3}}
 
 {{4}}
+
+We are here to help.
 ```
 
 **Sample Variables:**
 | Variable | Example |
 |----------|---------|
-| `{{1}}` | Bruno (Labrador) |
+| `{{1}}` | Bruno |
 | `{{2}}` | We noticed Bruno doesn't have a deworming record on file. Labs who spend time outdoors should be dewormed every 3 months. |
 | `{{3}}` | Deworming |
 | `{{4}}` | Tap to log a record or ask us anything. |
+| `{{5}}` | Labrador |
 
 ---
 
@@ -245,6 +253,14 @@ Which date should we keep? Reply below to choose.
 | `{{2}}` | Rabies Vaccine |
 | `{{3}}` | 15 Jan 2026 |
 | `{{4}}` | 20 Jan 2026 |
+
+**Quick Reply Buttons** (add in Meta template builder):
+| Button Title | Payload |
+|---|---|
+| Keep Existing | `CONFLICT_KEEP_EXISTING` |
+| Use New | `CONFLICT_USE_NEW` |
+
+> **Note:** Buttons are now embedded in the template. No separate interactive message is sent after the template.
 
 ---
 
@@ -295,6 +311,12 @@ Please process and confirm delivery with the customer.
 | `{{5}}` | Royal Canin Labrador Adult 3kg x 2 |
 | `{{6}}` | a3f2c1d0-... |
 
+**Quick Reply Buttons** (add in Meta template builder):
+| Button Title | Payload |
+|---|---|
+| Yes, fulfilled | `ORDER_FULFILL_YES` |
+| No, order cancelled | `ORDER_FULFILL_NO` |
+
 ---
 
 ## Summary Checklist
@@ -305,10 +327,10 @@ Please process and confirm delivery with the customer.
 | `petcircle_reminder_due_v1` | Utility | 3 | 3 (Done — Log It, Remind Me Later, Order Now) | ☐ |
 | `petcircle_reminder_d3_v1` | Utility | 4 | 3 (Still Pending, Schedule, Cancel) | ☐ |
 | `petcircle_reminder_overdue_v1` | Utility | 5 | 3 (Still Pending, Schedule, Cancel) | ☐ |
-| `petcircle_nudge_va_personal_v1` | Marketing | 2 | None | ☐ |
+| `petcircle_nudge_va_personal_v1` | Marketing | 3 | None | ☐ |
 | `petcircle_nudge_engagement_v1` | Marketing | 2 | None | ☐ |
 | `petcircle_nudge_breed_v1` | Marketing | 2 | None | ☐ |
-| `petcircle_nudge_breed_data_v1` | Marketing | 4 | None | ☐ |
-| `petcircle_conflict_v1` | Utility | 4 | None (buttons sent separately) | ☐ |
+| `petcircle_nudge_breed_data_v1` | Marketing | 5 | None | ☐ |
+| `petcircle_conflict_v1` | Utility | 4 | 2 (Keep Existing, Use New) | ☐ |
 | `birthday_celebration_v1` | Marketing | 2 | None | ☐ |
-| `order_fulfillment_check_v1` | Utility | 6 | None | ☐ |
+| `order_fulfillment_check_v1` | Utility | 6 | 2 (Yes fulfilled, No cancelled) | ☐ |

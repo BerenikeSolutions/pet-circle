@@ -27,10 +27,6 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.core.constants import (
-    CONFLICT_KEEP_EXISTING,
-    CONFLICT_USE_NEW,
-)
 from app.core.log_sanitizer import mask_phone, sanitize_payload
 from app.core.rate_limiter import rate_limiter
 from app.models.message_log import MessageLog
@@ -385,11 +381,10 @@ async def send_conflict_notification(
     new_date: str,
 ) -> dict | None:
     """
-    Send a conflict notification with resolution buttons.
+    Send a conflict notification using the petcircle_conflict_v1 template.
 
-    Sends the conflict template followed by interactive buttons
-    for the user to choose between keeping the existing date
-    or using the new date.
+    The template has "Keep Existing" and "Use New" Quick Reply buttons
+    embedded in Meta — no separate interactive message is needed.
 
     Args:
         db: SQLAlchemy database session.
@@ -402,31 +397,12 @@ async def send_conflict_notification(
     Returns:
         API response dict on success, None on failure.
     """
-    # Send conflict template.
-    result = await send_template_message(
+    return await send_template_message(
         db=db,
         to_number=to_number,
         template_name=settings.WHATSAPP_TEMPLATE_CONFLICT,
         parameters=[pet_name, item_name, existing_date, new_date],
     )
-
-    if result:
-        # Send resolution buttons.
-        await send_interactive_buttons(
-            db=db,
-            to_number=to_number,
-            body_text=(
-                f"Which date should we keep for {pet_name}'s {item_name}?\n"
-                f"Existing: {existing_date}\n"
-                f"New: {new_date}"
-            ),
-            buttons=[
-                {"id": CONFLICT_USE_NEW, "title": "Use New Date"},
-                {"id": CONFLICT_KEEP_EXISTING, "title": "Keep Existing"},
-            ],
-        )
-
-    return result
 
 
 async def download_whatsapp_media(media_id: str) -> tuple[bytes, str] | None:

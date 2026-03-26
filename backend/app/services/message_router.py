@@ -45,7 +45,9 @@ from app.core.constants import (
     ORDER_CATEGORY_PAYLOADS,
     ORDER_COMMANDS,
     ORDER_CONFIRM_PAYLOADS,
+    ORDER_FULFILL_NO,
     ORDER_FULFILL_NO_PREFIX,
+    ORDER_FULFILL_YES,
     ORDER_FULFILL_YES_PREFIX,
     REMINDER_ALREADY_DONE,
     REMINDER_CANCEL,
@@ -217,9 +219,16 @@ async def route_message(db: Session, message_data: dict) -> None:
         return
 
     # Admin-only WhatsApp order status updates from ORDER_NOTIFICATION_PHONE.
+    # Handles both fixed template button payloads (ORDER_FULFILL_YES/NO) and
+    # legacy dynamic payloads with order_id suffix (ORDER_FULFILL_YES:/NO: prefix).
     if msg_type == "button" and _is_order_admin_number(from_number):
         payload = message_data.get("button_payload", "")
-        if payload.startswith(ORDER_FULFILL_YES_PREFIX) or payload.startswith(ORDER_FULFILL_NO_PREFIX):
+        is_fulfill_payload = (
+            payload in (ORDER_FULFILL_YES, ORDER_FULFILL_NO)
+            or payload.startswith(ORDER_FULFILL_YES_PREFIX)
+            or payload.startswith(ORDER_FULFILL_NO_PREFIX)
+        )
+        if is_fulfill_payload:
             from app.services.order_service import handle_admin_order_status_feedback
             await handle_admin_order_status_feedback(db, from_number, payload)
             return
