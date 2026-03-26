@@ -27,7 +27,7 @@ from app.database import get_db
 from app.services.conflict_expiry import expire_pending_conflicts
 from app.services.nudge_engine import run_nudge_engine
 from app.services.nudge_sender import check_inactivity_nudges
-from app.services.reminder_engine import run_reminder_engine, send_pending_reminders
+from app.services.reminder_engine import run_reminder_engine
 
 logger = logging.getLogger(__name__)
 
@@ -97,18 +97,12 @@ def execute_reminder_engine(db: Session = Depends(get_db)):
         except Exception:
             pass
 
-    # --- Step 3: Send pending reminders ---
-    send_results = {"reminders_sent": 0, "reminders_failed": 0}
-    send_error = None
-    try:
-        send_results = send_pending_reminders(db)
-    except Exception as e:
-        send_error = str(e)
-        logger.error("Reminder sending failed: %s", str(e), exc_info=True)
-        try:
-            db.rollback()
-        except Exception:
-            pass
+    # send_results derived from reminder_results (run_reminder_engine handles sending)
+    send_results = {
+        "reminders_sent": reminder_results.get("reminders_sent", 0),
+        "reminders_failed": reminder_results.get("reminders_failed", 0),
+    }
+    send_error = reminder_error
 
     # --- Step 4: Generate nudges for all active pets ---
     nudge_results = {"pets_processed": 0, "total_nudges": 0, "errors": 0}
