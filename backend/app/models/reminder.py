@@ -23,8 +23,8 @@ Ignore tracking:
 
 import uuid
 from datetime import datetime, date
-from sqlalchemy import Column, String, Date, DateTime, Boolean, Integer, ForeignKey, UniqueConstraint, Index
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Column, String, Date, DateTime, Boolean, Integer, Text, ForeignKey, UniqueConstraint, Index
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from app.database import Base
 
@@ -114,6 +114,18 @@ class Reminder(Base):
     # Cached human-readable item description for message building.
     # e.g. "Rabies · DHPPi (mandatory) · Kennel Cough (optional)"
     item_desc = Column(String(300), nullable=True)
+
+    # --- Template Message Record (migration 031) ---
+    # The WhatsApp template used for this reminder (e.g. 'petcircle_reminder_t7_v1').
+    template_name = Column(String(100), nullable=True)
+
+    # Interpolated parameter list as stored in whatsapp_template_configs body_text.
+    # e.g. ["John", "Max", "Rabies · DHPPi", "30 Mar 2026"]
+    template_params = Column(JSONB, nullable=True)
+
+    # Fully rendered message body after substituting template_params into body_text.
+    # Exact text the user received on WhatsApp.
+    message_body = Column(Text, nullable=True)
 
     # Timestamp when the reminder was created.
     created_at = Column(DateTime, default=datetime.utcnow)

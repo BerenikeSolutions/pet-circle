@@ -141,7 +141,8 @@ async def run_nudge_scheduler(db: Session) -> dict:
             )
 
             if result:
-                _log_nudge_delivery(db, user, primary_pet, template_key, level)
+                _log_nudge_delivery(db, user, primary_pet, template_key, level,
+                                    template_params=vars_)
                 sent += 1
             else:
                 failed += 1
@@ -667,10 +668,18 @@ def _log_nudge_delivery(
     pet: Pet,
     template_key: str,
     level: int,
+    template_params: list | None = None,
 ) -> None:
     """
-    Write a row to nudge_delivery_log to track slot progress and level.
+    Write a row to nudge_delivery_log to track slot progress, level, and full message.
+
+    Args:
+        template_key:    Resolved WhatsApp template name (e.g. 'petcircle_nudge_breed_v1').
+        level:           Nudge level (0/1/2) for slot-counter queries.
+        template_params: Interpolated parameter list used in the template send.
     """
+    from app.services.whatsapp_sender import get_template_body, render_template_body
+
     log = NudgeDeliveryLog(
         nudge_id=None,       # Not linked to a dashboard nudge row
         pet_id=pet.id,
@@ -680,6 +689,14 @@ def _log_nudge_delivery(
     # Store level on the log if the model supports it (migration 029 adds nudge_level).
     if hasattr(log, "nudge_level"):
         log.nudge_level = level
+
+    # Persist template details and rendered message body (migration 031).
+    log.template_name = template_key
+    log.template_params = template_params
+
+    body = get_template_body(db, template_key)
+    if body:
+        log.message_body = render_template_body(body, template_params or [])
 
     db.add(log)
     db.commit()

@@ -1,7 +1,8 @@
 -- Clear all data from the database.
 -- Tables PRESERVED (reference/seed data — never cleared):
 --   preventive_master, product_catalog, nudge_config,
---   nudge_message_library, breed_consequence_library
+--   nudge_message_library, breed_consequence_library,
+--   whatsapp_template_configs
 -- Truncates tables in FK-safe order (children first) using CASCADE.
 --
 -- TARGETED RESET (single test number — replace phone number below):

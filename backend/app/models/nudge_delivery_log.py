@@ -8,7 +8,8 @@ rate limit queries.
 
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, Integer, ForeignKey, Index
+from sqlalchemy import Column, String, DateTime, Integer, Text, ForeignKey, Index
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -29,6 +30,17 @@ class NudgeDeliveryLog(Base):
 
     # Nudge level (0/1/2) — used by nudge_scheduler to count completed slots per level.
     nudge_level = Column(Integer, nullable=True)
+
+    # --- Template Message Record (migration 031) ---
+    # The WhatsApp template used for this nudge (e.g. 'petcircle_nudge_breed_v1').
+    template_name = Column(String(100), nullable=True)
+
+    # Interpolated parameter list — the values substituted into the template.
+    template_params = Column(JSONB, nullable=True)
+
+    # Fully rendered message body after substituting template_params into body_text.
+    # Exact text the user received on WhatsApp.
+    message_body = Column(Text, nullable=True)
 
     # Relationships
     nudge = relationship("Nudge")

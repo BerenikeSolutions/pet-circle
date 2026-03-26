@@ -44,6 +44,41 @@ from app.models.message_log import MessageLog
 
 logger = logging.getLogger(__name__)
 
+
+def get_template_body(db: Session, template_name: str) -> str:
+    """
+    Look up the approved template body text from whatsapp_template_configs.
+
+    Returns empty string if the template is not found or body_text is empty.
+    Never raises — logging failures must not block the send flow.
+    """
+    try:
+        from app.models.whatsapp_template_config import WhatsappTemplateConfig
+
+        row = (
+            db.query(WhatsappTemplateConfig)
+            .filter(WhatsappTemplateConfig.template_name == template_name)
+            .first()
+        )
+        return row.body_text if row and row.body_text else ""
+    except Exception:
+        logger.debug("get_template_body failed for template '%s'", template_name)
+        return ""
+
+
+def render_template_body(body_text: str, params: list[str]) -> str:
+    """
+    Render a WhatsApp template body by substituting {{1}}, {{2}}, ... with params.
+
+    WhatsApp uses 1-indexed double-brace placeholders ({{1}}, {{2}}, etc.).
+    Returns the rendered string; returns body_text unchanged if params is empty.
+    """
+    result = body_text
+    for i, value in enumerate(params, 1):
+        result = result.replace(f"{{{{{i}}}}}", value)
+    return result
+
+
 # WhatsApp Cloud API base URL
 WHATSAPP_API_URL = (
     f"https://graph.facebook.com/v21.0/{settings.WHATSAPP_PHONE_NUMBER_ID}/messages"

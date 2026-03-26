@@ -681,6 +681,17 @@ def _process_candidate(db: Session, cand: ReminderCandidate, today: date) -> tup
         logger.warning("No template configured for stage=%s category=%s", cand.stage, cand.category)
         return True, False
 
+    # --- Persist template details on the reminder row ---
+    # Saved here (before send) so the data is always recorded regardless of send outcome.
+    reminder.template_name = template_name
+    reminder.template_params = params
+
+    # Render and save the complete message body the user will receive.
+    from app.services.whatsapp_sender import get_template_body, render_template_body
+    body = get_template_body(db, template_name)
+    if body:
+        reminder.message_body = render_template_body(body, params or [])
+
     # --- Send WhatsApp template ---
     try:
         loop = asyncio.get_running_loop()
