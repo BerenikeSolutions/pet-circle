@@ -276,8 +276,8 @@ def _select_level0_message(
     """
     Level 0 schedule: Value Add messages at O+1, 5, 10, 20, 30, then cycle.
 
-    Template: WHATSAPP_TEMPLATE_NUDGE_VALUE_ADD_STATIC (static body, no vars)
-               or WHATSAPP_TEMPLATE_NUDGE_VALUE_ADD_PERSONAL (pet_name ×2)
+    Template: WHATSAPP_TEMPLATE_NUDGE_VALUE_ADD_PERSONAL
+    {{1}} = pet_name  {{2}} = tip text from nudge_message_library.template_var_1
     """
     slot_days = NUDGE_SCHEDULE_DAYS  # [1, 5, 10, 20, 30]
 
@@ -290,7 +290,7 @@ def _select_level0_message(
         if days_since_o < slot_days[-1] + (completed - len(slot_days) + 1) * NUDGE_POST_SCHEDULE_INTERVAL_DAYS:
             return None
 
-    # Pick a static value-add message from the library (level=0, breed='All')
+    # Pick tip text from the library (level=0, breed='All'), cycling by seq
     lib_row = (
         db.query(NudgeMessageLibrary)
         .filter(
@@ -302,11 +302,13 @@ def _select_level0_message(
         .first()
     )
 
-    template_key = getattr(settings, "WHATSAPP_TEMPLATE_NUDGE_VALUE_ADD_STATIC", None)
+    template_key = getattr(settings, "WHATSAPP_TEMPLATE_NUDGE_VALUE_ADD_PERSONAL", None)
     if not template_key or not lib_row:
         return None
 
-    return (template_key, [])  # Static template — no variables
+    pet_name = pet.name or "your pet"
+    tip = lib_row.template_var_1 or ""
+    return (template_key, [pet_name, tip])
 
 
 def _count_level0_rows(db: Session) -> int:
@@ -395,11 +397,22 @@ def _build_l1_message(
             var2 = lib_row.template_var_2 or ""
             return (template_key, [var1, var2])
 
-    # value_add: same as level 0 static
-    template_key = getattr(settings, "WHATSAPP_TEMPLATE_NUDGE_VALUE_ADD_STATIC", None)
-    if not template_key:
+    # value_add: use PERSONAL template with pet_name + tip text from library
+    lib_row = (
+        db.query(NudgeMessageLibrary)
+        .filter(
+            NudgeMessageLibrary.level == 1,
+            NudgeMessageLibrary.message_type == "value_add",
+            NudgeMessageLibrary.breed == "All",
+        )
+        .first()
+    )
+    template_key = getattr(settings, "WHATSAPP_TEMPLATE_NUDGE_VALUE_ADD_PERSONAL", None)
+    if not template_key or not lib_row:
         return None
-    return (template_key, [])
+    pet_name = pet.name or "your pet"
+    tip = lib_row.template_var_1 or ""
+    return (template_key, [pet_name, tip])
 
 
 # ---- Level 2 ----
@@ -489,13 +502,13 @@ def _pick_data_category(db: Session, pet: Pet, slot_idx: int) -> str:
 
     Falls back to position in NUDGE_L2_DATA_PRIORITY if N9 GPT is unavailable.
     """
-    # Try N9 GPT topic detection — best effort, fall back to static priority
+    # Detect most urgent category from actual health data — best effort, fall back to static priority
     try:
-        detected_category = _detect_topic_category(db, pet)
+        detected_category = _detect_topic_from_health_data(db, pet)
         if detected_category:
             return detected_category
     except Exception:
-        logger.debug("N9 topic detection skipped for pet %s", str(pet.id))
+        logger.debug("Health data topic detection skipped for pet %s", str(pet.id))
 
     # Static fallback: pick from priority list by slot index
     if slot_idx < len(NUDGE_L2_DATA_PRIORITY):
@@ -503,68 +516,55 @@ def _pick_data_category(db: Session, pet: Pet, slot_idx: int) -> str:
     return NUDGE_L2_DATA_PRIORITY[-1]
 
 
-def _detect_topic_category(db: Session, pet: Pet) -> Optional[str]:
+def _detect_topic_from_health_data(db: Session, pet: Pet) -> Optional[str]:
     """
-    N9: Use GPT to detect the most relevant category from recent activity.
+    Deterministically pick the highest-priority data category for Level 2 nudges
+    based on the pet's actual health gaps.
 
-    Reads last 3 message_logs + last dashboard_visit for this user.
-    Returns a category string matching NUDGE_L2_DATA_PRIORITY, or None.
+    Runs each nudge generator and returns the category of the first urgent/high
+    nudge found. Falls back to NUDGE_L2_DATA_PRIORITY in _pick_data_category if
+    no urgent items exist.
+
+    Priority order: vaccine → deworming → flea → condition → nutrition → checkup
+    Within each: urgent > high priority nudges trigger the category.
     """
-    from app.models.message_log import MessageLog
-    from app.models.dashboard_visit import DashboardVisit
-
-    if not getattr(settings, "OPENAI_API_KEY", None):
-        return None
-
-    pet_user = db.query(Pet).filter(Pet.id == pet.id).first()
-    if not pet_user:
-        return None
-
-    logs = (
-        db.query(MessageLog)
-        .filter(MessageLog.mobile_number.isnot(None))
-        .order_by(MessageLog.created_at.desc())
-        .limit(3)
-        .all()
+    from app.services.nudge_engine import (
+        _generate_vaccine_nudges,
+        _generate_deworming_nudges,
+        _generate_flea_nudges,
+        _generate_condition_nudges,
+        _generate_nutrition_nudges,
+        _generate_checkup_nudges,
     )
 
-    last_visit = (
-        db.query(DashboardVisit)
-        .filter(DashboardVisit.pet_id == pet.id)
-        .order_by(DashboardVisit.visited_at.desc())
-        .first()
-    )
+    category_map = {
+        "vaccine": "vaccine",
+        "deworming": "deworming",
+        "flea": "flea",
+        "condition": "conditions",
+        "nutrition": "nutrition",
+        "checkup": "checkup",
+    }
 
-    log_texts = [
-        (getattr(log, "payload", {}) or {}).get("text", {}).get("body", "")
-        for log in logs
+    pet_name = pet.name or ""
+    species = pet.species or ""
+
+    generators = [
+        ("vaccine",   lambda: _generate_vaccine_nudges(db, pet.id, pet_name, species)),
+        ("deworming", lambda: _generate_deworming_nudges(db, pet.id, pet_name, species)),
+        ("flea",      lambda: _generate_flea_nudges(db, pet.id, pet_name, species)),
+        ("condition", lambda: _generate_condition_nudges(db, pet.id, pet_name)),
+        ("nutrition", lambda: _generate_nutrition_nudges(db, pet.id, pet_name)),
+        ("checkup",   lambda: _generate_checkup_nudges(db, pet.id, pet_name)),
     ]
-    context = "\n".join(filter(None, log_texts))
-    if not context and not last_visit:
-        return None
 
-    prompt = (
-        f"Given these recent WhatsApp messages from a pet owner, "
-        f"which one topic from the following list is most relevant to their pet's needs? "
-        f"Categories: {', '.join(NUDGE_L2_DATA_PRIORITY)}. "
-        f"Messages:\n{context}\n"
-        f"Reply with ONLY the category name, exactly as listed, or 'unknown'."
-    )
-
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=settings.OPENAI_API_KEY)
-        resp = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=20,
-            temperature=0,
-        )
-        category = resp.choices[0].message.content.strip()
-        if category in NUDGE_L2_DATA_PRIORITY:
-            return category
-    except Exception:
-        pass
+    for cat_key, gen in generators:
+        try:
+            nudges = gen()
+            if any(n.priority in ("urgent", "high") for n in nudges):
+                return category_map.get(cat_key, cat_key)
+        except Exception:
+            logger.debug("Health data topic detection failed for category %s pet %s", cat_key, str(pet.id))
 
     return None
 

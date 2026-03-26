@@ -34,7 +34,7 @@ import asyncio
 import concurrent.futures
 import logging
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from typing import Optional
 from uuid import UUID
 
@@ -572,64 +572,34 @@ def _candidates_from_hygiene(db: Session, today: date) -> list[ReminderCandidate
 
 def _apply_send_rules(db: Session, candidates: list[ReminderCandidate], today: date) -> list[ReminderCandidate]:
     """
-    Filter candidates by per-pet daily limits and minimum gap rules.
+    Filter candidates to prevent duplicate sends for the same (pet, item, stage) on the same day.
 
-    Rules:
-    1. Max 1 reminder per pet per day (skip if already sent one today for this pet).
-    2. Min REMINDER_MIN_GAP_DAYS between any two sends for the same pet.
-    3. Stage precedence: if two candidates for the same pet, prefer higher priority stage.
-    4. Never fire overdue_insight + any other stage on the same day (overdue fires last).
+    Per-item deduplication: skip if a reminder for this exact source_id + stage was already sent today.
+    All other due items for a pet are sent — no per-pet daily cap or inter-reminder gap.
     """
-    # Build current state: last sent reminder per pet
-    pet_last_sent: dict[str, Optional[date]] = {}
-    pet_sent_today: set[str] = set()
+    # Build set of (source_id, stage) already sent today to deduplicate per item
+    already_sent_today: set[tuple[str, str]] = set()
 
-    # Find pets that already have a reminder sent today or recently
-    from sqlalchemy import func
-    recent = (
-        db.query(Reminder.pet_id, func.max(Reminder.sent_at).label("last_sent"))
+    sent_today_rows = (
+        db.query(Reminder.source_id, Reminder.stage)
         .filter(
             Reminder.status == "sent",
-            Reminder.pet_id.isnot(None),
+            Reminder.sent_at >= datetime.combine(today, time.min),
         )
-        .group_by(Reminder.pet_id)
         .all()
     )
 
-    for pet_id, last_sent in recent:
-        key = str(pet_id)
-        if last_sent:
-            sent_date = last_sent.date() if hasattr(last_sent, 'date') else last_sent
-            if sent_date == today:
-                pet_sent_today.add(key)
-            pet_last_sent[key] = sent_date
+    for source_id, stage in sent_today_rows:
+        if source_id and stage:
+            already_sent_today.add((str(source_id), stage))
 
-    # Group candidates by pet_id, keeping highest-priority stage per pet
-    pet_best: dict[str, ReminderCandidate] = {}
+    result: list[ReminderCandidate] = []
     for cand in candidates:
-        pet_key = str(cand.pet.id)
+        key = (str(cand.source_id), cand.stage)
+        if key not in already_sent_today:
+            result.append(cand)
 
-        # Skip if already sent a reminder today
-        if pet_key in pet_sent_today:
-            continue
-
-        # Skip if within minimum gap window
-        last_sent = pet_last_sent.get(pet_key)
-        if last_sent and (today - last_sent).days < REMINDER_MIN_GAP_DAYS:
-            continue
-
-        # Keep highest-priority stage per pet (lower index = higher priority)
-        if pet_key not in pet_best:
-            pet_best[pet_key] = cand
-        else:
-            existing_priority = STAGE_PRIORITY_ORDER.index(pet_best[pet_key].stage) \
-                if pet_best[pet_key].stage in STAGE_PRIORITY_ORDER else 99
-            new_priority = STAGE_PRIORITY_ORDER.index(cand.stage) \
-                if cand.stage in STAGE_PRIORITY_ORDER else 99
-            if new_priority < existing_priority:
-                pet_best[pet_key] = cand
-
-    return list(pet_best.values())
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
