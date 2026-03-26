@@ -38,6 +38,11 @@ from app.models.nutrition_target_cache import NutritionTargetCache
 from app.models.food_nutrition_cache import FoodNutritionCache
 from app.models.hygiene_tip_cache import HygieneTipCache
 from app.models.custom_preventive_item import CustomPreventiveItem
+from app.models.nudge_message_library import NudgeMessageLibrary
+from app.models.breed_consequence_library import BreedConsequenceLibrary
+from app.models.dashboard_visit import DashboardVisit
+from app.models.agent_onboarding_session import AgentOnboardingSession
+from app.models.agent_order_session import AgentOrderSession
 
 __all__ = [
     "User",
@@ -72,4 +77,9 @@ __all__ = [
     "FoodNutritionCache",
     "HygieneTipCache",
     "CustomPreventiveItem",
+    "NudgeMessageLibrary",
+    "BreedConsequenceLibrary",
+    "DashboardVisit",
+    "AgentOnboardingSession",
+    "AgentOrderSession",
 ]

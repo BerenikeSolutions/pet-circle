@@ -1,4 +1,7 @@
--- Clear all data from the database (keeps preventive_master, product_catalog, nudge_config reference data).
+-- Clear all data from the database.
+-- Tables PRESERVED (reference/seed data — never cleared):
+--   preventive_master, product_catalog, nudge_config,
+--   nudge_message_library, breed_consequence_library
 -- Truncates tables in FK-safe order (children first) using CASCADE.
 --
 -- TARGETED RESET (single test number — replace phone number below):
@@ -62,6 +65,9 @@ TRUNCATE TABLE nudges CASCADE;
 TRUNCATE TABLE cart_items CASCADE;
 TRUNCATE TABLE order_recommendations CASCADE;
 TRUNCATE TABLE orders CASCADE;
+
+-- Dashboard visits (nudge level tracking — migration 027)
+TRUNCATE TABLE dashboard_visits CASCADE;
 
 -- Documents & tokens
 TRUNCATE TABLE documents CASCADE;

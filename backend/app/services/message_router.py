@@ -31,9 +31,14 @@ from app.utils.breed_fun_facts import get_breed_fun_fact
 from app.core.constants import (
     APP_WELCOME_HEADING,
     REMINDER_DONE,
+    REMINDER_ALREADY_DONE,
     REMINDER_SNOOZE_7,
+    REMINDER_ORDER_NOW,
+    REMINDER_STILL_PENDING,
+    REMINDER_SCHEDULE,
     REMINDER_RESCHEDULE,
     REMINDER_CANCEL,
+    REMINDER_PAYLOADS as _REMINDER_PAYLOADS_CONST,
     CONFLICT_USE_NEW,
     CONFLICT_KEEP_EXISTING,
     MAX_PETS_PER_USER,
@@ -178,8 +183,8 @@ def _build_error_dedup_token(message_data: dict) -> str:
     return f"type:{msg_type}"
 
 
-# All valid reminder payload IDs
-REMINDER_PAYLOADS = {REMINDER_DONE, REMINDER_SNOOZE_7, REMINDER_RESCHEDULE, REMINDER_CANCEL}
+# All valid reminder payload IDs — sourced from constants to keep in sync
+REMINDER_PAYLOADS = _REMINDER_PAYLOADS_CONST
 
 # All valid conflict payload IDs
 CONFLICT_PAYLOADS = {CONFLICT_USE_NEW, CONFLICT_KEEP_EXISTING}
@@ -541,58 +546,36 @@ async def _try_handle_reschedule_date(
     """
     Check if user has a pending reschedule and route date input accordingly.
 
-    A reschedule is pending when a reminder is in 'sent' status and the
-    most recent outgoing message was the reschedule date prompt. This avoids
-    adding an extra DB column — we detect the state from existing data.
+    A reschedule is pending when user.active_reminder_id is set.
+    This is set by _handle_reminder_button when REMINDER_SCHEDULE is tapped.
 
     Returns True if the message was consumed as a reschedule date, False otherwise.
     """
     from app.services.reminder_response import apply_reschedule_date
-    from app.models.preventive_record import PreventiveRecord
     from app.utils.date_utils import parse_date
-    from app.models.message_log import MessageLog
-    from sqlalchemy import cast, String
 
-    # Check if the last outgoing message was the reschedule date prompt.
-    last_outgoing = (
-        db.query(MessageLog)
-        .filter(
-            MessageLog.mobile_number == from_number,
-            MessageLog.direction == "outgoing",
-            MessageLog.message_type == "text",
-        )
-        .order_by(MessageLog.created_at.desc())
-        .first()
-    )
-
-    if not last_outgoing:
+    # No pending reschedule state.
+    if not getattr(user, "active_reminder_id", None):
         return False
 
-    # Check if the last outgoing message contains the reschedule prompt text.
-    payload_body = ""
-    try:
-        payload_body = last_outgoing.payload.get("text", {}).get("body", "")
-    except (AttributeError, TypeError):
-        return False
+    reminder_id = user.active_reminder_id
 
-    if "new date" not in payload_body.lower() or "DD/MM/YYYY" not in payload_body:
-        return False
-
-    # Find the sent reminder this reschedule is for.
+    # Verify the reminder still exists and belongs to this user.
     reminder = (
         db.query(Reminder)
-        .join(PreventiveRecord, Reminder.preventive_record_id == PreventiveRecord.id)
-        .join(Pet, PreventiveRecord.pet_id == Pet.id)
+        .join(Pet, Reminder.pet_id == Pet.id)
         .filter(
+            Reminder.id == reminder_id,
             Pet.user_id == user.id,
             Pet.is_deleted == False,
-            Reminder.status == "sent",
         )
-        .order_by(Reminder.sent_at.desc())
         .first()
     )
 
     if not reminder:
+        # Stale state — clear it and do not consume the message.
+        user.active_reminder_id = None
+        db.commit()
         return False
 
     # Try to parse the user's text as a date.
@@ -607,6 +590,9 @@ async def _try_handle_reschedule_date(
 
     try:
         result = apply_reschedule_date(db, reminder.id, new_date)
+        # Clear the reschedule state only after a successful reschedule.
+        user.active_reminder_id = None
+        db.commit()
         await send_text_message(
             db, from_number,
             f"Rescheduled! New due date: {result.get('new_due_date', 'N/A')}",
@@ -660,18 +646,29 @@ def _is_order_admin_number(from_number: str) -> bool:
 
 
 async def _handle_reminder_button(db: Session, user, payload: str) -> None:
-    """Handle a reminder button response."""
+    """
+    Handle a reminder button response.
+
+    Supports all 8 reminder payloads (Excel v5 4-stage lifecycle):
+        REMINDER_DONE / REMINDER_ALREADY_DONE — mark completed, log next due
+        REMINDER_SNOOZE_7                     — snooze by category days
+        REMINDER_ORDER_NOW                    — snooze + trigger order flow
+        REMINDER_STILL_PENDING                — update last_ignored_at, keep sent
+        REMINDER_SCHEDULE / REMINDER_RESCHEDULE — prompt for new date
+        REMINDER_CANCEL                       — mark snoozed / dismissed
+
+    Uses Reminder.pet_id for the join (added in migration 028) to support
+    reminders from all 5 source types (preventive_record, diet_item, etc.).
+    """
     from app.services.reminder_response import handle_reminder_response
-    from app.models.preventive_record import PreventiveRecord
 
     from_number = _get_mobile(user)
 
-    # Find the latest sent reminder for this user's pets via direct JOIN
-    # (avoids separate pet query).
+    # Find the latest sent reminder for this user's pets via pet_id FK.
+    # Reminder.pet_id was backfilled by migration 028 for all source types.
     reminder = (
         db.query(Reminder)
-        .join(PreventiveRecord, Reminder.preventive_record_id == PreventiveRecord.id)
-        .join(Pet, PreventiveRecord.pet_id == Pet.id)
+        .join(Pet, Reminder.pet_id == Pet.id)
         .filter(
             Pet.user_id == user.id,
             Pet.is_deleted == False,
@@ -688,23 +685,48 @@ async def _handle_reminder_button(db: Session, user, payload: str) -> None:
     try:
         result = handle_reminder_response(db, reminder.id, payload)
 
-        if payload == REMINDER_DONE:
+        if payload in (REMINDER_DONE, REMINDER_ALREADY_DONE):
+            next_due = result.get("next_due_date", "N/A")
             await send_text_message(
                 db, from_number,
-                f"Marked as done! Next due: {result.get('next_due_date', 'N/A')}",
+                f"Marked as done! Next due: {next_due}",
             )
+
         elif payload == REMINDER_SNOOZE_7:
+            new_due = result.get("new_due_date", "N/A")
             await send_text_message(
                 db, from_number,
-                f"Snoozed for 7 days. New due: {result.get('new_due_date', 'N/A')}",
+                f"Got it — I'll remind you again on {new_due}.",
             )
-        elif payload == REMINDER_RESCHEDULE:
+
+        elif payload == REMINDER_ORDER_NOW:
+            # Reminder handler marks it snoozed; now initiate the order flow.
+            if _should_use_agentic_order():
+                user.order_state = "agentic_order"
+                db.commit()
+                from app.services.agentic_order import handle_agentic_order_step
+                await handle_agentic_order_step(db, user, {}, send_text_message)
+            else:
+                from app.services.order_service import start_order_flow
+                await start_order_flow(db, user)
+
+        elif payload == REMINDER_STILL_PENDING:
             await send_text_message(
                 db, from_number,
-                "Please send the new date (DD/MM/YYYY or DD-MM-YYYY).",
+                "Noted! I'll check in again soon.",
             )
+
+        elif payload in (REMINDER_SCHEDULE, REMINDER_RESCHEDULE):
+            # Store reminder ID on user so _try_handle_reschedule_date can find it.
+            user.active_reminder_id = reminder.id
+            db.commit()
+            await send_text_message(
+                db, from_number,
+                "What new date works for you? Please reply in DD/MM/YYYY format.",
+            )
+
         elif payload == REMINDER_CANCEL:
-            await send_text_message(db, from_number, "Reminder cancelled.")
+            await send_text_message(db, from_number, "Reminder dismissed.")
 
     except ValueError as e:
         await send_text_message(db, from_number, str(e))

@@ -334,59 +334,64 @@ def _is_greeting(text_lower: str) -> bool:
 
 async def _send_onboarding_resume(db, user, state, send_fn):
     """
-    Send a welcome-back message showing what has been filled so far,
+    Send a welcome-back message showing only the last collected field,
     then re-ask the current onboarding question.
 
-    Business rule: Until onboarding is complete, any greeting should
-    show the welcome message, display progress, and prompt the next step.
+    Business rule: Until onboarding is complete, any greeting should show a
+    single "Last saved:" line (not a full bullet list) and prompt the next step.
     """
     mobile = user._plaintext_mobile
-
-    # Build progress summary from data already collected.
-    progress_lines = []
-    if user.consent_given:
-        progress_lines.append("Consent: Yes")
-    if user.full_name and user.full_name != "_pending":
-        progress_lines.append(f"Name: {user.full_name}")
-    if user.pincode:
-        progress_lines.append("Pincode: Provided")
-
-    # Check if a pet is being onboarded.
     pet = _get_pending_pet(db, user.id)
-    if pet:
-        progress_lines.append(f"Pet name: {pet.name}")
-        if pet.photo_path:
-            progress_lines.append("Photo: Uploaded")
-        if pet.species and pet.species != "_pending":
-            progress_lines.append(f"Species: {pet.species}")
-        if pet.breed:
-            progress_lines.append(f"Breed: {pet.breed}")
-        if pet.gender:
-            progress_lines.append(f"Gender: {pet.gender}")
-        if pet.dob:
-            progress_lines.append(f"DOB: {pet.dob.strftime('%d/%m/%Y')}")
-        if pet.weight:
-            progress_lines.append(f"Weight: {pet.weight} kg")
-        if pet.neutered is not None:
-            progress_lines.append(f"Neutered: {'Yes' if pet.neutered else 'No'}")
 
-        # Show diet progress for states past the diet collection steps.
-        if state in ("awaiting_homemade_food", "awaiting_supplements", "awaiting_grooming", "awaiting_documents", "complete"):
-            from app.models.diet_item import DietItem
-            diet_count = db.query(DietItem).filter(DietItem.pet_id == pet.id).count()
-            if diet_count > 0:
-                progress_lines.append(f"Diet items: {diet_count} recorded")
+    # Determine the most recently collected detail (highest-ranked non-null field).
+    last_saved = _get_last_saved_detail(user, pet, db)
 
-    # Compose welcome-back header.
     greeting = f"{APP_RETURNING_HEADING}\n\nLet's continue setting up your profile."
+    if last_saved:
+        greeting += f"\n\nLast saved: {last_saved}."
 
-    if progress_lines:
-        greeting += "\n\nHere's what we have so far:\n" + "\n".join(f"  • {line}" for line in progress_lines)
-
-    # Map state → next question prompt.
     next_question = _get_question_for_state(state, pet)
-
     await send_fn(db, mobile, f"{greeting}\n\n{next_question}")
+
+
+def _get_last_saved_detail(user, pet, db) -> str:
+    """
+    Return a human-readable string for the most recently collected onboarding field.
+
+    Checks in reverse collection order so the highest-priority collected field wins.
+    Examples: "Buddy's breed — Golden Retriever", "Your neutered status — Yes"
+    """
+    from app.models.diet_item import DietItem
+
+    pet_name = pet.name if pet else "your pet"
+
+    # Walk fields in reverse collection order; return the first non-null one.
+    if pet:
+        # Diet items (latest collected)
+        diet_count = db.query(DietItem).filter(DietItem.pet_id == pet.id).count()
+        if diet_count > 0:
+            return f"{pet_name}'s diet — {diet_count} item(s) recorded"
+        if pet.neutered is not None:
+            return f"{pet_name}'s neutered status — {'Yes' if pet.neutered else 'No'}"
+        if pet.weight:
+            return f"{pet_name}'s weight — {pet.weight} kg"
+        if pet.dob:
+            return f"{pet_name}'s date of birth — {pet.dob.strftime('%d/%m/%Y')}"
+        if pet.gender:
+            return f"{pet_name}'s gender — {pet.gender.capitalize()}"
+        if pet.breed:
+            return f"{pet_name}'s breed — {pet.breed}"
+        if pet.species and pet.species != "_pending":
+            return f"{pet_name}'s species — {pet.species.capitalize()}"
+        if pet.photo_path:
+            return f"{pet_name}'s photo — uploaded"
+        return f"Pet name — {pet_name}"
+
+    if user.pincode:
+        return f"Your pincode — provided"
+    if user.full_name and user.full_name != "_pending":
+        return f"Your name — {user.full_name}"
+    return ""
 
 
 def _get_question_for_state(state: str, pet=None) -> str:
@@ -1572,6 +1577,10 @@ async def _finalize_onboarding(db, user, send_fn):
     try:
         user.onboarding_state = "complete"
         user.doc_upload_deadline = None
+        # Record when onboarding completed for nudge O+N schedule (OQ1).
+        if not user.onboarding_completed_at:
+            from datetime import datetime as _dt
+            user.onboarding_completed_at = _dt.utcnow()
         db.commit()
     except Exception as e:
         logger.error("Failed to mark onboarding complete: %s", str(e), exc_info=True)

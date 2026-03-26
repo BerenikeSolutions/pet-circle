@@ -1383,6 +1383,8 @@ async def _finalize_agentic_onboarding(
             user.onboarding_state = "complete"
             session.is_complete = True
             cd["onboarding_complete"] = True
+            if not user.onboarding_completed_at:
+                user.onboarding_completed_at = datetime.now(timezone.utc)
             db.commit()
             logger.warning(
                 "Agentic onboarding: user %s already at max pets (%d)", str(user.id), MAX_PETS_PER_USER
@@ -1550,6 +1552,10 @@ async def _finalize_agentic_onboarding(
 
         session.is_complete = True
         cd["onboarding_complete"] = True
+
+        # Record when onboarding completed for nudge O+N schedule (OQ1).
+        if not user.onboarding_completed_at:
+            user.onboarding_completed_at = datetime.now(timezone.utc)
 
         db.commit()
 

@@ -6,8 +6,9 @@ These endpoints are NOT exposed to users — they are called by GitHub
 Actions cron jobs or admin scripts.
 
 Routes:
-    POST /internal/run-reminder-engine — Execute daily reminder processing.
-        Also runs conflict expiry check (Module 19).
+    POST /internal/run-reminder-engine  — 4-stage reminder lifecycle + conflict expiry.
+    POST /internal/run-nudge-scheduler  — Level 0/1/2 nudge scheduler (Excel v5).
+    POST /internal/run-grooming-nudges  — Grooming nudge trigger (15-min cron).
 
 Security:
     - Protected by the same X-ADMIN-KEY header as admin routes.
@@ -24,7 +25,7 @@ from app.core.rate_limiter import check_admin_rate_limit
 from app.services.reminder_engine import run_reminder_engine, send_pending_reminders
 from app.services.conflict_expiry import expire_pending_conflicts
 from app.services.nudge_engine import run_nudge_engine
-from app.services.nudge_sender import send_pending_nudges, check_inactivity_nudges
+from app.services.nudge_sender import check_inactivity_nudges
 
 
 logger = logging.getLogger(__name__)
@@ -121,20 +122,8 @@ def execute_reminder_engine(db: Session = Depends(get_db)):
         except Exception:
             pass
 
-    # --- Step 5: Send pending nudges via WhatsApp ---
-    nudge_send_results = {"sent": 0, "skipped": 0, "failed": 0}
-    nudge_send_error = None
-    try:
-        nudge_send_results = send_pending_nudges(db)
-    except Exception as e:
-        nudge_send_error = str(e)
-        logger.error("Nudge sending failed: %s", str(e), exc_info=True)
-        try:
-            db.rollback()
-        except Exception:
-            pass
-
-    # --- Step 6: Check for inactive users and create re-engagement nudges ---
+    # --- Step 5: Check for inactive users and create re-engagement nudges ---
+    # (WhatsApp nudge sending moved to /internal/run-nudge-scheduler)
     inactivity_results = {"inactivity_nudges_created": 0}
     inactivity_error = None
     try:
@@ -150,18 +139,16 @@ def execute_reminder_engine(db: Session = Depends(get_db)):
     logger.info(
         "Daily cron completed: conflicts_resolved=%d, "
         "reminders_created=%d, reminders_sent=%d, "
-        "nudges_generated=%d, nudges_sent=%d, "
-        "errors=[conflict=%s, reminder=%s, send=%s, nudge=%s, nudge_send=%s, inactivity=%s]",
+        "nudges_generated=%d, "
+        "errors=[conflict=%s, reminder=%s, send=%s, nudge=%s, inactivity=%s]",
         conflicts_resolved,
         reminder_results["reminders_created"],
         send_results["reminders_sent"],
         nudge_results["total_nudges"],
-        nudge_send_results["sent"],
         conflict_error,
         reminder_error,
         send_error,
         nudge_error,
-        nudge_send_error,
         inactivity_error,
     )
 
@@ -170,17 +157,37 @@ def execute_reminder_engine(db: Session = Depends(get_db)):
         "reminder_engine": reminder_results,
         "reminder_sending": send_results,
         "nudge_engine": nudge_results,
-        "nudge_sending": nudge_send_results,
         "inactivity_nudges": inactivity_results,
         "errors": {
             "conflict_expiry": conflict_error,
             "reminder_engine": reminder_error,
             "reminder_sending": send_error,
             "nudge_engine": nudge_error,
-            "nudge_sending": nudge_send_error,
             "inactivity_nudges": inactivity_error,
         },
     }
+
+
+@router.post("/run-nudge-scheduler")
+async def execute_nudge_scheduler(db: Session = Depends(get_db)):
+    """
+    Execute the Level 0/1/2 nudge scheduler (Excel v5 spec).
+
+    Called by GitHub Actions cron at 8 AM IST daily, after /run-reminder-engine.
+    Sends WhatsApp nudge templates per user level and O+N slot schedule.
+
+    Returns:
+        Dict with sent, skipped, and failed counts.
+    """
+    from app.services.nudge_scheduler import run_nudge_scheduler
+
+    try:
+        results = await run_nudge_scheduler(db)
+        logger.info("Nudge scheduler completed: %s", results)
+        return results
+    except Exception as e:
+        logger.error("Nudge scheduler failed: %s", str(e), exc_info=True)
+        return {"sent": 0, "skipped": 0, "failed": 1}
 
 
 @router.post("/run-grooming-nudges")

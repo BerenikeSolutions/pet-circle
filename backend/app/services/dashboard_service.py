@@ -133,6 +133,23 @@ def get_dashboard_data(db: Session, token: str) -> dict:
     dashboard_token = validate_dashboard_token(db, token)
     pet_id = dashboard_token.pet_id
 
+    # --- Record dashboard visit for nudge level tracking (N8) ---
+    # Best-effort: never crash the dashboard load on a logging failure.
+    # user_id is resolved via pet.user_id (DashboardToken has no user_id FK).
+    try:
+        from app.models.dashboard_visit import DashboardVisit
+        _visit_pet = db.query(Pet).filter(Pet.id == pet_id).first()
+        if _visit_pet:
+            visit = DashboardVisit(
+                user_id=_visit_pet.user_id,
+                pet_id=pet_id,
+                token=token,
+            )
+            db.add(visit)
+            db.flush()  # Write within current transaction; committed below with the rest.
+    except Exception:
+        logger.warning("Failed to record dashboard visit for token=%s...", token[:8])
+
     # --- Load pet + owner in one query via join ---
     pet = db.query(Pet).filter(Pet.id == pet_id).first()
     if not pet or pet.is_deleted:

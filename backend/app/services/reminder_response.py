@@ -6,37 +6,45 @@ Each response triggers a specific state transition on the reminder
 and its linked preventive record.
 
 Payload IDs (from constants — never hardcoded):
-    - REMINDER_DONE: User confirms the preventive action was done today.
-    - REMINDER_SNOOZE_7: User snoozes the reminder by 7 days.
-    - REMINDER_RESCHEDULE: User wants to pick a new date.
-    - REMINDER_CANCEL: User cancels this preventive item entirely.
+    - REMINDER_DONE:          "Done — Log It" (Due stage) — mark done today
+    - REMINDER_ALREADY_DONE:  "Already Done" (T-7 stage) — same as DONE
+    - REMINDER_SNOOZE_7:      "Remind Me Later" — snooze by category-specific days
+    - REMINDER_ORDER_NOW:     "Order Now" — trigger agentic_order flow
+    - REMINDER_STILL_PENDING: "Still Pending" — acknowledge but do nothing
+    - REMINDER_SCHEDULE:      "Schedule For ()" — set awaiting_reschedule_date state
+    - REMINDER_RESCHEDULE:    Legacy — same as REMINDER_SCHEDULE
+    - REMINDER_CANCEL:        Cancel this preventive item entirely
 
 State transitions:
 
-    REMINDER_DONE:
-        → preventive_record.last_done_date = today (IST)
-        → Recalculate next_due_date and status from DB recurrence_days.
+    REMINDER_DONE / REMINDER_ALREADY_DONE:
+        → For preventive_record sources:
+          preventive_record.last_done_date = today
+          Recalculate next_due_date and status from DB recurrence_days.
+        → For diet_item sources: diet_item.last_purchase_date = today
+        → For condition_medication: refill_due_date advanced by recurrence
+        → For condition_monitoring: last_done_date = today
         → reminder.status = 'completed'
 
-    REMINDER_SNOOZE_7:
-        → preventive_record.next_due_date += 7 days
+    REMINDER_SNOOZE_7 ("Remind Me Later"):
+        → preventive_record.next_due_date += snooze_days (category-specific)
         → reminder.status = 'snoozed'
-        → No recalculation — snooze is a manual override.
 
-    REMINDER_RESCHEDULE:
-        → Ask user for new date via WhatsApp text prompt.
-        → On receiving valid date: update next_due_date, recalculate status.
-        → Date validation uses parse_date from date_utils.
+    REMINDER_ORDER_NOW:
+        → Triggers agentic_order flow (caller must initiate)
+        → reminder.status = 'snoozed' (pending order)
+
+    REMINDER_STILL_PENDING:
+        → reminder.last_ignored_at = now (updates ignore tracking)
+        → No status change — reminder stays 'sent'
+
+    REMINDER_SCHEDULE / REMINDER_RESCHEDULE:
+        → Returns signal to caller to set user.active_reminder_id and state
+        → No reminder status change until date received
 
     REMINDER_CANCEL:
         → preventive_record.status = 'cancelled'
-        → Cancelled records are excluded from future reminder runs.
-
-Rules:
-    - All payload IDs referenced from constants module.
-    - All date operations in Asia/Kolkata timezone.
-    - All transitions logged.
-    - No silent overwrites — each transition is explicit.
+        → reminder.status = 'completed'
 """
 
 import logging
@@ -46,12 +54,20 @@ from sqlalchemy.orm import Session
 from app.models.reminder import Reminder
 from app.models.preventive_record import PreventiveRecord
 from app.models.preventive_master import PreventiveMaster
+from app.models.diet_item import DietItem
+from app.models.condition_medication import ConditionMedication
+from app.models.condition_monitoring import ConditionMonitoring
 from app.core.constants import (
     REMINDER_DONE,
+    REMINDER_ALREADY_DONE,
     REMINDER_SNOOZE_7,
     REMINDER_SNOOZE_DAYS,
+    REMINDER_ORDER_NOW,
+    REMINDER_STILL_PENDING,
+    REMINDER_SCHEDULE,
     REMINDER_RESCHEDULE,
     REMINDER_CANCEL,
+    REMINDER_PAYLOADS,
 )
 from app.services.preventive_calculator import (
     compute_next_due_date,
@@ -63,14 +79,8 @@ from app.utils.date_utils import get_today_ist, format_date_for_user
 logger = logging.getLogger(__name__)
 
 
-# All valid reminder button payload IDs.
-# Used for validation — reject unknown payloads immediately.
-VALID_REMINDER_PAYLOADS = {
-    REMINDER_DONE,
-    REMINDER_SNOOZE_7,
-    REMINDER_RESCHEDULE,
-    REMINDER_CANCEL,
-}
+# All valid reminder button payload IDs (from constants).
+VALID_REMINDER_PAYLOADS = REMINDER_PAYLOADS
 
 
 def handle_reminder_response(
@@ -130,11 +140,15 @@ def handle_reminder_response(
         )
 
     # Route to the appropriate handler.
-    if payload == REMINDER_DONE:
+    if payload in (REMINDER_DONE, REMINDER_ALREADY_DONE):
         return _handle_done(db, reminder)
     elif payload == REMINDER_SNOOZE_7:
         return _handle_snooze(db, reminder)
-    elif payload == REMINDER_RESCHEDULE:
+    elif payload == REMINDER_ORDER_NOW:
+        return _handle_order_now(db, reminder)
+    elif payload == REMINDER_STILL_PENDING:
+        return _handle_still_pending(db, reminder)
+    elif payload in (REMINDER_SCHEDULE, REMINDER_RESCHEDULE):
         return _handle_reschedule_request(db, reminder)
     elif payload == REMINDER_CANCEL:
         return _handle_cancel(db, reminder)
@@ -142,71 +156,72 @@ def handle_reminder_response(
 
 def _handle_done(db: Session, reminder: Reminder) -> dict:
     """
-    Handle REMINDER_DONE — user confirms the preventive action was done today.
+    Handle REMINDER_DONE / REMINDER_ALREADY_DONE — user confirms the action is done.
 
-    State transitions:
-        - preventive_record.last_done_date = today (IST)
-        - Recalculate next_due_date using recurrence_days from DB.
-        - Recalculate status based on new next_due_date.
-        - reminder.status = 'completed'
+    Routes to the correct handler based on reminder.source_type:
+        - preventive_record:      update last_done_date, recalculate next_due
+        - diet_item:              update last_purchase_date to today
+        - condition_medication:   mark as refilled (advance refill_due_date by 30 days)
+        - condition_monitoring:   update last_done_date on monitoring row
+        - hygiene_preference:     update last_done on hygiene pref row
+        - (None/unknown):         fallback to preventive_record logic
 
-    Args:
-        db: SQLAlchemy database session.
-        reminder: The reminder being responded to.
-
-    Returns:
-        Result dictionary with updated fields.
+    In all cases: reminder.status = 'completed'
     """
-    # Load the linked preventive record.
+    today = get_today_ist()
+    source_type = reminder.source_type or "preventive_record"
+
+    if source_type == "diet_item" and reminder.source_id:
+        return _handle_done_diet_item(db, reminder, today)
+    elif source_type == "condition_medication" and reminder.source_id:
+        return _handle_done_condition_medication(db, reminder, today)
+    elif source_type == "condition_monitoring" and reminder.source_id:
+        return _handle_done_condition_monitoring(db, reminder, today)
+    elif source_type == "hygiene_preference":
+        # Hygiene done: mark reminder completed; last_done will be set by user via dashboard
+        reminder.status = "completed"
+        db.commit()
+        logger.info("Reminder DONE (hygiene): reminder_id=%s", str(reminder.id))
+        return {
+            "status": "completed",
+            "reminder_id": str(reminder.id),
+            "action": REMINDER_DONE,
+            "message": "Logged! Great job keeping up with grooming.",
+        }
+    else:
+        return _handle_done_preventive_record(db, reminder, today)
+
+
+def _handle_done_preventive_record(db: Session, reminder: Reminder, today: date) -> dict:
+    """Handle Done for preventive_record-sourced reminders."""
     record = (
         db.query(PreventiveRecord)
         .filter(PreventiveRecord.id == reminder.preventive_record_id)
         .first()
     )
-
     if not record:
-        raise ValueError(
-            f"Preventive record not found for reminder: {reminder.id}"
-        )
+        raise ValueError(f"Preventive record not found for reminder: {reminder.id}")
 
-    # Load preventive master for recurrence_days — always from DB.
     master = (
         db.query(PreventiveMaster)
         .filter(PreventiveMaster.id == record.preventive_master_id)
         .first()
     )
-
     if not master:
-        raise ValueError(
-            f"Preventive master not found for record: {record.id}"
-        )
+        raise ValueError(f"Preventive master not found for record: {record.id}")
 
-    # Update last_done_date to today (IST).
-    today = get_today_ist()
     record.last_done_date = today
-
-    # Recalculate next_due_date from DB recurrence_days.
-    # next_due_date = last_done_date + recurrence_days
     record.next_due_date = compute_next_due_date(today, master.recurrence_days)
-
-    # Recalculate status based on new next_due_date.
     record.status = compute_status(record.next_due_date, master.reminder_before_days)
-
-    # Mark reminder as completed.
     reminder.status = "completed"
-
     db.commit()
 
     logger.info(
         "Reminder DONE: reminder_id=%s, record_id=%s, "
         "last_done=%s, next_due=%s, new_status=%s",
-        str(reminder.id),
-        str(record.id),
-        str(today),
-        str(record.next_due_date),
-        record.status,
+        str(reminder.id), str(record.id),
+        str(today), str(record.next_due_date), record.status,
     )
-
     return {
         "status": "completed",
         "reminder_id": str(reminder.id),
@@ -217,62 +232,140 @@ def _handle_done(db: Session, reminder: Reminder) -> dict:
     }
 
 
+def _handle_done_diet_item(db: Session, reminder: Reminder, today: date) -> dict:
+    """Handle Done for diet_item-sourced (food/supplement) reminders."""
+    item = db.query(DietItem).filter(DietItem.id == reminder.source_id).first()
+    if item:
+        item.last_purchase_date = today
+    reminder.status = "completed"
+    db.commit()
+    logger.info("Reminder DONE (diet_item): reminder_id=%s source_id=%s",
+                str(reminder.id), str(reminder.source_id))
+    return {
+        "status": "completed",
+        "reminder_id": str(reminder.id),
+        "action": REMINDER_DONE,
+        "message": "Restock logged! We'll remind you when the next reorder is due.",
+    }
+
+
+def _handle_done_condition_medication(db: Session, reminder: Reminder, today: date) -> dict:
+    """Handle Done for chronic medicine reminders — advance refill_due_date by 30 days."""
+    med = db.query(ConditionMedication).filter(ConditionMedication.id == reminder.source_id).first()
+    if med and med.refill_due_date:
+        med.refill_due_date = med.refill_due_date + timedelta(days=30)
+    reminder.status = "completed"
+    db.commit()
+    next_due = med.refill_due_date if med else None
+    logger.info("Reminder DONE (medicine): reminder_id=%s", str(reminder.id))
+    return {
+        "status": "completed",
+        "reminder_id": str(reminder.id),
+        "action": REMINDER_DONE,
+        "next_refill_date": format_date_for_user(next_due) if next_due else None,
+        "message": "Medicine refill logged.",
+    }
+
+
+def _handle_done_condition_monitoring(db: Session, reminder: Reminder, today: date) -> dict:
+    """Handle Done for vet follow-up reminders."""
+    monitoring = db.query(ConditionMonitoring).filter(
+        ConditionMonitoring.id == reminder.source_id).first()
+    if monitoring:
+        monitoring.last_done_date = today
+        # Clear next_due_date (vet will set new one at the visit)
+        monitoring.next_due_date = None
+    reminder.status = "completed"
+    db.commit()
+    logger.info("Reminder DONE (vet_followup): reminder_id=%s", str(reminder.id))
+    return {
+        "status": "completed",
+        "reminder_id": str(reminder.id),
+        "action": REMINDER_DONE,
+        "message": "Vet follow-up logged! Great work staying on top of this.",
+    }
+
+
 def _handle_snooze(db: Session, reminder: Reminder) -> dict:
     """
-    Handle REMINDER_SNOOZE_7 — user snoozes the reminder by 7 days.
+    Handle REMINDER_SNOOZE_7 ("Remind Me Later") — snooze by category-specific days.
 
-    State transitions:
-        - preventive_record.next_due_date += 7 days
-        - reminder.status = 'snoozed'
-        - No full recalculation — snooze is a manual override of the due date.
-        - The record status is NOT recalculated because the user is
-          intentionally delaying; we keep the current status until the
-          next reminder engine run recalculates it.
-
-    Args:
-        db: SQLAlchemy database session.
-        reminder: The reminder being responded to.
-
-    Returns:
-        Result dictionary with updated fields.
+    For preventive_record sources: push next_due_date forward.
+    For other sources: no date change (snooze is informational).
+    In all cases: reminder.status = 'snoozed'.
     """
-    # Load the linked preventive record.
-    record = (
-        db.query(PreventiveRecord)
-        .filter(PreventiveRecord.id == reminder.preventive_record_id)
-        .first()
-    )
+    from app.services.reminder_engine import _snooze_for_category
+    snooze_days = _snooze_for_category(reminder.source_type or "preventive_record")
 
-    if not record:
-        raise ValueError(
-            f"Preventive record not found for reminder: {reminder.id}"
-        )
+    old_due = reminder.next_due_date
+    new_due = old_due + timedelta(days=snooze_days) if old_due else None
 
-    # Snooze: push next_due_date forward by REMINDER_SNOOZE_DAYS (from constants).
-    # This is a manual override — not based on recurrence_days.
-    old_due = record.next_due_date
-    record.next_due_date = record.next_due_date + timedelta(days=REMINDER_SNOOZE_DAYS)
+    # Update the source record's due date (preventive_record only)
+    if reminder.preventive_record_id:
+        record = db.query(PreventiveRecord).filter(
+            PreventiveRecord.id == reminder.preventive_record_id
+        ).first()
+        if record and record.next_due_date:
+            record.next_due_date = record.next_due_date + timedelta(days=snooze_days)
+    elif reminder.source_type == "diet_item" and reminder.source_id:
+        from app.models.diet_item import DietItem
+        item = db.query(DietItem).filter(DietItem.id == reminder.source_id).first()
+        if item and item.last_purchase_date:
+            item.last_purchase_date = item.last_purchase_date + timedelta(days=snooze_days)
 
-    # Mark reminder as snoozed.
     reminder.status = "snoozed"
-
     db.commit()
 
     logger.info(
-        "Reminder SNOOZED: reminder_id=%s, record_id=%s, "
-        "old_due=%s, new_due=%s",
-        str(reminder.id),
-        str(record.id),
-        str(old_due),
-        str(record.next_due_date),
+        "Reminder SNOOZED: reminder_id=%s snooze_days=%d old_due=%s new_due=%s",
+        str(reminder.id), snooze_days, str(old_due), str(new_due),
     )
-
     return {
         "status": "snoozed",
         "reminder_id": str(reminder.id),
         "action": REMINDER_SNOOZE_7,
-        "old_due_date": format_date_for_user(old_due),
-        "new_due_date": format_date_for_user(record.next_due_date),
+        "old_due_date": format_date_for_user(old_due) if old_due else None,
+        "new_due_date": format_date_for_user(new_due) if new_due else None,
+        "snooze_days": snooze_days,
+    }
+
+
+def _handle_order_now(db: Session, reminder: Reminder) -> dict:
+    """
+    Handle REMINDER_ORDER_NOW — user wants to order via WhatsApp.
+
+    Marks the reminder as snoozed (pending order).
+    The caller (message_router) is responsible for initiating the agentic_order flow.
+    """
+    reminder.status = "snoozed"
+    db.commit()
+    logger.info("Reminder ORDER_NOW: reminder_id=%s", str(reminder.id))
+    return {
+        "status": "order_initiated",
+        "reminder_id": str(reminder.id),
+        "action": REMINDER_ORDER_NOW,
+        "initiate_order": True,  # signal to caller to start agentic_order
+    }
+
+
+def _handle_still_pending(db: Session, reminder: Reminder) -> dict:
+    """
+    Handle REMINDER_STILL_PENDING — user acknowledges but hasn't done it yet.
+
+    Updates last_ignored_at to prevent false ignore detection.
+    Does NOT change reminder.status — it stays 'sent' for future follow-up.
+    """
+    from datetime import datetime
+    from app.utils.date_utils import IST
+    reminder.last_ignored_at = datetime.now(IST)
+    # Don't increment ignore_count — user actively acknowledged it
+    db.commit()
+    logger.info("Reminder STILL_PENDING: reminder_id=%s", str(reminder.id))
+    return {
+        "status": "acknowledged",
+        "reminder_id": str(reminder.id),
+        "action": REMINDER_STILL_PENDING,
+        "message": "Got it — we'll follow up soon.",
     }
 
 

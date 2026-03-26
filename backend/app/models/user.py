@@ -82,6 +82,21 @@ class User(Base):
     # Cleared to False by _send_extraction_summary() after the link is sent.
     dashboard_link_pending = Column(Boolean, default=False, nullable=False)
     
+    # Timestamp when the user completed onboarding (state reached 'complete').
+    # Used by nudge_scheduler as O (Onboarding Day) to compute O+N nudge slots.
+    # Nullable — None until onboarding finishes.
+    onboarding_completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Reminder ID stored while user is in awaiting_reschedule_date state.
+    # When user taps "Schedule For ()" on a reminder, message_router stores
+    # the reminder ID here and waits for the user to reply with a date.
+    # SET NULL automatically if the reminder is deleted.
+    active_reminder_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("reminders.id", ondelete="SET NULL", use_alter=True),
+        nullable=True,
+    )
+
     # Soft delete flag — when True, user is treated as deleted.
     # No physical delete is ever performed; this preserves audit trail.
     is_deleted = Column(Boolean, default=False)

@@ -69,12 +69,54 @@ CONFLICT_EXPIRY_DAYS: int = 5
 # --- Reminder Button Payload IDs ---
 # These are the exact payload strings sent by WhatsApp interactive buttons.
 # Never hardcode these strings elsewhere — always reference these constants.
-REMINDER_DONE: str = "REMINDER_DONE"
-REMINDER_SNOOZE_7: str = "REMINDER_SNOOZE_7"
-# Number of days to push next_due_date forward when user snoozes a reminder.
-REMINDER_SNOOZE_DAYS: int = 7
+REMINDER_DONE: str = "REMINDER_DONE"            # "Done — Log It" (Due stage)
+REMINDER_ALREADY_DONE: str = "REMINDER_ALREADY_DONE"  # "Already Done" (T-7 stage)
+REMINDER_SNOOZE_7: str = "REMINDER_SNOOZE_7"    # "Remind Me Later" (T-7 / Due stage)
+REMINDER_ORDER_NOW: str = "REMINDER_ORDER_NOW"  # "Order Now" (Due stage) → agentic_order
+REMINDER_STILL_PENDING: str = "REMINDER_STILL_PENDING"  # "Still Pending" (D+3 / Overdue)
+REMINDER_SCHEDULE: str = "REMINDER_SCHEDULE"    # "Schedule For ()" → awaiting_reschedule_date
 REMINDER_RESCHEDULE: str = "REMINDER_RESCHEDULE"
 REMINDER_CANCEL: str = "REMINDER_CANCEL"
+
+# Set of all valid reminder payload IDs for routing in message_router.
+REMINDER_PAYLOADS: frozenset[str] = frozenset({
+    REMINDER_DONE, REMINDER_ALREADY_DONE, REMINDER_SNOOZE_7,
+    REMINDER_ORDER_NOW, REMINDER_STILL_PENDING,
+    REMINDER_SCHEDULE, REMINDER_RESCHEDULE, REMINDER_CANCEL,
+})
+
+# Number of days to push next_due_date forward when user snoozes a reminder.
+# Per-category constants allow future independent tuning.
+# All currently set to 7 days — change individual values to configure.
+REMINDER_SNOOZE_DAYS: int = 7  # legacy / default fallback
+SNOOZE_DAYS_VACCINE: int = 7
+SNOOZE_DAYS_DEWORMING: int = 7
+SNOOZE_DAYS_FLEA: int = 7
+SNOOZE_DAYS_FOOD: int = 7
+SNOOZE_DAYS_SUPPLEMENT: int = 7
+SNOOZE_DAYS_MEDICINE: int = 7
+SNOOZE_DAYS_VET_FOLLOWUP: int = 7
+SNOOZE_DAYS_HYGIENE: int = 7
+
+# --- Reminder Stage Constants ---
+# 4-stage lifecycle per preventive record cycle.
+STAGE_T7: str = "t7"               # 7 days before due date
+STAGE_DUE: str = "due"             # on due date
+STAGE_D3: str = "d3"               # 3 days after due date
+STAGE_OVERDUE: str = "overdue_insight"  # D+7+, monthly repeat
+
+# Ordered stages for precedence: if multiple are eligible on same day,
+# prefer higher-priority stage (lower index = higher priority).
+STAGE_PRIORITY_ORDER: list[str] = [STAGE_DUE, STAGE_D3, STAGE_OVERDUE, STAGE_T7]
+
+# Number of ignored reminders before dropping to monthly-only fallback.
+REMINDER_IGNORE_THRESHOLD: int = 2
+
+# Days between monthly overdue_insight repeats once monthly_fallback is True.
+REMINDER_MONTHLY_INTERVAL_DAYS: int = 30
+
+# Minimum days between any two sent reminders for the same pet.
+REMINDER_MIN_GAP_DAYS: int = 3
 
 # --- Conflict Button Payload IDs ---
 CONFLICT_USE_NEW: str = "CONFLICT_USE_NEW"
@@ -279,6 +321,29 @@ NUDGE_PAYLOADS: frozenset[str] = frozenset({
 
 # Nudge cache freshness — skip regeneration if nudges are younger than this.
 NUDGE_CACHE_HOURS: int = 6
+
+# --- Nudge Scheduler — Level System ---
+# User levels for the nudge scheduler (recalculated on every trigger event).
+NUDGE_LEVEL_0: int = 0  # no breed set OR breed set but no preventive_record rows
+NUDGE_LEVEL_1: int = 1  # breed set, no preventive_record rows
+NUDGE_LEVEL_2: int = 2  # breed set + at least 1 preventive_record row
+
+# O+N schedule days for Level 0 and Level 1 users.
+# Index 0 = first nudge (O+1), index 4 = last scheduled slot (O+30).
+NUDGE_SCHEDULE_DAYS: list[int] = [1, 5, 10, 20, 30]
+
+# Minimum hours between any two nudge sends for the same user (engagement gap rule).
+NUDGE_MIN_GAP_HOURS: int = 48
+
+# Days between nudges for post-O+30 users (Level 0 / 1) and Level 2 post-slot-5.
+NUDGE_POST_SCHEDULE_INTERVAL_DAYS: int = 30
+
+# Level 2 data priority for Breed + Data nudge sequencing (slots 1–3).
+# The scheduler picks the top category from this list that has NO records yet.
+NUDGE_L2_DATA_PRIORITY: list[str] = [
+    "vaccine", "flea_tick", "deworming", "nutrition",
+    "supplement", "condition", "medication", "diagnostics", "grooming",
+]
 
 # --- Document Categories ---
 # Categories assigned by GPT extraction to classify uploaded documents.

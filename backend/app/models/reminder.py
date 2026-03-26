@@ -1,20 +1,29 @@
 """
 PetCircle Phase 1 — Reminder Model
 
-Mirrors the 'reminders' table exactly as defined in the frozen SQL schema.
+Mirrors the 'reminders' table with 4-stage lifecycle support.
+
+Stages (Excel v5 spec):
+    - t7:              7 days before due — first alert
+    - due:             on due date — action prompt
+    - d3:              3 days after due — check-in if not logged
+    - overdue_insight: D+7+, monthly repeat — breed-specific consequence
 
 Constraints:
     - preventive_record_id: FK to preventive_records(id), ON DELETE CASCADE
     - status: CHECK IN ('pending', 'sent', 'completed', 'snoozed')
-    - UNIQUE(preventive_record_id, next_due_date) — deduplication constraint
-      ensures only one reminder exists per preventive record per due date cycle.
-      This is critical for the stateless reminder engine (Module 10) which runs
-      daily and must not create duplicate reminders.
+    - UNIQUE(preventive_record_id, next_due_date, stage) — deduplication per stage
+      ensures the stateless daily cron never creates duplicate reminders.
+
+Ignore tracking:
+    - ignore_count:     incremented when a sent reminder has no inbound reply within 24h
+    - monthly_fallback: set True when ignore_count >= 2; only overdue_insight fires monthly
+    - last_ignored_at:  timestamp of last detected ignore
 """
 
 import uuid
 from datetime import datetime, date
-from sqlalchemy import Column, String, Date, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, String, Date, DateTime, Boolean, Integer, ForeignKey, UniqueConstraint, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -22,14 +31,15 @@ from app.database import Base
 
 class Reminder(Base):
     """
-    Tracks a reminder sent for a specific preventive record's due date.
+    Tracks a single stage of a reminder for a specific preventive record's due date.
 
-    The reminder engine (cron at 8 AM IST) creates reminders for records
-    approaching their next_due_date. The UNIQUE constraint on
-    (preventive_record_id, next_due_date) prevents the stateless cron
-    from creating duplicates across runs.
+    The reminder engine (cron at 8 AM IST) creates stage-specific rows:
+    t7 → due → d3 → overdue_insight. The UNIQUE constraint on
+    (preventive_record_id, next_due_date, stage) prevents duplicate creation
+    on repeated cron runs.
 
-    Status lifecycle: pending → sent → completed/snoozed
+    Status lifecycle: pending → sent → completed / snoozed
+    Ignore lifecycle: ignore_count increments on no-reply; at 2 → monthly_fallback = True
     """
 
     __tablename__ = "reminders"
@@ -50,32 +60,78 @@ class Reminder(Base):
     # (e.g., snooze), and we need to track which cycle this reminder belongs to.
     next_due_date = Column(Date, nullable=False)
 
+    # Reminder lifecycle stage.
+    # 't7'              — sent 7 days before next_due_date
+    # 'due'             — sent on next_due_date
+    # 'd3'              — sent 3 days after next_due_date (if 'due' was ignored)
+    # 'overdue_insight' — sent D+7+, repeating monthly (breed-specific consequence)
+    stage = Column(String(20), nullable=False, default="due", index=True)
+
     # Reminder status:
     # 'pending' — created but not yet sent
-    # 'sent' — WhatsApp template message delivered
-    # 'completed' — user responded REMINDER_DONE
-    # 'snoozed' — user responded REMINDER_SNOOZE_7
+    # 'sent'    — WhatsApp template message delivered
+    # 'completed' — user responded Done / Already Done
+    # 'snoozed' — user responded Remind Me Later
     status = Column(String(20), nullable=False, index=True)
 
     # Timestamp when the WhatsApp reminder was actually sent.
     # NULL until status transitions to 'sent'.
     sent_at = Column(DateTime, nullable=True)
 
+    # --- Ignore Tracking ---
+    # Number of times this reminder was sent without any inbound reply within 24h.
+    # Incremented by the cron's ignore-detection phase.
+    ignore_count = Column(Integer, nullable=False, default=0)
+
+    # When True, only overdue_insight stage fires (at 30-day intervals).
+    # Set by the engine when ignore_count >= REMINDER_IGNORE_THRESHOLD (2).
+    monthly_fallback = Column(Boolean, nullable=False, default=False)
+
+    # Timestamp of last detected ignore event.
+    last_ignored_at = Column(DateTime(timezone=True), nullable=True)
+
+    # --- Multi-Source Support (migration 028) ---
+    # Reminders can be created from 5 source types, not just preventive_records.
+    # source_type identifies the originating table; source_id is the row UUID.
+    # preventive_record_id remains for backward compatibility and FK cascade.
+
+    # Direct pet reference — faster querying without joining through preventive_record.
+    pet_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("pets.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+
+    # Source type — which table this reminder originated from.
+    # 'preventive_record' | 'diet_item' | 'condition_medication'
+    # | 'condition_monitoring' | 'hygiene_preference'
+    source_type = Column(String(30), nullable=True)
+
+    # UUID of the source row (no DB FK — multiple possible tables).
+    source_id = Column(UUID(as_uuid=True), nullable=True)
+
+    # Cached human-readable item description for message building.
+    # e.g. "Rabies · DHPPi (mandatory) · Kennel Cough (optional)"
+    item_desc = Column(String(300), nullable=True)
+
     # Timestamp when the reminder was created.
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    # --- Unique Constraint ---
-    # Deduplication: only one reminder per preventive record per due date.
-    # The reminder engine is stateless and runs daily — this constraint
-    # prevents it from creating duplicate reminders on repeated runs.
+    # --- Constraints & Indexes ---
     __table_args__ = (
+        # Deduplication: one reminder per record per due date per stage.
         UniqueConstraint(
-            "preventive_record_id", "next_due_date",
-            name="uq_reminder_record_duedate"
+            "preventive_record_id", "next_due_date", "stage",
+            name="uq_reminder_record_duedate_stage"
         ),
+        # Index for daily cron query: find sent reminders awaiting ignore check.
+        Index("idx_reminders_pet_sent", "pet_id", "status", "sent_at"),
     )
 
     # --- Relationships ---
 
     # Back-reference to the preventive record this reminder belongs to.
     preventive_record = relationship("PreventiveRecord", back_populates="reminders")
+
+    pet = relationship("Pet")

@@ -24,3 +24,16 @@ jobs:
             exit 1
           fi
           echo "Reminder engine completed successfully"
+
+      - name: Trigger nudge scheduler
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST "${{ secrets.PRODUCTION_API_URL }}/internal/run-nudge-scheduler" \
+            -H "X-ADMIN-KEY: ${{ secrets.ADMIN_SECRET_KEY }}" \
+            --max-time 120)
+          echo "HTTP status: $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "Nudge scheduler failed with status $STATUS"
+            exit 1
+          fi
+          echo "Nudge scheduler completed successfully"
