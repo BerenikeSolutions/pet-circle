@@ -72,7 +72,7 @@ interface VaxRowProps {
   onFreqChange: (name: string, months: number, unit: string) => void;
 }
 function VaxRow({ vax, isOptional, onEditVax, onFreqChange }: VaxRowProps) {
-  const status = getStatusForRecord(vax as Parameters<typeof getStatusForRecord>[0]);
+  const status = getStatusForRecord(vax as unknown as Parameters<typeof getStatusForRecord>[0]);
   const initialFreq = daysToFreq(vax.custom_recurrence_days ?? vax.recurrence_days);
   const [reminderOn, setReminderOn] = useState(true);
   const [freq, setFreq] = useState(initialFreq.freq);
