@@ -556,7 +556,7 @@ async def _try_handle_reschedule_date(
     Returns True if the message was consumed as a reschedule date, False otherwise.
     """
     from app.services.reminder_response import apply_reschedule_date
-    from app.utils.date_utils import parse_date
+    from app.utils.date_utils import parse_date, parse_date_with_ai
 
     # No pending reschedule state.
     if not getattr(user, "active_reminder_id", None):
@@ -582,15 +582,19 @@ async def _try_handle_reschedule_date(
         db.commit()
         return False
 
-    # Try to parse the user's text as a date.
+    # Try to parse the user's text as a date — standard formats first, AI fallback.
+    new_date = None
     try:
         new_date = parse_date(text.strip())
     except ValueError:
-        await send_text_message(
-            db, from_number,
-            "Invalid date format. Please use DD/MM/YYYY or DD-MM-YYYY.",
-        )
-        return True  # Consumed the message (even though it failed)
+        try:
+            new_date = await parse_date_with_ai(text.strip())
+        except ValueError:
+            await send_text_message(
+                db, from_number,
+                "I couldn't understand that date. Please try something like '15 April 2026' or '15/04/2026'.",
+            )
+            return True  # Consumed the message (even though it failed)
 
     try:
         result = apply_reschedule_date(db, reminder.id, new_date)
@@ -726,7 +730,7 @@ async def _handle_reminder_button(db: Session, user, payload: str) -> None:
             db.commit()
             await send_text_message(
                 db, from_number,
-                "What new date works for you? Please reply in DD/MM/YYYY format.",
+                "What new date works for you? Reply in any format — e.g. 15 April 2026, 15/04/2026, Apr 15.",
             )
 
         elif payload == REMINDER_CANCEL:
