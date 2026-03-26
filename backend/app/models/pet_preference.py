@@ -6,7 +6,7 @@ recommended lists and custom orders. Used to remember user preferences
 and make future recommendations more personalized.
 
 Workflow:
-1. When a user orders an item (whether from recommendation or custom), 
+1. When a user orders an item (whether from recommendation or custom),
    record it as a preference.
 2. Preferences are indexed by category and pet_id for quick lookup.
 3. Used during recommendation UI to show user's historical orders.
@@ -21,20 +21,22 @@ Constraints:
 
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, ForeignKey, Integer, Index
+
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
+
 from app.database import Base
 
 
 class PetPreference(Base):
     """
     Tracks items a user has ordered for a pet.
-    
+
     Stores both:
     - Items from recommendation lists (preference_type="recommendation")
     - Custom items user typed (preference_type="custom")
-    
+
     Used to:
     - Remember user's past orders
     - Personalize future recommendations

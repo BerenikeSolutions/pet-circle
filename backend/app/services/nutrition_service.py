@@ -14,30 +14,30 @@ Pipeline:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
-import hashlib
 import time
-from datetime import datetime, date, timedelta
-from sqlalchemy.orm import Session
-from sqlalchemy import func as sqlfunc
+from datetime import date, datetime, timedelta
 
-from app.models.diet_item import DietItem
-from app.models.product_catalog import ProductCatalog
-from app.models.pet import Pet
-from app.models.condition import Condition
-from app.models.nutrition_target_cache import NutritionTargetCache
-from app.models.food_nutrition_cache import FoodNutritionCache
+from sqlalchemy.orm import Session
+
 from app.config import settings
 from app.core.constants import (
-    OPENAI_QUERY_MODEL,
-    OPENAI_NUTRITION_LOOKUP_MAX_TOKENS,
+    FOOD_CACHE_STALENESS_DAYS,
     NUTRITION_CACHE_STALENESS_DAYS,
     OPENAI_FOOD_ESTIMATION_MAX_TOKENS,
-    FOOD_CACHE_STALENESS_DAYS,
+    OPENAI_NUTRITION_LOOKUP_MAX_TOKENS,
     OPENAI_NUTRITION_REC_MAX_TOKENS,
     OPENAI_NUTRITION_REC_TEMPERATURE,
+    OPENAI_QUERY_MODEL,
 )
+from app.models.condition import Condition
+from app.models.diet_item import DietItem
+from app.models.food_nutrition_cache import FoodNutritionCache
+from app.models.nutrition_target_cache import NutritionTargetCache
+from app.models.pet import Pet
+from app.models.product_catalog import ProductCatalog
 from app.utils.retry import retry_openai_call
 
 logger = logging.getLogger(__name__)
@@ -554,7 +554,7 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
         "vitamin_e": 0, "vitamin_d3": 0, "glucosamine": 0, "probiotics": False,
     }
 
-    matched_count = len(catalog_items)
+    len(catalog_items)
     for _, product in catalog_items:
         _accumulate_from_product(actual, product)
 

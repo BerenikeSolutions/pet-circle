@@ -5,7 +5,7 @@ Caches AI-generated ideal weight ranges per (species, breed, gender, age_categor
 Shared across all pets of the same breed combo — no pet_id FK.
 """
 
-from sqlalchemy import Column, String, DECIMAL, UniqueConstraint
+from sqlalchemy import DECIMAL, Column, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from sqlalchemy.types import TIMESTAMP

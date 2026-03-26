@@ -5,9 +5,11 @@ Reads nudge_config values from DB with in-memory caching (5 min TTL).
 All nudge rate limits and intervals are DB-configurable via this service.
 """
 
-import time
 import logging
+import time
+
 from sqlalchemy.orm import Session
+
 from app.models.nudge_config import NudgeConfig
 
 logger = logging.getLogger(__name__)

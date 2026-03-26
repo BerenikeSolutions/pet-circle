@@ -22,28 +22,34 @@ State is tracked via user.order_state and user.active_order_id.
 import asyncio
 import logging
 from uuid import UUID
+
 from sqlalchemy.orm import Session
+
 from app.config import settings
+from app.core.constants import (
+    ORDER_CANCEL,
+    ORDER_CAT_FOOD,
+    ORDER_CAT_MEDICINES,
+    ORDER_CAT_SUPPLEMENTS,
+    ORDER_CATEGORY_LABELS,
+    ORDER_CATEGORY_MAP,
+    ORDER_CONFIRM,
+    ORDER_FULFILL_NO_PREFIX,
+    ORDER_FULFILL_YES_PREFIX,
+)
 from app.core.encryption import decrypt_field
 from app.core.log_sanitizer import mask_phone
-from app.core.constants import (
-    ORDER_CAT_MEDICINES,
-    ORDER_CAT_FOOD,
-    ORDER_CAT_SUPPLEMENTS,
-    ORDER_CONFIRM,
-    ORDER_CANCEL,
-    ORDER_CATEGORY_MAP,
-    ORDER_CATEGORY_LABELS,
-    ORDER_FULFILL_YES_PREFIX,
-    ORDER_FULFILL_NO_PREFIX,
-)
 from app.models.order import Order
 from app.models.pet import Pet
-from app.services.whatsapp_sender import send_text_message, send_interactive_buttons, send_template_message
 from app.services.recommendation_service import (
     get_or_generate_recommendations,
     get_pet_top_preferences,
     record_preference,
+)
+from app.services.whatsapp_sender import (
+    send_interactive_buttons,
+    send_template_message,
+    send_text_message,
 )
 
 logger = logging.getLogger(__name__)
@@ -161,11 +167,11 @@ async def handle_order_category(db: Session, user, payload: str) -> None:
                     category, len(recommendations), mask_phone(from_number)
                 )
                 return
-        
+
         except Exception as e:
             logger.warning(f"Failed to get recommendations: {e}")
             recommendations = []
-    
+
     # No recommendations available or user has multiple pets — fall back to custom items
     user.order_state = "awaiting_order_items"
     db.commit()
@@ -182,7 +188,7 @@ async def handle_order_category(db: Session, user, payload: str) -> None:
 async def handle_recommendation_selection(db: Session, user, text: str) -> None:
     """
     Handle user input after recommendations are shown.
-    
+
     User can:
     - Reply with number(s): "1", "2 3", "1-3" to select recommendations
     - Type custom text to override with custom items
@@ -245,7 +251,7 @@ async def handle_recommendation_selection(db: Session, user, text: str) -> None:
 
     # Try to parse as number selection (e.g., "1", "2 3", "1-3")
     selected_indices = _parse_number_selection(text)
-    
+
     if selected_indices is not None and len(selected_indices) > 0:
         # User selected recommendations by number
         try:
@@ -261,7 +267,7 @@ async def handle_recommendation_selection(db: Session, user, text: str) -> None:
                 str(order.category),
                 increment_on_hit=False,
             )
-            
+
             # Extract selected items
             selected_items = []
             for idx in selected_indices:
@@ -272,14 +278,14 @@ async def handle_recommendation_selection(db: Session, user, text: str) -> None:
                     record_preference(
                         db, pet.id, str(order.category), item.get("name"), "recommendation"
                     )
-            
+
             if selected_items:
                 # Save selected items to order
                 order.items_description = ", ".join(selected_items)  # type: ignore[assignment]
                 db.commit()
-                
+
                 logger.info(f"User selected {len(selected_items)} recommendation items")
-                
+
                 # Continue to pet selection or confirmation
                 pets = _get_active_pets(db, user)
                 if len(pets) == 1:
@@ -299,16 +305,16 @@ async def handle_recommendation_selection(db: Session, user, text: str) -> None:
                 return
             else:
                 await send_text_message(
-                    db, from_number, 
+                    db, from_number,
                     "I didn't find those items in the list. Please try again with valid numbers."
                 )
                 return
-        
+
         except Exception as e:
             logger.error(f"Error processing recommendation selection: {e}", exc_info=True)
             await send_text_message(db, from_number, "Error processing your selection. Please try again.")
             return
-    
+
     # User provided custom text — treat as free-form items
     await handle_order_items(db, user, text)
 
@@ -450,31 +456,31 @@ async def _get_numbered_suggestions(
 def _parse_number_selection(text: str) -> list | None:
     """
     Parse number selection from text.
-    
+
     Supports: "1", "2 3", "1-3", "1, 2"
-    
+
     Returns:
         List of selected indices (1-indexed), or None if not a number pattern.
         Returns empty list if parsing fails.
     """
     import re
-    
+
     text = text.strip()
-    
+
     # Check if it looks like numbers
     if not re.match(r'^[\d\s\-,]+$', text):
         return None  # Not a number pattern
-    
+
     indices = []
-    
+
     # Split by various delimiters: spaces, commas, hyphens
     # Handle ranges like "1-3"
     parts = re.split(r'[\s,]+', text)
-    
+
     for part in parts:
         if not part:
             continue
-        
+
         if '-' in part:
             # Range like "1-3"
             try:
@@ -489,7 +495,7 @@ def _parse_number_selection(text: str) -> list | None:
                 indices.append(int(part))
             except ValueError:
                 pass
-    
+
     return list(set(indices)) if indices else []  # Remove duplicates
 
 
@@ -500,7 +506,7 @@ async def handle_order_items(db: Session, user, text: str) -> None:
     Auto-selects pet if user has exactly 1 pet.
     Asks for pet selection if user has 2+ pets.
     Skips pet selection if user has 0 pets.
-    
+
     Records custom item preferences for personalization.
     """
     from_number = _get_mobile(user)
@@ -537,13 +543,13 @@ async def handle_order_items(db: Session, user, text: str) -> None:
         # Auto-select the only pet (if not already selected)
         if getattr(order, "pet_id", None) is None:
             order.pet_id = pets[0].id
-            
+
             # Record custom preferences
             items = [item.strip() for item in order.items_description.split(",")]
             for item in items:
                 if item:
                     record_preference(db, pets[0].id, order_category, item, "custom")
-        
+
         db.commit()
         await _show_order_confirmation(db, user, order, pet=pets[0])
     else:
@@ -709,7 +715,11 @@ async def _send_post_order_recommendations(
     try:
         await asyncio.sleep(2)  # Let the confirmation message arrive first.
 
-        from app.services.cart_service import get_last_bought, get_recommendations, _format_last_bought_label
+        from app.services.cart_service import (
+            _format_last_bought_label,
+            get_last_bought,
+            get_recommendations,
+        )
 
         # Build exclusion set from items just ordered.
         items_desc = str(order.items_description or "")
@@ -739,7 +749,7 @@ async def _send_post_order_recommendations(
             parts.append("\n".join(lines))
 
         if recommendations:
-            lines = [f"💡 *You might also need:*"]
+            lines = ["💡 *You might also need:*"]
             for idx, rec in enumerate(recommendations[:5], start=1):
                 reason = rec.get("reason", "")
                 reason_str = f" — {reason}" if reason else ""

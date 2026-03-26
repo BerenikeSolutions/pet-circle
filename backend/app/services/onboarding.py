@@ -37,37 +37,43 @@ Rules:
 import json
 import logging
 import secrets
-from datetime import datetime, timedelta, timezone, date
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
+
 from openai import AsyncOpenAI
 from sqlalchemy.orm import Session
-from app.models.user import User
-from app.models.pet import Pet
-from app.models.dashboard_token import DashboardToken
-from app.models.preventive_master import PreventiveMaster
-from app.models.preventive_record import PreventiveRecord
-from app.models.document import Document
-from app.models.reminder import Reminder
+
+from app.config import settings
 from app.core.constants import (
     APP_RETURNING_HEADING,
-    MAX_PETS_PER_USER,
-    MAX_PET_WEIGHT_KG,
     DASHBOARD_TOKEN_BYTES,
     DASHBOARD_TOKEN_EXPIRY_DAYS,
     DOC_UPLOAD_WINDOW_SECONDS,
     GREETINGS,
+    MAX_PET_WEIGHT_KG,
+    MAX_PETS_PER_USER,
 )
-from app.config import settings
-from app.core.encryption import encrypt_field, decrypt_field, hash_field
+from app.core.encryption import decrypt_field, encrypt_field, hash_field
 from app.core.log_sanitizer import mask_phone
-from app.utils.date_utils import is_ambiguous_date_input, parse_date, parse_date_with_ai, get_today_ist
-from app.utils.breed_normalizer import normalize_breed, normalize_breed_with_ai
-from app.utils.file_reader import encode_image_base64
-from app.utils.retry import retry_openai_call
-from app.services.preventive_seeder import seed_preventive_master
+from app.models.dashboard_token import DashboardToken
+from app.models.document import Document
+from app.models.pet import Pet
+from app.models.preventive_master import PreventiveMaster
+from app.models.preventive_record import PreventiveRecord
+from app.models.reminder import Reminder
+from app.models.user import User
 from app.services.diet_service import add_diet_item
 from app.services.hygiene_service import add_hygiene_item
-
+from app.services.preventive_seeder import seed_preventive_master
+from app.utils.breed_normalizer import normalize_breed, normalize_breed_with_ai
+from app.utils.date_utils import (
+    get_today_ist,
+    is_ambiguous_date_input,
+    parse_date,
+    parse_date_with_ai,
+)
+from app.utils.file_reader import encode_image_base64
+from app.utils.retry import retry_openai_call
 
 logger = logging.getLogger(__name__)
 
@@ -95,9 +101,9 @@ def is_doc_upload_deadline_expired(deadline: datetime | None) -> bool:
         return False
 
     if deadline.tzinfo is None:
-        deadline = deadline.replace(tzinfo=timezone.utc)
+        deadline = deadline.replace(tzinfo=UTC)
 
-    return datetime.now(timezone.utc) > deadline
+    return datetime.now(UTC) > deadline
 
 # --- Colloquial input sets ---
 # Accepted variations for yes/no across all onboarding steps.
@@ -388,7 +394,7 @@ def _get_last_saved_detail(user, pet, db) -> str:
         return f"Pet name — {pet_name}"
 
     if user.pincode:
-        return f"Your pincode — provided"
+        return "Your pincode — provided"
     if user.full_name and user.full_name != "_pending":
         return f"Your name — {user.full_name}"
     return ""
@@ -617,8 +623,8 @@ async def _step_pet_photo(db, user, text, send_fn, message_data: dict | None = N
     If 'skip': ask species directly (no-photo path).
     If other text: re-prompt.
     """
-    from app.services.whatsapp_sender import download_whatsapp_media
     from app.services.document_upload import upload_to_supabase
+    from app.services.whatsapp_sender import download_whatsapp_media
 
     pet = _get_pending_pet(db, user.id)
     if not pet:
@@ -1479,7 +1485,7 @@ async def _step_grooming(db, user, text, send_fn):
 
     # --- Transition to awaiting_documents with 5-min deadline ---
     user.onboarding_state = "awaiting_documents"
-    user.doc_upload_deadline = datetime.now(timezone.utc) + timedelta(seconds=DOC_UPLOAD_WINDOW_SECONDS)
+    user.doc_upload_deadline = datetime.now(UTC) + timedelta(seconds=DOC_UPLOAD_WINDOW_SECONDS)
 
     db.commit()
 
@@ -1509,7 +1515,7 @@ async def _step_awaiting_documents(db, user, text_lower, send_fn):
     mobile = user._plaintext_mobile
 
     # Check if deadline has expired.
-    if user.doc_upload_deadline and datetime.now(timezone.utc) > user.doc_upload_deadline: 
+    if user.doc_upload_deadline and datetime.now(UTC) > user.doc_upload_deadline:
         await _finalize_onboarding(db, user, send_fn)
         return
 
@@ -1529,7 +1535,7 @@ async def _step_awaiting_documents(db, user, text_lower, send_fn):
 def _get_active_reminders_text(db: Session, pet_id) -> str:
     """
     Fetch active reminders for a pet and format them for WhatsApp message.
-    
+
     Returns formatted text with reminders or empty string if none exist.
     Active reminders are those with status 'pending' or 'sent'.
     """
@@ -1545,16 +1551,16 @@ def _get_active_reminders_text(db: Session, pet_id) -> str:
             .order_by(Reminder.next_due_date.asc())
             .all()
         )
-        
+
         if not reminders:
             return ""
-        
+
         # Format reminders for display
         reminder_lines = []
         for reminder, record, master in reminders:
             due_date_str = reminder.next_due_date.strftime("%d/%m/%Y")
             reminder_lines.append(f"• {master.item_name}: Due {due_date_str}")
-        
+
         result = "Active Reminders:\n" + "\n".join(reminder_lines) + "\n\n"
         return result
     except Exception as e:

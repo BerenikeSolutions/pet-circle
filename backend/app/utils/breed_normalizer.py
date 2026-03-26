@@ -287,7 +287,9 @@ async def normalize_breed_with_ai(breed: str, species: str | None = None) -> str
         The standardized breed name, or "Mixed Breed" if unidentifiable.
     """
     import logging
+
     from openai import AsyncOpenAI
+
     from app.config import settings
     from app.core.constants import OPENAI_QUERY_MODEL
 

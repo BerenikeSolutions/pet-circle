@@ -14,16 +14,17 @@ Key design:
 
 import logging
 import uuid
-from datetime import datetime, date, timezone
-from sqlalchemy.orm import Session
+from datetime import date
+
 from sqlalchemy import func as sqlfunc
+from sqlalchemy.orm import Session
 
 from app.models.cart_item import CartItem
-from app.models.product_catalog import ProductCatalog
-from app.models.pet import Pet
 from app.models.condition import Condition
 from app.models.order import Order
+from app.models.pet import Pet
 from app.models.pet_preference import PetPreference
+from app.models.product_catalog import ProductCatalog
 
 logger = logging.getLogger(__name__)
 

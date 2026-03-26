@@ -89,7 +89,7 @@ def sanitize_payload(payload: dict) -> dict:
             for contact in value.get("contacts", []):
                 if "wa_id" in contact:
                     contact["wa_id"] = mask_phone(contact["wa_id"])
-                profile = contact.get("profile", {})
+                contact.get("profile", {})
                 # Keep profile name — not PII-sensitive at this level
 
             # Sanitize messages

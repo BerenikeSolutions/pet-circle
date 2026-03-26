@@ -24,32 +24,30 @@ Rules:
     - On level transition (N7): reset slot counter, start from slot 1.
 """
 
-import asyncio
 import logging
-from datetime import datetime, timedelta, date
-from typing import Optional
+from datetime import date, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy.orm import Session
 from sqlalchemy import func
+from sqlalchemy.orm import Session
 
-from app.models.user import User
-from app.models.pet import Pet
-from app.models.preventive_record import PreventiveRecord
-from app.models.reminder import Reminder
-from app.models.nudge_message_library import NudgeMessageLibrary
-from app.models.nudge_delivery_log import NudgeDeliveryLog
+from app.config import settings
 from app.core.constants import (
+    NUDGE_L2_DATA_PRIORITY,
     NUDGE_LEVEL_0,
     NUDGE_LEVEL_1,
     NUDGE_LEVEL_2,
-    NUDGE_SCHEDULE_DAYS,
     NUDGE_MIN_GAP_HOURS,
     NUDGE_POST_SCHEDULE_INTERVAL_DAYS,
-    NUDGE_L2_DATA_PRIORITY,
+    NUDGE_SCHEDULE_DAYS,
 )
-from app.config import settings
 from app.core.encryption import decrypt_field
+from app.models.nudge_delivery_log import NudgeDeliveryLog
+from app.models.nudge_message_library import NudgeMessageLibrary
+from app.models.pet import Pet
+from app.models.preventive_record import PreventiveRecord
+from app.models.reminder import Reminder
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +247,7 @@ def _select_next_message(
     pet: Pet,
     level: int,
     today: date,
-) -> Optional[tuple[str, list]]:
+) -> tuple[str, list] | None:
     """
     Choose the next nudge message for this user/pet based on level and slot.
 
@@ -272,7 +270,7 @@ def _select_next_message(
 
 def _select_level0_message(
     db: Session, pet: Pet, completed: int, days_since_o: int,
-) -> Optional[tuple[str, list]]:
+) -> tuple[str, list] | None:
     """
     Level 0 schedule: Value Add messages at O+1, 5, 10, 20, 30, then cycle.
 
@@ -334,7 +332,7 @@ _L1_MESSAGE_TYPES = [
 
 def _select_level1_message(
     db: Session, pet: Pet, completed: int, days_since_o: int,
-) -> Optional[tuple[str, list]]:
+) -> tuple[str, list] | None:
     """
     Level 1 schedule: mixed types at O+1/5/10/20/30, then cycle.
     """
@@ -355,7 +353,7 @@ def _select_level1_message(
 
 def _build_l1_message(
     db: Session, pet: Pet, msg_type: str,
-) -> Optional[tuple[str, list]]:
+) -> tuple[str, list] | None:
     """Build a Level 1 message by looking up the library."""
     breed = (getattr(pet, "breed", None) or "").strip() or "All"
 
@@ -423,7 +421,7 @@ def _select_level2_message(
     pet: Pet,
     completed: int,
     days_since_o: int,
-) -> Optional[tuple[str, list]]:
+) -> tuple[str, list] | None:
     """
     Level 2 schedule:
         Slots 1–3: Breed + Data (top missing category from NUDGE_L2_DATA_PRIORITY)
@@ -454,7 +452,7 @@ def _select_level2_message(
 
 def _build_breed_data_message(
     db: Session, pet: Pet, slot_idx: int,
-) -> Optional[tuple[str, list]]:
+) -> tuple[str, list] | None:
     """
     Pick the top missing data category (from NUDGE_L2_DATA_PRIORITY) and
     build a Breed + Data nudge. Uses GPT topic detection (N9) to re-sort.
@@ -516,7 +514,7 @@ def _pick_data_category(db: Session, pet: Pet, slot_idx: int) -> str:
     return NUDGE_L2_DATA_PRIORITY[-1]
 
 
-def _detect_topic_from_health_data(db: Session, pet: Pet) -> Optional[str]:
+def _detect_topic_from_health_data(db: Session, pet: Pet) -> str | None:
     """
     Deterministically pick the highest-priority data category for Level 2 nudges
     based on the pet's actual health gaps.
@@ -529,12 +527,12 @@ def _detect_topic_from_health_data(db: Session, pet: Pet) -> Optional[str]:
     Within each: urgent > high priority nudges trigger the category.
     """
     from app.services.nudge_engine import (
-        _generate_vaccine_nudges,
+        _generate_checkup_nudges,
+        _generate_condition_nudges,
         _generate_deworming_nudges,
         _generate_flea_nudges,
-        _generate_condition_nudges,
         _generate_nutrition_nudges,
-        _generate_checkup_nudges,
+        _generate_vaccine_nudges,
     )
 
     category_map = {
@@ -571,7 +569,7 @@ def _detect_topic_from_health_data(db: Session, pet: Pet) -> Optional[str]:
 
 def _build_personalized_message(
     db: Session, user: User, pet: Pet,
-) -> Optional[tuple[str, list]]:
+) -> tuple[str, list] | None:
     """
     Slots 4–5 (OQ3): GPT-generated personal insight.
 
@@ -590,7 +588,7 @@ def _build_personalized_message(
     return (template_key, [pet_name, insight])
 
 
-def _get_or_generate_nudge_insight(db: Session, user: User, pet: Pet) -> Optional[str]:
+def _get_or_generate_nudge_insight(db: Session, user: User, pet: Pet) -> str | None:
     """
     Retrieve or generate a GPT insight for personalized Level 2 nudge slots.
 
@@ -729,7 +727,7 @@ def _reminder_sent_today(db: Session, user_id: UUID, today: date) -> bool:
     return result is not None
 
 
-def _last_nudge_sent_at(db: Session, user_id: UUID) -> Optional[datetime]:
+def _last_nudge_sent_at(db: Session, user_id: UUID) -> datetime | None:
     """Return the sent_at timestamp of the most recent nudge for this user."""
     log = (
         db.query(NudgeDeliveryLog)

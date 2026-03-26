@@ -40,7 +40,6 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.cart_item import CartItem
 from app.models.order import Order
-from app.models.pet import Pet
 
 logger = logging.getLogger(__name__)
 

@@ -21,9 +21,10 @@ Circle groupings:
 """
 
 import logging
-from sqlalchemy.orm import Session
-from app.models.preventive_master import PreventiveMaster
 
+from sqlalchemy.orm import Session
+
+from app.models.preventive_master import PreventiveMaster
 
 logger = logging.getLogger(__name__)
 

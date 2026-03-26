@@ -14,9 +14,11 @@ Constraints:
 """
 
 import uuid
-from sqlalchemy import Column, String, Integer, Boolean, UniqueConstraint
+
+from sqlalchemy import Boolean, Column, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
+
 from app.database import Base
 
 

@@ -109,87 +109,92 @@ Run:
     python tests/test_nudges_and_reminders_comprehensive.py
 """
 
+import logging
 import os
 import sys
 import uuid
-import logging
 from datetime import date, datetime, timedelta
-from typing import Optional
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 # -- Environment must be set before any app imports ---------------------------
 os.environ["APP_ENV"] = "test"
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
-from app.database import SessionLocal, engine
 from sqlalchemy.orm import sessionmaker
+
+from app.database import engine
 
 # Use expire_on_commit=False so ORM objects retain loaded attributes after
 # db.commit() inside _regenerate_nudges_for_pet. Without this, SQLAlchemy
 # expires all objects post-commit, causing lazy-load queries on a potentially
 # dropped Supabase connection when _sort_nudges accesses nudge attributes.
 _TestSession = sessionmaker(bind=engine, expire_on_commit=False)
-from app.models.user import User
-from app.models.pet import Pet
-from app.models.preventive_record import PreventiveRecord
-from app.models.preventive_master import PreventiveMaster
-from app.models.reminder import Reminder
-from app.models.nudge import Nudge
-from app.models.nudge_delivery_log import NudgeDeliveryLog
-from app.models.diet_item import DietItem
+from app.core.constants import (
+    NUDGE_LEVEL_0,
+    NUDGE_LEVEL_1,
+    NUDGE_LEVEL_2,
+    NUDGE_MIN_GAP_HOURS,
+    REMINDER_IGNORE_THRESHOLD,
+    SNOOZE_DAYS_DEWORMING,
+    SNOOZE_DAYS_FLEA,
+    SNOOZE_DAYS_FOOD,
+    SNOOZE_DAYS_HYGIENE,
+    SNOOZE_DAYS_MEDICINE,
+    SNOOZE_DAYS_SUPPLEMENT,
+    SNOOZE_DAYS_VACCINE,
+    SNOOZE_DAYS_VET_FOLLOWUP,
+    STAGE_D3,
+    STAGE_DUE,
+    STAGE_OVERDUE,
+    STAGE_T7,
+)
+from app.core.encryption import encrypt_field, hash_field
 from app.models.condition import Condition
 from app.models.condition_medication import ConditionMedication
 from app.models.condition_monitoring import ConditionMonitoring
-from app.models.hygiene_preference import HygienePreference
 from app.models.diagnostic_test_result import DiagnosticTestResult
-from app.core.constants import (
-    STAGE_T7, STAGE_DUE, STAGE_D3, STAGE_OVERDUE,
-    STAGE_PRIORITY_ORDER,
-    REMINDER_IGNORE_THRESHOLD, REMINDER_MONTHLY_INTERVAL_DAYS,
-    REMINDER_MIN_GAP_DAYS,
-    SNOOZE_DAYS_VACCINE, SNOOZE_DAYS_DEWORMING, SNOOZE_DAYS_FLEA,
-    SNOOZE_DAYS_FOOD, SNOOZE_DAYS_SUPPLEMENT, SNOOZE_DAYS_MEDICINE,
-    SNOOZE_DAYS_VET_FOLLOWUP, SNOOZE_DAYS_HYGIENE,
-    NUDGE_LEVEL_0, NUDGE_LEVEL_1, NUDGE_LEVEL_2,
-    NUDGE_SCHEDULE_DAYS, NUDGE_MIN_GAP_HOURS, NUDGE_POST_SCHEDULE_INTERVAL_DAYS,
-    NUDGE_L2_DATA_PRIORITY, NUDGE_CACHE_HOURS,
-)
-from app.core.encryption import encrypt_field, hash_field
-from app.utils.date_utils import get_today_ist
-
-# Import functions under test
-from app.services.reminder_engine import (
-    _classify_item as reminder_classify_item,
-    _snooze_for_category,
-    _calculate_reorder_date,
-    _determine_stage_simple,
-    _apply_send_rules,
-    _build_template_params,
-    _get_breed_consequence,
-    _collect_candidates,
-    _detect_ignores,
-    run_reminder_engine,
-    ReminderCandidate,
-)
+from app.models.diet_item import DietItem
+from app.models.hygiene_preference import HygienePreference
+from app.models.nudge import Nudge
+from app.models.nudge_delivery_log import NudgeDeliveryLog
+from app.models.pet import Pet
+from app.models.preventive_master import PreventiveMaster
+from app.models.preventive_record import PreventiveRecord
+from app.models.reminder import Reminder
+from app.models.user import User
 from app.services.nudge_engine import (
     _classify_item as nudge_classify_item,
+)
+from app.services.nudge_engine import (
     _freq_to_days,
-    _sort_nudges,
     _make_nudge,
-    generate_nudges,
     _regenerate_nudges_for_pet,
+    _sort_nudges,
+    generate_nudges,
 )
 from app.services.nudge_scheduler import (
-    calculate_nudge_level,
-    _completed_slots,
-    _select_next_message,
-    _select_level0_message,
-    _select_level1_message,
-    _select_level2_message,
-    _reminder_sent_today,
-    _last_nudge_sent_at,
     _L1_MESSAGE_TYPES,
+    _completed_slots,
+    _last_nudge_sent_at,
+    _reminder_sent_today,
+    _select_level0_message,
+    calculate_nudge_level,
 )
+from app.services.reminder_engine import (
+    ReminderCandidate,
+    _apply_send_rules,
+    _build_template_params,
+    _calculate_reorder_date,
+    _collect_candidates,
+    _detect_ignores,
+    _determine_stage_simple,
+    _get_breed_consequence,
+    _snooze_for_category,
+    run_reminder_engine,
+)
+
+# Import functions under test
+from app.utils.date_utils import get_today_ist
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -237,7 +242,7 @@ _TEST_PHONE_2 = "919888877755"
 
 
 def _make_user(db, phone=_TEST_PHONE, name="Test User", onboarded=True,
-               completed_at: Optional[datetime] = None) -> User:
+               completed_at: datetime | None = None) -> User:
     u = User(
         id=uuid.uuid4(),
         mobile_number=encrypt_field(phone),
@@ -299,7 +304,7 @@ def _make_preventive_record(db, pet: Pet, master: PreventiveMaster,
 
 def _make_reminder(db, pet: Pet, source_id, stage: str, status: str,
                    due_date: date, source_type: str = "preventive_record",
-                   sent_at: Optional[datetime] = None,
+                   sent_at: datetime | None = None,
                    ignore_count: int = 0,
                    monthly_fallback: bool = False,
                    preventive_record_id=None) -> Reminder:
@@ -925,6 +930,7 @@ def run_section_b(db):
                return_value="mock_wa_id"):
         with patch("app.services.nudge_scheduler.decrypt_field", return_value="919888877755"):
             import asyncio
+
             from app.services.nudge_scheduler import run_nudge_scheduler as _rns
             result_sched = asyncio.run(_rns(db))
     t("B30 run_nudge_scheduler returns dict with sent/skipped/failed",
@@ -955,7 +961,6 @@ def run_section_c(db):
 
     # -- Helper: create a source_id (UUID) that stands in as the record ID
     fake_source_id = uuid.uuid4()
-    due_date_base = today  # we'll override per test
 
     # C1: T-7 fires on t7_date = due_date - 7
     due_t7 = today + timedelta(days=7)  # due = today+7, so t7 = today
@@ -1067,7 +1072,7 @@ def run_section_c(db):
     fake_s10 = uuid.uuid4()
     due_fb = today - timedelta(days=40)
     sent_30_days_ago = datetime.now() - timedelta(days=31)
-    ov_r = _make_reminder(db, pet_c, fake_s10, STAGE_OVERDUE, "sent",
+    _make_reminder(db, pet_c, fake_s10, STAGE_OVERDUE, "sent",
                           due_date=due_fb, source_type="preventive_record",
                           sent_at=sent_30_days_ago,
                           monthly_fallback=True)
@@ -1379,7 +1384,7 @@ def run_section_c(db):
     # Ensure no reply for this user in message_logs
     db.flush()
     pre_ignore = rem_ign.ignore_count
-    ignores = _detect_ignores(db, today)
+    _detect_ignores(db, today)
     db.refresh(rem_ign)
     t("C31 ignore detection increments ignore_count when no reply within 24h",
       rem_ign.ignore_count > pre_ignore,
@@ -1584,20 +1589,20 @@ def _prerun_cleanup(db):
             uid = str(existing.id)
             # Aggressive cascade-delete via raw SQL in FK-safe order
             for stmt in [
-                f"DELETE FROM nudge_delivery_log WHERE user_id = '" + uid + "'::uuid",
-                f"DELETE FROM nudge_engagement WHERE user_id = '" + uid + "'::uuid",
-                f"DELETE FROM nudge_delivery_log WHERE pet_id IN (SELECT id FROM pets WHERE user_id = '" + uid + "'::uuid)",
-                f"DELETE FROM nudges WHERE pet_id IN (SELECT id FROM pets WHERE user_id = '" + uid + "'::uuid)",
-                f"DELETE FROM reminders WHERE pet_id IN (SELECT id FROM pets WHERE user_id = '" + uid + "'::uuid)",
-                f"DELETE FROM diagnostic_test_results WHERE pet_id IN (SELECT id FROM pets WHERE user_id = '" + uid + "'::uuid)",
-                f"DELETE FROM hygiene_preferences WHERE pet_id IN (SELECT id FROM pets WHERE user_id = '" + uid + "'::uuid)",
-                f"DELETE FROM diet_items WHERE pet_id IN (SELECT id FROM pets WHERE user_id = '" + uid + "'::uuid)",
-                f"DELETE FROM condition_medications WHERE condition_id IN (SELECT c.id FROM conditions c JOIN pets p ON c.pet_id=p.id WHERE p.user_id='" + uid + "'::uuid)",
-                f"DELETE FROM condition_monitoring WHERE condition_id IN (SELECT c.id FROM conditions c JOIN pets p ON c.pet_id=p.id WHERE p.user_id='" + uid + "'::uuid)",
-                f"DELETE FROM conditions WHERE pet_id IN (SELECT id FROM pets WHERE user_id = '" + uid + "'::uuid)",
-                f"DELETE FROM preventive_records WHERE pet_id IN (SELECT id FROM pets WHERE user_id = '" + uid + "'::uuid)",
-                f"DELETE FROM pets WHERE user_id = '" + uid + "'::uuid",
-                f"DELETE FROM users WHERE id = '" + uid + "'::uuid",
+                "DELETE FROM nudge_delivery_log WHERE user_id = '" + uid + "'::uuid",
+                "DELETE FROM nudge_engagement WHERE user_id = '" + uid + "'::uuid",
+                "DELETE FROM nudge_delivery_log WHERE pet_id IN (SELECT id FROM pets WHERE user_id = '" + uid + "'::uuid)",
+                "DELETE FROM nudges WHERE pet_id IN (SELECT id FROM pets WHERE user_id = '" + uid + "'::uuid)",
+                "DELETE FROM reminders WHERE pet_id IN (SELECT id FROM pets WHERE user_id = '" + uid + "'::uuid)",
+                "DELETE FROM diagnostic_test_results WHERE pet_id IN (SELECT id FROM pets WHERE user_id = '" + uid + "'::uuid)",
+                "DELETE FROM hygiene_preferences WHERE pet_id IN (SELECT id FROM pets WHERE user_id = '" + uid + "'::uuid)",
+                "DELETE FROM diet_items WHERE pet_id IN (SELECT id FROM pets WHERE user_id = '" + uid + "'::uuid)",
+                "DELETE FROM condition_medications WHERE condition_id IN (SELECT c.id FROM conditions c JOIN pets p ON c.pet_id=p.id WHERE p.user_id='" + uid + "'::uuid)",
+                "DELETE FROM condition_monitoring WHERE condition_id IN (SELECT c.id FROM conditions c JOIN pets p ON c.pet_id=p.id WHERE p.user_id='" + uid + "'::uuid)",
+                "DELETE FROM conditions WHERE pet_id IN (SELECT id FROM pets WHERE user_id = '" + uid + "'::uuid)",
+                "DELETE FROM preventive_records WHERE pet_id IN (SELECT id FROM pets WHERE user_id = '" + uid + "'::uuid)",
+                "DELETE FROM pets WHERE user_id = '" + uid + "'::uuid",
+                "DELETE FROM users WHERE id = '" + uid + "'::uuid",
             ]:
                 try:
                     db.execute(_text(stmt))

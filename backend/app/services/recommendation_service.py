@@ -18,20 +18,22 @@ Retry policy:
 - On failure, return an empty list (user can still type custom items)
 """
 
-import logging
 import json
+import logging
 from datetime import datetime
-from sqlalchemy.orm import Session
+
 from sqlalchemy import and_, func
-from app.models.order_recommendation import OrderRecommendation
-from app.models.pet_preference import PetPreference
+from sqlalchemy.orm import Session
+
+from app.config import settings
 from app.core.constants import (
     OPENAI_QUERY_MODEL,
-    ORDER_CAT_MEDICINES,
     ORDER_CAT_FOOD,
+    ORDER_CAT_MEDICINES,
     ORDER_CAT_SUPPLEMENTS,
 )
-from app.config import settings
+from app.models.order_recommendation import OrderRecommendation
+from app.models.pet_preference import PetPreference
 from app.utils.retry import retry_openai_call
 
 logger = logging.getLogger(__name__)
@@ -51,7 +53,7 @@ def _get_openai_client():
 def _calculate_age_range(dob) -> str:
     """
     Calculate age range from date of birth.
-    
+
     Returns:
         - "0-2_months" for 0-2 months old (puppies/kittens)
         - "2-6_months" for 2-6 months
@@ -99,12 +101,12 @@ async def get_or_generate_recommendations(
 ) -> list:
     """
     Get recommendations for a pet, from cache or AI generation.
-    
+
     Args:
         db: Database session
         pet: Pet object with species, breed, dob
         category: Order category (medicines, food_nutrition, supplements)
-    
+
     Returns:
         List of recommendation items as dicts:
         [
@@ -123,7 +125,7 @@ async def get_or_generate_recommendations(
         pet_breed_value = getattr(pet, "breed", None)
         pet_breed = str(pet_breed_value) if pet_breed_value else None
         age_range = _calculate_age_range(pet.dob)
-        
+
         # Check database for existing recommendation
         existing = db.query(OrderRecommendation).filter(
             and_(
@@ -133,18 +135,18 @@ async def get_or_generate_recommendations(
                 OrderRecommendation.category == category,
             )
         ).first()
-        
+
         if existing:
             # Increment usage count when this recommendation is actually surfaced.
             if increment_on_hit:
                 existing.used_count = (getattr(existing, "used_count", 0) or 0) + 1  # type: ignore[assignment]
                 db.commit()
-            
+
             logger.info(
                 f"Using cached recommendation for {pet_species} "
                 f"(breed={pet_breed}, age={age_range}, category={category})"
             )
-            
+
             # Convert JSON items to list with IDs
             items = []
             raw_items = getattr(existing, "items", []) or []
@@ -154,20 +156,20 @@ async def get_or_generate_recommendations(
                     enriched["id"] = idx
                     items.append(enriched)
             return items
-        
+
         # No cache hit — generate via AI
         logger.info(
             f"Generating new recommendation for {pet_species} "
             f"(breed={pet_breed}, age={age_range}, category={category})"
         )
-        
+
         items = await _generate_recommendations_via_ai(
             pet_species,
             pet_breed,
             age_range,
             category,
         )
-        
+
         # Store in database for future reuse
         if items:
             recommendation = OrderRecommendation(
@@ -181,13 +183,13 @@ async def get_or_generate_recommendations(
             )
             db.add(recommendation)
             db.commit()
-            
+
             # Add IDs for response
             for idx, item in enumerate(items, start=1):
                 item["id"] = idx
-        
+
         return items
-    
+
     except Exception as e:
         logger.error(f"Failed to get recommendations: {e}", exc_info=True)
         return []
@@ -201,17 +203,17 @@ async def _generate_recommendations_via_ai(
 ) -> list:
     """
     Call OpenAI to generate recommendations.
-    
+
     Returns:
         List of items without IDs or empty list on failure.
     """
     client = _get_openai_client()
     category_display = _get_category_description(category)
-    
+
     prompt = _build_recommendation_prompt(
         species, breed, age_range, category_display
     )
-    
+
     try:
         response = await retry_openai_call(
             client.chat.completions.create,
@@ -233,19 +235,19 @@ async def _generate_recommendations_via_ai(
                 },
             ],
         )
-        
+
         # Parse the response
         response_text = response.choices[0].message.content.strip()
-        
+
         # Try to extract JSON from response
         items = _extract_json_from_response(response_text)
-        
+
         if not items:
             logger.warning(
                 f"Failed to parse AI response for {species}/{breed}/{age_range}/{category}: {response_text}"
             )
             return []
-        
+
         # Validate and clean items
         cleaned_items = []
         for item in items:
@@ -255,10 +257,10 @@ async def _generate_recommendations_via_ai(
                     "description": str(item.get("description", ""))[:500],
                     "reason": str(item.get("reason", ""))[:300],
                 })
-        
+
         logger.info(f"Generated {len(cleaned_items)} recommendations via AI")
         return cleaned_items
-    
+
     except Exception as e:
         logger.error(
             f"OpenAI API error generating recommendations: {e}", exc_info=True
@@ -274,7 +276,7 @@ def _build_recommendation_prompt(
 ) -> str:
     """Build the prompt for AI recommendation generation."""
     breed_info = f" ({breed})" if breed else ""
-    
+
     return (
         f"Recommend 5-7 {category_display.lower()} for a {age_range} {species}{breed_info}.\n\n"
         f"Return ONLY a JSON array with no markdown formatting, like this:\n"
@@ -294,7 +296,7 @@ def _build_recommendation_prompt(
 def _extract_json_from_response(response_text: str) -> list:
     """
     Extract JSON array from AI response.
-    
+
     Handles responses with markdown code blocks.
     """
     # Try direct parse first
@@ -302,10 +304,10 @@ def _extract_json_from_response(response_text: str) -> list:
         return json.loads(response_text)
     except json.JSONDecodeError:
         pass
-    
+
     # Try to find JSON within markdown code blocks
     import re
-    
+
     # Match ```json ... ``` or ```...```
     match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", response_text, re.DOTALL)
     if match:
@@ -313,7 +315,7 @@ def _extract_json_from_response(response_text: str) -> list:
             return json.loads(match.group(1))
         except json.JSONDecodeError:
             pass
-    
+
     # Try to find raw JSON array
     match = re.search(r"\[.*\]", response_text, re.DOTALL)
     if match:
@@ -321,7 +323,7 @@ def _extract_json_from_response(response_text: str) -> list:
             return json.loads(match.group(0))
         except json.JSONDecodeError:
             pass
-    
+
     return []
 
 
@@ -334,10 +336,10 @@ def record_preference(
 ) -> None:
     """
     Record that a user ordered an item (preference).
-    
+
     If this item was previously ordered, increment used_count.
     Otherwise, create a new preference record.
-    
+
     Args:
         db: Database session
         pet_id: Pet UUID
@@ -360,7 +362,7 @@ def record_preference(
             )
             .first()
         )
-        
+
         if existing:
             existing.used_count = (getattr(existing, "used_count", 0) or 0) + 1  # type: ignore[assignment]
             existing.updated_at = datetime.utcnow()  # type: ignore[assignment]
@@ -373,10 +375,10 @@ def record_preference(
                 used_count=1,
             )
             db.add(preference)
-        
+
         db.commit()
         logger.debug(f"Recorded preference for pet {pet_id}: {item_name}")
-    
+
     except Exception as e:
         logger.error(f"Failed to record preference: {e}", exc_info=True)
         db.rollback()

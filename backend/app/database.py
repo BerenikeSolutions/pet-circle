@@ -19,11 +19,13 @@ No business logic lives here — only connection infrastructure.
 """
 
 import logging
+from collections.abc import Generator
+
 from sqlalchemy import create_engine, event
-from sqlalchemy.orm import sessionmaker, declarative_base, Session
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Session, declarative_base, sessionmaker
 from sqlalchemy.pool import QueuePool
-from sqlalchemy.exc import OperationalError, DisconnectionError
-from typing import Generator
+
 from app.config import settings
 
 logger = logging.getLogger(__name__)

@@ -25,6 +25,7 @@ import asyncio
 import base64
 import json
 import logging
+
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -339,6 +340,7 @@ async def delete_from_supabase(storage_path: str) -> bool:
         True on success, False on failure.
     """
     import asyncio
+
     from app.services.document_upload import _get_supabase_client
 
     bucket_name = settings.SUPABASE_BUCKET_NAME
@@ -385,9 +387,9 @@ async def sync_document_to_gcp(
     Returns:
         True on successful migration, False on any failure.
     """
-    from app.services.document_upload import _download_supabase_raw
-    from app.models.document import Document
     from sqlalchemy import text
+
+    from app.services.document_upload import _download_supabase_raw
 
     # Step 1: Download from Supabase.
     file_bytes = await _download_supabase_raw(file_path)

@@ -8,17 +8,17 @@ Generates AI-powered one-line tips per hygiene activity (cached by breed).
 """
 
 import json
-import re
 import logging
-from datetime import datetime, date, timedelta
-from sqlalchemy.orm import Session
-from openai import AsyncOpenAI
+import re
+from datetime import date, datetime, timedelta
 
-from app.models.hygiene_preference import HygienePreference
-from app.models.hygiene_tip_cache import HygieneTipCache
-from app.models.pet import Pet
+from openai import AsyncOpenAI
+from sqlalchemy.orm import Session
+
 from app.config import settings
 from app.core.constants import OPENAI_QUERY_MODEL
+from app.models.hygiene_preference import HygienePreference
+from app.models.hygiene_tip_cache import HygieneTipCache
 from app.utils.retry import retry_openai_call
 
 logger = logging.getLogger(__name__)

@@ -11,26 +11,25 @@ Two entry points:
 
 import logging
 from datetime import date, datetime, timedelta
-from sqlalchemy.orm import Session
-from sqlalchemy import func
 
-from app.models.pet import Pet
-from app.models.nudge import Nudge
-from app.models.preventive_record import PreventiveRecord
-from app.models.preventive_master import PreventiveMaster
-from app.models.condition import Condition
-from app.models.condition_medication import ConditionMedication
-from app.models.condition_monitoring import ConditionMonitoring
-from app.models.diet_item import DietItem
-from app.models.hygiene_preference import HygienePreference
-from app.models.diagnostic_test_result import DiagnosticTestResult
-from app.models.user import User
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
 from app.core.constants import (
+    NUDGE_CACHE_HOURS,
     NUDGE_PRIORITY_ORDER,
     NUDGE_SOURCE_ORDER,
     NUDGE_TRIGGER_CRON,
-    NUDGE_CACHE_HOURS,
 )
+from app.models.condition import Condition
+from app.models.diagnostic_test_result import DiagnosticTestResult
+from app.models.diet_item import DietItem
+from app.models.hygiene_preference import HygienePreference
+from app.models.nudge import Nudge
+from app.models.pet import Pet
+from app.models.preventive_master import PreventiveMaster
+from app.models.preventive_record import PreventiveRecord
+from app.models.user import User
 from app.services.nudge_config_service import get_nudge_config_int
 
 logger = logging.getLogger(__name__)

@@ -21,11 +21,12 @@ Rules:
 import logging
 from datetime import date, timedelta
 from uuid import UUID
-from sqlalchemy.orm import Session
-from app.models.preventive_record import PreventiveRecord
-from app.models.preventive_master import PreventiveMaster
-from app.utils.date_utils import get_today_ist
 
+from sqlalchemy.orm import Session
+
+from app.models.preventive_master import PreventiveMaster
+from app.models.preventive_record import PreventiveRecord
+from app.utils.date_utils import get_today_ist
 
 logger = logging.getLogger(__name__)
 

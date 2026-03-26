@@ -22,25 +22,19 @@ Retry policy:
 """
 
 import logging
-from datetime import datetime
+
 import httpx
 from sqlalchemy.orm import Session
+
 from app.config import settings
 from app.core.constants import (
-    MAX_MESSAGES_PER_MINUTE,
-    RATE_LIMIT_WINDOW_SECONDS,
-    REMINDER_DONE,
-    REMINDER_SNOOZE_7,
-    REMINDER_RESCHEDULE,
-    REMINDER_CANCEL,
-    CONFLICT_USE_NEW,
     CONFLICT_KEEP_EXISTING,
+    CONFLICT_USE_NEW,
 )
 from app.core.log_sanitizer import mask_phone, sanitize_payload
 from app.core.rate_limiter import rate_limiter
-from app.utils.retry import retry_whatsapp_call
 from app.models.message_log import MessageLog
-
+from app.utils.retry import retry_whatsapp_call
 
 logger = logging.getLogger(__name__)
 

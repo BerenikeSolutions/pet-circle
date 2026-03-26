@@ -17,9 +17,10 @@ do not crash the main application flow.
 
 import asyncio
 import logging
-from typing import TypeVar, Callable, Any
-from app.core.constants import OPENAI_RETRY_BACKOFFS, WHATSAPP_MAX_RETRIES
+from collections.abc import Callable
+from typing import Any, TypeVar
 
+from app.core.constants import OPENAI_RETRY_BACKOFFS, WHATSAPP_MAX_RETRIES
 
 logger = logging.getLogger(__name__)
 

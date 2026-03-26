@@ -23,41 +23,45 @@ Rules:
 import asyncio
 import logging
 import time
+
 from sqlalchemy.orm import Session
+
 from app.config import settings
+from app.core.constants import (
+    ACKNOWLEDGMENTS,
+    APP_WELCOME_HEADING,
+    CONFLICT_KEEP_EXISTING,
+    CONFLICT_USE_NEW,
+    FAREWELLS,
+    GREETINGS,
+    HELP_COMMANDS,
+    MAX_CONCURRENT_EXTRACTIONS,
+    MAX_PENDING_DOCS_PER_PET,
+    MAX_PETS_PER_USER,
+    NUDGE_ACTION,
+    NUDGE_DISMISS,
+    NUDGE_PAYLOADS,
+    NUDGE_VIEW_DASHBOARD,
+    ORDER_CATEGORY_PAYLOADS,
+    ORDER_COMMANDS,
+    ORDER_CONFIRM_PAYLOADS,
+    ORDER_FULFILL_NO_PREFIX,
+    ORDER_FULFILL_YES_PREFIX,
+    REMINDER_ALREADY_DONE,
+    REMINDER_CANCEL,
+    REMINDER_DONE,
+    REMINDER_ORDER_NOW,
+    REMINDER_RESCHEDULE,
+    REMINDER_SCHEDULE,
+    REMINDER_SNOOZE_7,
+    REMINDER_STILL_PENDING,
+)
+from app.core.constants import (
+    REMINDER_PAYLOADS as _REMINDER_PAYLOADS_CONST,
+)
 from app.core.encryption import decrypt_field
 from app.core.log_sanitizer import mask_phone
 from app.utils.breed_fun_facts import get_breed_fun_fact
-from app.core.constants import (
-    APP_WELCOME_HEADING,
-    REMINDER_DONE,
-    REMINDER_ALREADY_DONE,
-    REMINDER_SNOOZE_7,
-    REMINDER_ORDER_NOW,
-    REMINDER_STILL_PENDING,
-    REMINDER_SCHEDULE,
-    REMINDER_RESCHEDULE,
-    REMINDER_CANCEL,
-    REMINDER_PAYLOADS as _REMINDER_PAYLOADS_CONST,
-    CONFLICT_USE_NEW,
-    CONFLICT_KEEP_EXISTING,
-    MAX_PETS_PER_USER,
-    MAX_PENDING_DOCS_PER_PET,
-    MAX_CONCURRENT_EXTRACTIONS,
-    GREETINGS,
-    ACKNOWLEDGMENTS,
-    FAREWELLS,
-    HELP_COMMANDS,
-    ORDER_COMMANDS,
-    ORDER_CATEGORY_PAYLOADS,
-    ORDER_CONFIRM_PAYLOADS,
-    ORDER_FULFILL_YES_PREFIX,
-    ORDER_FULFILL_NO_PREFIX,
-    NUDGE_PAYLOADS,
-    NUDGE_ACTION,
-    NUDGE_DISMISS,
-    NUDGE_VIEW_DASHBOARD,
-)
 
 # Semaphore to limit concurrent background extraction tasks.
 # Prevents DB connection pool exhaustion when many documents are uploaded.
@@ -97,21 +101,20 @@ _batch_document_ids: dict[str, list] = {}
 # Seconds to wait after the last upload before starting batch extraction.
 # Gives the user time to finish sending all files in a batch.
 _EXTRACTION_DELAY_SECONDS: int = 15
+from app.models.conflict_flag import ConflictFlag
+from app.models.document import Document
+from app.models.pet import Pet
+from app.models.reminder import Reminder
 from app.services.onboarding import (
-    get_or_create_user,
     create_pending_user,
+    get_or_create_user,
     handle_onboarding_step,
     is_doc_upload_deadline_expired,
 )
 from app.services.whatsapp_sender import (
-    send_text_message,
     download_whatsapp_media,
+    send_text_message,
 )
-from app.models.pet import Pet
-from app.models.document import Document
-from app.models.reminder import Reminder
-from app.models.conflict_flag import ConflictFlag
-
 
 logger = logging.getLogger(__name__)
 
@@ -257,10 +260,10 @@ async def route_message(db: Session, message_data: dict) -> None:
             # --- Special handling for awaiting_documents state ---
             # During the upload window, allow image/document uploads alongside text.
             if user.onboarding_state == "awaiting_documents":
-                
+
 
                 # Check deadline expiry on any incoming message.
-                if is_doc_upload_deadline_expired(user.doc_upload_deadline):    
+                if is_doc_upload_deadline_expired(user.doc_upload_deadline):
                     from app.services.onboarding import _finalize_onboarding
                     await _finalize_onboarding(db, user, send_text_message)
                     return
@@ -303,7 +306,8 @@ async def route_message(db: Session, message_data: dict) -> None:
                 # Only send the "please send text" prompt once per user.
                 # Check message_logs for whether we already sent it.
                 # If already sent, silently ignore non-text messages.
-                from sqlalchemy import cast, String
+                from sqlalchemy import String, cast
+
                 from app.models.message_log import MessageLog
                 already_sent = (
                     db.query(MessageLog.id)
@@ -734,8 +738,8 @@ async def _handle_reminder_button(db: Session, user, payload: str) -> None:
 
 async def _handle_conflict_button(db: Session, user, payload: str) -> None:
     """Handle a conflict resolution button response."""
-    from app.services.conflict_engine import resolve_conflict
     from app.models.preventive_record import PreventiveRecord
+    from app.services.conflict_engine import resolve_conflict
 
     from_number = _get_mobile(user)
 
@@ -770,9 +774,9 @@ async def _handle_conflict_button(db: Session, user, payload: str) -> None:
 
 async def _handle_nudge_button(db: Session, user, payload: str) -> None:
     """Handle a nudge button response (action, dismiss, view dashboard)."""
+    from app.models.dashboard_token import DashboardToken
     from app.services.nudge_sender import record_nudge_engagement
     from app.services.whatsapp_sender import send_text_message
-    from app.models.dashboard_token import DashboardToken
 
     from_number = _get_mobile(user)
 
@@ -1108,7 +1112,6 @@ async def _delayed_batch_extraction(
             f"🎉 *Fun fact time!*\n✨ {extracting_fun_fact}",
         )
 
-        last_result = None
         success_count = 0
         fail_count = 0
         failed_doc_names = []
@@ -1156,7 +1159,6 @@ async def _delayed_batch_extraction(
                         # don't inflate fail_count or trigger the failure-only message.
                         pass
                     else:
-                        last_result = result
                         success_count += 1
 
                     logger.info(
@@ -1164,7 +1166,7 @@ async def _delayed_batch_extraction(
                         idx, total, str(doc.id), str(pet_id),
                         result.get("status"),
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     fail_count += 1
                     doc_label = doc.document_name or doc.file_path.split("/")[-1]
                     failed_doc_names.append(doc_label)
@@ -1295,7 +1297,7 @@ async def _handle_query(db: Session, user, text: str) -> None:
         )
         answer = result.get("answer", "Sorry, I couldn't find an answer.")
         await send_text_message(db, from_number, answer)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error("Query engine timed out for pet %s", str(pet.id))
         await send_text_message(
             db, from_number,
@@ -1318,11 +1320,13 @@ async def _send_dashboard_links(db, user) -> None:
     Includes active reminders for each pet.
     """
     from datetime import datetime
-    from app.models.dashboard_token import DashboardToken
-    from app.models.reminder import Reminder
-    from app.models.preventive_master import PreventiveMaster
-    from app.services.onboarding import refresh_dashboard_token
+
     from app.config import settings
+    from app.models.dashboard_token import DashboardToken
+    from app.models.preventive_master import PreventiveMaster
+    from app.models.preventive_record import PreventiveRecord
+    from app.models.reminder import Reminder
+    from app.services.onboarding import refresh_dashboard_token
 
     from_number = _get_mobile(user)
 
@@ -1358,9 +1362,9 @@ async def _send_dashboard_links(db, user) -> None:
                 # No token at all — generate a fresh one.
                 new_token = refresh_dashboard_token(db, pet.id)
                 dashboard_url = f"{settings.FRONTEND_URL}/dashboard/{new_token}"
-            
+
             pet_msg = f"*{pet.name}'s Dashboard*:\n{dashboard_url}"
-            
+
             # Fetch and append active reminders for this pet
             try:
                 reminders = (
@@ -1374,7 +1378,7 @@ async def _send_dashboard_links(db, user) -> None:
                     .order_by(Reminder.next_due_date.asc())
                     .all()
                 )
-                
+
                 if reminders:
                     pet_msg += "\n\nActive Reminders:"
                     for reminder, record, master in reminders:
@@ -1382,7 +1386,7 @@ async def _send_dashboard_links(db, user) -> None:
                         pet_msg += f"\n• {master.item_name}: Due {due_date_str}"
             except Exception as e:
                 logger.error("Failed to fetch reminders for pet %s: %s", str(pet.id), str(e))
-            
+
             messages.append(pet_msg)
         except Exception as e:
             logger.error("Failed to get/refresh token for pet %s: %s", str(pet.id), str(e))
@@ -1407,6 +1411,7 @@ def _get_dashboard_link(db: Session, pet) -> str | None:
     """
     try:
         from datetime import datetime
+
         from app.models.dashboard_token import DashboardToken
         from app.services.onboarding import refresh_dashboard_token
 
@@ -1456,9 +1461,9 @@ async def _try_agentic_finalization(
             return False
 
         # --- Gather context for the LLM ---
-        from app.models.preventive_record import PreventiveRecord
-        from app.models.preventive_master import PreventiveMaster
         from app.models.diet_item import DietItem
+        from app.models.preventive_master import PreventiveMaster
+        from app.models.preventive_record import PreventiveRecord
 
         records = (
             db.query(PreventiveRecord, PreventiveMaster)
@@ -1559,7 +1564,7 @@ async def _send_batch_summary(
         - If partial failure: list which docs failed by name.
         - If all succeeded: show extraction summary with items found.
     """
-    total = success_count + fail_count
+    success_count + fail_count
 
     # --- Check for rejected documents (not pet-related or wrong pet name) ---
     # Send one WhatsApp message per rejection type if any were found.
@@ -1689,8 +1694,8 @@ async def _send_extraction_summary(
 
         dashboard_link = _get_dashboard_link(db, pet)
         msg = (
-            f"Document saved but extraction encountered an issue. "
-            f"You can update details manually via the dashboard."
+            "Document saved but extraction encountered an issue. "
+            "You can update details manually via the dashboard."
         )
         if dashboard_link:
             msg += f"\n\nView *{pet.name}'s Dashboard*:\n{dashboard_link}"
@@ -1714,8 +1719,8 @@ async def _send_extraction_summary(
 
     # Build extraction details from the preventive records in DB.
     # Re-query the latest records to show accurate current state.
-    from app.models.preventive_record import PreventiveRecord
     from app.models.preventive_master import PreventiveMaster
+    from app.models.preventive_record import PreventiveRecord
 
     records = (
         db.query(PreventiveRecord, PreventiveMaster)
@@ -1741,7 +1746,7 @@ async def _send_extraction_summary(
     msg += f"*{display_processed} item(s)* updated.\n"
 
     if lines:
-        msg += f"\n*Health Records:*\n" + "\n".join(lines) + "\n"
+        msg += "\n*Health Records:*\n" + "\n".join(lines) + "\n"
 
     if vaccination_details:
         msg += "\n*Vaccination Details Found:*\n"

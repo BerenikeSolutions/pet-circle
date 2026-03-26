@@ -14,60 +14,55 @@ Tests the complete application flow:
    10. Conflict detection
 """
 
-import sys
-import os
 import asyncio
+import os
+import sys
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from datetime import date, timedelta
+
+from app.core.constants import *
+from app.core.encryption import decrypt_field, hash_field
 from app.database import SessionLocal
-from app.models.user import User
-from app.models.pet import Pet
-from app.models.preventive_record import PreventiveRecord
-from app.models.preventive_master import PreventiveMaster
-from app.models.reminder import Reminder
-from app.models.document import Document
-from app.models.dashboard_token import DashboardToken
-from app.models.message_log import MessageLog
 from app.models.conflict_flag import ConflictFlag
-from app.services.onboarding import (
-    create_pending_user,
-    handle_onboarding_step,
-    generate_dashboard_token,
-    seed_preventive_records_for_pet,
-)
-from app.services.preventive_calculator import (
-    compute_next_due_date,
-    compute_status,
-    create_preventive_record,
-    recalculate_all_for_pet,
-)
-from app.services.health_score import compute_health_score
-from app.services.reminder_engine import run_reminder_engine, send_pending_reminders
-from app.services.conflict_expiry import expire_pending_conflicts
+from app.models.dashboard_token import DashboardToken
+from app.models.document import Document
+from app.models.message_log import MessageLog
+from app.models.pet import Pet
+from app.models.preventive_master import PreventiveMaster
+from app.models.preventive_record import PreventiveRecord
+from app.models.reminder import Reminder
+from app.models.user import User
 from app.services.conflict_engine import check_and_create_conflict, resolve_conflict
+from app.services.conflict_expiry import expire_pending_conflicts
 from app.services.dashboard_service import (
     get_dashboard_data,
     update_pet_weight,
     update_preventive_date,
 )
 from app.services.document_upload import (
-    validate_file_upload,
-    check_daily_upload_limit,
     build_storage_path,
     create_document_record,
+    validate_file_upload,
 )
 from app.services.gpt_extraction import (
-    _validate_extraction_json,
     _match_preventive_master_from_list,
+    _validate_extraction_json,
 )
-from app.utils.date_utils import parse_date, format_date_for_db, get_today_ist
-from app.core.constants import *
-from app.core.encryption import encrypt_field, decrypt_field, hash_field
-from datetime import date, timedelta
-import uuid
-
+from app.services.health_score import compute_health_score
+from app.services.onboarding import (
+    create_pending_user,
+    handle_onboarding_step,
+)
+from app.services.preventive_calculator import (
+    compute_next_due_date,
+    compute_status,
+    create_preventive_record,
+)
+from app.services.reminder_engine import run_reminder_engine
+from app.utils.date_utils import format_date_for_db, get_today_ist, parse_date
 
 PASS = 0
 FAIL = 0
@@ -536,10 +531,10 @@ def main():
         all_docs = db.query(Document).filter(Document.pet_id == pet.id).all()
         test("Admin: documents queryable", len(all_docs) >= 0)
 
-        all_reminders = db.query(Reminder).all()
+        db.query(Reminder).all()
         test("Admin: reminders queryable", True)
 
-        all_messages = db.query(MessageLog).all()
+        db.query(MessageLog).all()
         test("Admin: message logs queryable", True)
 
         # ===================================================================

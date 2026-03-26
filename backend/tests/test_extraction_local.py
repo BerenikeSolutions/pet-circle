@@ -23,9 +23,9 @@ Requires OPENAI_API_KEY in environment or env file.
 """
 
 import asyncio
+import json
 import os
 import sys
-import json
 import time
 
 # Add backend to path so imports work.
@@ -297,14 +297,18 @@ def _validate_result(filename: str, result: dict) -> list[str]:
 
 async def test_extraction():
     """Run GPT extraction on all fixture files and report results."""
-    from app.utils.file_reader import encode_image_base64, extract_pdf_text, render_pdf_pages_as_images
     from app.services.gpt_extraction import (
         _call_openai_extraction,
         _call_openai_extraction_vision,
-        _validate_extraction_json,
+        _derive_blood_test_fallback_items,
         _infer_document_category,
         _resolve_document_category,
-        _derive_blood_test_fallback_items,
+        _validate_extraction_json,
+    )
+    from app.utils.file_reader import (
+        encode_image_base64,
+        extract_pdf_text,
+        render_pdf_pages_as_images,
     )
 
     repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -363,13 +367,13 @@ async def test_extraction():
                     )
                 else:
                     # Scanned PDF — try vision fallback.
-                    print(f"  Scanned PDF — trying vision fallback...")
+                    print("  Scanned PDF — trying vision fallback...")
                     page_images = render_pdf_pages_as_images(file_bytes, max_pages=3)
                     if page_images:
                         print(f"  Rendered {len(page_images)} page(s) as images")
                         raw_json = await _call_openai_extraction_vision(page_images[0])
                     else:
-                        print(f"  SKIP: Cannot render scanned PDF (PyMuPDF not available?)")
+                        print("  SKIP: Cannot render scanned PDF (PyMuPDF not available?)")
                         results.append({
                             "file": filename,
                             "status": "skipped",
@@ -379,7 +383,7 @@ async def test_extraction():
                         print()
                         continue
             else:
-                print(f"  SKIP: Unsupported file type")
+                print("  SKIP: Unsupported file type")
                 continue
 
         except Exception as e:
@@ -477,12 +481,12 @@ async def test_extraction():
                 # Validate against expectations.
                 file_issues = _validate_result(filename, result_entry)
                 if file_issues:
-                    print(f"  ISSUES:")
+                    print("  ISSUES:")
                     for issue in file_issues:
                         print(f"    ! {issue}")
                     all_issues.extend([(filename, issue) for issue in file_issues])
                 else:
-                    print(f"  VALIDATION: PASS")
+                    print("  VALIDATION: PASS")
 
             except ValueError as ve:
                 print(f"  VALIDATION ERROR: {ve}")
@@ -536,12 +540,12 @@ async def test_extraction():
     for r in success:
         cat = r.get("document_category", "Unknown")
         categories.setdefault(cat, []).append(r["file"])
-    print(f"\n--- By Category ---")
+    print("\n--- By Category ---")
     for cat, files_list in sorted(categories.items()):
         print(f"  {cat}: {len(files_list)} files")
 
     if success:
-        print(f"\n--- Successful Extractions ---")
+        print("\n--- Successful Extractions ---")
         for r in success:
             items_str = ", ".join(
                 f"{i['item_name']} ({i['last_done_date']})"
@@ -552,12 +556,12 @@ async def test_extraction():
             print(f"  {r['file']}: {r['items_count']} items — {items_str}{diag_str}{vacc_str}")
 
     if failed:
-        print(f"\n--- Failed Extractions ---")
+        print("\n--- Failed Extractions ---")
         for r in failed:
             print(f"  {r['file']}: {r.get('error', 'unknown')}")
 
     if skipped:
-        print(f"\n--- Skipped ---")
+        print("\n--- Skipped ---")
         for r in skipped:
             print(f"  {r['file']}: {r.get('reason', 'unknown')}")
 
@@ -569,7 +573,7 @@ async def test_extraction():
         for filename, issue in all_issues:
             print(f"  [{filename}] {issue}")
     else:
-        print(f"\nALL VALIDATIONS PASSED")
+        print("\nALL VALIDATIONS PASSED")
 
     # Save detailed results to JSON.
     results_path = os.path.join(

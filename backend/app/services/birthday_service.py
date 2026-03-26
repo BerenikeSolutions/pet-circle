@@ -11,11 +11,13 @@ Key functions:
 """
 
 import logging
-from datetime import date as DateType, datetime
+from datetime import date as DateType
+
 from sqlalchemy.orm import Session
+
 from app.models.pet import Pet
-from app.models.preventive_record import PreventiveRecord
 from app.models.preventive_master import PreventiveMaster
+from app.models.preventive_record import PreventiveRecord
 from app.utils.date_utils import get_today_ist
 
 logger = logging.getLogger(__name__)
@@ -153,8 +155,8 @@ async def send_birthday_message(
     Returns:
         API response dict on success, None on failure.
     """
-    from app.services.whatsapp_sender import send_template_message
     from app.config import settings
+    from app.services.whatsapp_sender import send_template_message
 
     # Send the birthday template message with parameters.
     result = await send_template_message(

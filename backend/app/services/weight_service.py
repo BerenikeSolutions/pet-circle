@@ -11,21 +11,22 @@ age_category) combo to minimize API costs.
 
 import json
 import logging
-from datetime import datetime, date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
-from sqlalchemy.orm import Session
-from sqlalchemy import desc
 
-from app.models.weight_history import WeightHistory
-from app.models.ideal_weight_cache import IdealWeightCache
-from app.models.pet import Pet
+from sqlalchemy import desc
+from sqlalchemy.orm import Session
+
 from app.config import settings
 from app.core.constants import (
+    OPENAI_WEIGHT_LOOKUP_MAX_TOKENS,
     OPENAI_WEIGHT_LOOKUP_MODEL,
     OPENAI_WEIGHT_LOOKUP_TEMPERATURE,
-    OPENAI_WEIGHT_LOOKUP_MAX_TOKENS,
     WEIGHT_CACHE_STALENESS_DAYS,
 )
+from app.models.ideal_weight_cache import IdealWeightCache
+from app.models.pet import Pet
+from app.models.weight_history import WeightHistory
 from app.utils.retry import retry_openai_call
 
 logger = logging.getLogger(__name__)

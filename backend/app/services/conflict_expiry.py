@@ -19,10 +19,11 @@ Execution is stateless — safe to re-run multiple times.
 
 import logging
 from datetime import datetime, timedelta
-from sqlalchemy.orm import Session
-from app.core.constants import CONFLICT_EXPIRY_DAYS, SYSTEM_TIMEZONE
-from app.utils.date_utils import IST
 
+from sqlalchemy.orm import Session
+
+from app.core.constants import CONFLICT_EXPIRY_DAYS
+from app.utils.date_utils import IST
 
 logger = logging.getLogger(__name__)
 

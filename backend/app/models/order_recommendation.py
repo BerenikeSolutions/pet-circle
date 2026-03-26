@@ -22,22 +22,24 @@ Constraints:
 
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, ForeignKey, Integer, Index
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
+
 from app.database import Base
 
 
 class OrderRecommendation(Base):
     """
     Caches AI-generated recommendations for pet profiles.
-    
+
     A recommendation is uniquely identified by:
     - species (dog/cat)
     - breed (may be None for breed-agnostic)
     - age_range (optional)
     - category (medicines/food_nutrition/supplements)
-    
+
     Once generated, the same recommendation can be reused for multiple
     users with similar pet profiles, reducing API calls.
     """

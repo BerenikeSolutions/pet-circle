@@ -23,6 +23,7 @@ import hashlib
 import logging
 
 from cryptography.fernet import Fernet, InvalidToken
+
 from app.config import settings
 
 logger = logging.getLogger(__name__)

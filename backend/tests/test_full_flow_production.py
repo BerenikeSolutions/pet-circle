@@ -17,11 +17,10 @@ Zayn's profile (used throughout):
   - Food: Royal Canin (packaged)
 """
 
-import sys
-import os
 import asyncio
 import logging
-import time
+import os
+import sys
 
 # Fix Windows console encoding for UTF-8 output
 if sys.platform == "win32":
@@ -41,31 +40,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger("test_full_flow")
 
+from app.config import settings
+from app.core.encryption import decrypt_field, hash_field
 from app.database import SessionLocal
-from app.models.user import User
-from app.models.pet import Pet
-from app.models.preventive_record import PreventiveRecord
-from app.models.reminder import Reminder
-from app.models.document import Document
-from app.models.dashboard_token import DashboardToken
-from app.models.conflict_flag import ConflictFlag
 from app.models.condition import Condition
 from app.models.condition_medication import ConditionMedication
 from app.models.condition_monitoring import ConditionMonitoring
+from app.models.conflict_flag import ConflictFlag
 from app.models.contact import Contact
+from app.models.dashboard_token import DashboardToken
 from app.models.diagnostic_test_result import DiagnosticTestResult
-from app.core.encryption import encrypt_field, decrypt_field, hash_field
-from app.services.onboarding import create_pending_user, handle_onboarding_step
+from app.models.document import Document
+from app.models.pet import Pet
+from app.models.preventive_record import PreventiveRecord
+from app.models.reminder import Reminder
+from app.models.user import User
 from app.services.document_upload import (
-    validate_file_upload,
-    check_daily_upload_limit,
     build_storage_path,
     create_document_record,
     upload_to_supabase,
+    validate_file_upload,
 )
 from app.services.gpt_extraction import extract_and_process_document
-from app.config import settings
-
+from app.services.onboarding import create_pending_user, handle_onboarding_step
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -473,7 +470,7 @@ async def run() -> int:
             file_path = build_storage_path(str(user.id), str(pet.id), fname)
             try:
                 result_path = await upload_to_supabase(file_bytes, file_path, mime)
-                check(f"  Upload to Supabase", True)
+                check("  Upload to Supabase", True)
                 print(f"    Path: {result_path}")
             except Exception as e:
                 check(f"  Upload to Supabase ({fname})", False, str(e))
@@ -482,7 +479,7 @@ async def run() -> int:
             # Create document DB record
             try:
                 doc = create_document_record(db, pet.id, file_path, mime)
-                check(f"  Document record created (status=pending)", doc.extraction_status == "pending")
+                check("  Document record created (status=pending)", doc.extraction_status == "pending")
                 uploaded_doc_ids.append(doc.id)
             except Exception as e:
                 check(f"  Document record ({fname})", False, str(e))
@@ -558,7 +555,7 @@ async def run() -> int:
                 # Delay between GPT calls to avoid rate limits
                 await asyncio.sleep(2)
 
-            print(f"\n  Extraction summary:")
+            print("\n  Extraction summary:")
             success = sum(1 for r in extraction_results if r.get("status") == "success")
             print(f"    Success: {success}/{len(extraction_results)}")
             total_items = sum(r.get("items_extracted", 0) for r in extraction_results)

@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 
 from pydantic_settings import BaseSettings
-from pydantic import field_validator
+
 from app.core.constants import SYSTEM_TIMEZONE
 
 # --- Environment Selection ---

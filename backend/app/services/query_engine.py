@@ -38,22 +38,23 @@ Rules:
 
 import logging
 from uuid import UUID
+
 from sqlalchemy.orm import Session
-from app.models.pet import Pet
-from app.models.user import User
-from app.models.preventive_record import PreventiveRecord
-from app.models.preventive_master import PreventiveMaster
-from app.models.reminder import Reminder
-from app.models.document import Document
+
+from app.config import settings
 from app.core.constants import (
+    OPENAI_QUERY_MAX_TOKENS,
     OPENAI_QUERY_MODEL,
     OPENAI_QUERY_TEMPERATURE,
-    OPENAI_QUERY_MAX_TOKENS,
 )
+from app.models.document import Document
+from app.models.pet import Pet
+from app.models.preventive_master import PreventiveMaster
+from app.models.preventive_record import PreventiveRecord
+from app.models.reminder import Reminder
+from app.models.user import User
 from app.services.health_score import compute_health_score
-from app.config import settings
 from app.utils.retry import retry_openai_call
-
 
 logger = logging.getLogger(__name__)
 

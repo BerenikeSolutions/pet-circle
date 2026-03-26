@@ -30,34 +30,33 @@ Rules:
     - All recurrence values from DB preventive_master — never hardcoded.
 """
 
-import logging
 import asyncio
-from uuid import UUID
+import logging
 from datetime import date, datetime
+from uuid import UUID
+
 from sqlalchemy import func
 from sqlalchemy.orm import Session, selectinload
-from app.models.dashboard_token import DashboardToken
-from app.models.pet import Pet
-from app.models.user import User
-from app.models.preventive_record import PreventiveRecord
-from app.models.preventive_master import PreventiveMaster
-from app.models.reminder import Reminder
-from app.models.document import Document
-from app.models.diagnostic_test_result import DiagnosticTestResult
+
+from app.core.encryption import decrypt_field
 from app.models.condition import Condition
-from app.models.condition_medication import ConditionMedication
-from app.models.condition_monitoring import ConditionMonitoring
-from app.models.contact import Contact
-from app.models.diet_item import DietItem
 from app.models.conflict_flag import ConflictFlag
-from app.services.gpt_extraction import _infer_document_category, _resolve_document_category
+from app.models.contact import Contact
+from app.models.dashboard_token import DashboardToken
+from app.models.diagnostic_test_result import DiagnosticTestResult
+from app.models.diet_item import DietItem
+from app.models.document import Document
+from app.models.pet import Pet
+from app.models.preventive_master import PreventiveMaster
+from app.models.preventive_record import PreventiveRecord
+from app.models.reminder import Reminder
+from app.models.user import User
 from app.services.document_upload import download_from_supabase
+from app.services.gpt_extraction import _infer_document_category, _resolve_document_category
 from app.services.preventive_calculator import (
     compute_next_due_date,
     compute_status,
 )
-from app.core.encryption import decrypt_field
-
 
 logger = logging.getLogger(__name__)
 
@@ -784,7 +783,6 @@ async def retry_document_extraction(
     Raises:
         ValueError: If token invalid, document not found, or not in failed state.
     """
-    import asyncio
     from app.services.document_upload import download_from_supabase
     from app.services.gpt_extraction import extract_and_process_document
 

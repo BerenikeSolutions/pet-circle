@@ -28,31 +28,31 @@ Routes:
 import hmac
 import logging
 from datetime import datetime, timedelta
-from typing import Optional
 from uuid import UUID
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-from app.database import get_db
+
 from app.config import settings
-from app.core.security import validate_admin_key
-from app.core.rate_limiter import check_admin_rate_limit
 from app.core.encryption import decrypt_field
 from app.core.log_sanitizer import sanitize_payload
-from app.models.user import User
-from app.models.pet import Pet
-from app.models.reminder import Reminder
-from app.models.document import Document
-from app.models.dashboard_token import DashboardToken
-from app.models.message_log import MessageLog
-from app.models.preventive_record import PreventiveRecord
-from app.models.preventive_master import PreventiveMaster
+from app.core.rate_limiter import check_admin_rate_limit
+from app.core.security import validate_admin_key
+from app.database import get_db
 from app.models.conflict_flag import ConflictFlag
+from app.models.dashboard_token import DashboardToken
+from app.models.document import Document
+from app.models.message_log import MessageLog
 from app.models.order import Order
 from app.models.order_recommendation import OrderRecommendation
+from app.models.pet import Pet
 from app.models.pet_preference import PetPreference
-
+from app.models.preventive_master import PreventiveMaster
+from app.models.preventive_record import PreventiveRecord
+from app.models.reminder import Reminder
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -65,19 +65,19 @@ router = APIRouter(
 
 class PetUpdateRequest(BaseModel):
     """Request body for editing pet data."""
-    name: Optional[str] = Field(None, min_length=1, max_length=100)
-    species: Optional[str] = Field(None, pattern="^(dog|cat)$")
-    breed: Optional[str] = Field(None, max_length=100)
-    gender: Optional[str] = Field(None, pattern="^(male|female)$")
-    dob: Optional[str] = None
-    weight: Optional[float] = Field(None, gt=0, le=999.99)
-    neutered: Optional[bool] = None
+    name: str | None = Field(None, min_length=1, max_length=100)
+    species: str | None = Field(None, pattern="^(dog|cat)$")
+    breed: str | None = Field(None, max_length=100)
+    gender: str | None = Field(None, pattern="^(male|female)$")
+    dob: str | None = None
+    weight: float | None = Field(None, gt=0, le=999.99)
+    neutered: bool | None = None
 
 
 class OrderStatusUpdate(BaseModel):
     """Request body for updating order status."""
     status: str = Field(..., pattern="^(pending|confirmed|completed|cancelled)$")
-    admin_notes: Optional[str] = Field(None, max_length=2000)
+    admin_notes: str | None = Field(None, max_length=2000)
 
 
 def _format_message_payload(message_type: str, payload) -> str:
@@ -357,7 +357,7 @@ def edit_pet(pet_id: UUID, body: PetUpdateRequest, db: Session = Depends(get_db)
         try:
             pet.dob = parse_date(body.dob)
             updated_fields.append("dob")
-        except ValueError as e:
+        except ValueError:
             raise HTTPException(
                 status_code=400,
                 detail="Invalid date format. Use DD/MM/YYYY, DD-MM-YYYY, or YYYY-MM-DD.",
@@ -442,7 +442,7 @@ def list_documents(
 
 @router.get("/messages")
 def list_messages(
-    direction: Optional[str] = Query(None, pattern="^(incoming|outgoing)$"),
+    direction: str | None = Query(None, pattern="^(incoming|outgoing)$"),
     limit: int = Query(100, ge=1, le=1000),
     db: Session = Depends(get_db),
 ):
@@ -479,7 +479,7 @@ def list_messages(
 
 @router.get("/orders")
 def list_orders(
-    status: Optional[str] = Query(None, pattern="^(pending|confirmed|completed|cancelled)$"),
+    status: str | None = Query(None, pattern="^(pending|confirmed|completed|cancelled)$"),
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
     db: Session = Depends(get_db),
@@ -556,15 +556,15 @@ def update_order_status(
 
 @router.get("/order-recommendations")
 def list_order_recommendations(
-    species: Optional[str] = Query(None, pattern="^(dog|cat)$"),
-    category: Optional[str] = Query(None),
+    species: str | None = Query(None, pattern="^(dog|cat)$"),
+    category: str | None = Query(None),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=1000),
     db: Session = Depends(get_db),
 ):
     """
     List cached recommendation profiles.
-    
+
     Useful for understanding what combinations have been recommended
     and how often they're being reused.
     """
@@ -572,12 +572,12 @@ def list_order_recommendations(
 
     if species:
         query = query.filter(OrderRecommendation.species == species)
-    
+
     if category:
         query = query.filter(OrderRecommendation.category == category)
 
     recommendations = query.offset(skip).limit(limit).all()
-    
+
     results = []
     for rec in recommendations:
         results.append({
@@ -599,13 +599,13 @@ def list_order_recommendations(
 @router.get("/pet-preferences/{pet_id}")
 def list_pet_preferences(
     pet_id: UUID,
-    category: Optional[str] = Query(None),
-    preference_type: Optional[str] = Query(None),
+    category: str | None = Query(None),
+    preference_type: str | None = Query(None),
     db: Session = Depends(get_db),
 ):
     """
     List all preferences (ordered items) for a specific pet.
-    
+
     Shows both items from recommendation lists and custom items.
     Helps understand pet owner ordering patterns.
     """
@@ -620,12 +620,12 @@ def list_pet_preferences(
 
     if category:
         query = query.filter(PetPreference.category == category)
-    
+
     if preference_type:
         query = query.filter(PetPreference.preference_type == preference_type)
 
     preferences = query.all()
-    
+
     results = []
     for pref in preferences:
         results.append({
@@ -653,12 +653,12 @@ def preferences_stats(
 ):
     """
     Get statistics about preferences across all users.
-    
+
     Shows popular items, most used categories, etc.
     """
     total_preferences = db.query(func.count(PetPreference.id)).scalar() or 0
     total_recommendations = db.query(func.count(OrderRecommendation.id)).scalar() or 0
-    
+
     # Most used items
     most_used_items = (
         db.query(
@@ -671,7 +671,7 @@ def preferences_stats(
         .limit(20)
         .all()
     )
-    
+
     # Most popular recommendations
     most_used_recs = (
         db.query(
@@ -684,7 +684,7 @@ def preferences_stats(
         .limit(20)
         .all()
     )
-    
+
     # Preference type breakdown
     pref_type_breakdown = (
         db.query(
@@ -694,7 +694,7 @@ def preferences_stats(
         .group_by(PetPreference.preference_type)
         .all()
     )
-    
+
     return {
         "total_preferences": total_preferences,
         "total_recommendations": total_recommendations,
@@ -830,6 +830,7 @@ async def trigger_gcp_sync(
         {"status": "started", "dry_run": bool, "limit": int}
     """
     import asyncio
+
     from app.services.storage_service import is_gcp_available
 
     if not is_gcp_available():

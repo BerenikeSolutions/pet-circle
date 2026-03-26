@@ -30,32 +30,32 @@ Rules:
     - OpenAI API key from environment (settings.OPENAI_API_KEY) — never hardcoded.
 """
 
-import asyncio
 import json
 import logging
 import os
 import re
 from datetime import datetime
 from uuid import UUID
+
 from sqlalchemy.orm import Session
-from app.models.document import Document
-from app.models.pet import Pet
-from app.models.preventive_master import PreventiveMaster
-from app.models.diagnostic_test_result import DiagnosticTestResult
+
+from app.config import settings
+from app.core.constants import (
+    DOCUMENT_CATEGORIES,
+    OPENAI_EXTRACTION_MAX_TOKENS,
+    OPENAI_EXTRACTION_MODEL,
+    OPENAI_EXTRACTION_TEMPERATURE,
+)
 from app.models.condition import Condition
 from app.models.condition_medication import ConditionMedication
 from app.models.condition_monitoring import ConditionMonitoring
 from app.models.contact import Contact
-from app.core.constants import (
-    OPENAI_EXTRACTION_MODEL,
-    OPENAI_EXTRACTION_TEMPERATURE,
-    OPENAI_EXTRACTION_MAX_TOKENS,
-    DOCUMENT_CATEGORIES,
-)
-from app.config import settings
+from app.models.diagnostic_test_result import DiagnosticTestResult
+from app.models.document import Document
+from app.models.pet import Pet
+from app.models.preventive_master import PreventiveMaster
+from app.utils.date_utils import format_date_for_db, parse_date
 from app.utils.retry import retry_openai_call
-from app.utils.date_utils import parse_date, format_date_for_db
-
 
 logger = logging.getLogger(__name__)
 

@@ -13,10 +13,12 @@ Constraints:
 """
 
 import uuid
-from datetime import datetime, date
-from sqlalchemy import Column, String, Integer, Date, DateTime, ForeignKey, UniqueConstraint, Index
+from datetime import datetime
+
+from sqlalchemy import Column, Date, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
+
 from app.database import Base
 
 

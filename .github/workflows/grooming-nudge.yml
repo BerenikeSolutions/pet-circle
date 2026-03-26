@@ -20,7 +20,7 @@ jobs:
       - name: Trigger grooming nudge check
         run: |
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X POST "${{ vars.BACKEND_URL }}/internal/run-grooming-nudges" \
+            -X POST "${{ secrets.PRODUCTION_API_URL }}/internal/run-grooming-nudges" \
             -H "X-ADMIN-KEY: ${{ secrets.ADMIN_SECRET_KEY }}" \
             -H "Content-Type: application/json" \
             --max-time 30)

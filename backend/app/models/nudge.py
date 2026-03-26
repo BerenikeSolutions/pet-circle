@@ -15,9 +15,11 @@ Constraints:
 
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Boolean, Text, DateTime, Date, ForeignKey
+
+from sqlalchemy import Boolean, Column, Date, DateTime, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
+
 from app.database import Base
 
 

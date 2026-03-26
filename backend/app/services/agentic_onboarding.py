@@ -35,7 +35,7 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
@@ -46,9 +46,9 @@ from app.core.encryption import encrypt_field
 from app.models.agent_onboarding_session import AgentOnboardingSession
 from app.models.user import User
 from app.services.onboarding import (
-    _get_openai_onboarding_client,
     _ai_check_weight,
     _ai_identify_pet_from_photo,
+    _get_openai_onboarding_client,
     generate_dashboard_token,
     seed_preventive_records_for_pet,
 )
@@ -124,7 +124,7 @@ def is_openai_available() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# System prompt 
+# System prompt
 # ---------------------------------------------------------------------------
 
 # Base prompt text — never injected alone. Always use _build_system_prompt().
@@ -828,8 +828,8 @@ async def _preprocess_pet_photo(
 
     Returns a context string injected into the LLM user turn.
     """
-    from app.services.whatsapp_sender import download_whatsapp_media
     from app.services.document_upload import upload_to_supabase
+    from app.services.whatsapp_sender import download_whatsapp_media
 
     media_id = message_data.get("media_id")
     if not media_id:
@@ -1024,7 +1024,7 @@ def _summarise_extraction_for_onboarding(raw_json: str) -> dict:
             name = (item.get("item_name") or item.get("name") or "").lower()
             date_str = item.get("date") or item.get("last_done_date") or ""
             medicine = item.get("medicine_name") or item.get("product") or ""
-            category = (item.get("category") or item.get("document_category") or "").lower()
+            (item.get("category") or item.get("document_category") or "").lower()
 
             label = item.get("item_name") or item.get("name") or ""
             entry = f"{label} ({date_str})" if date_str else label
@@ -1171,10 +1171,11 @@ def _update_preventive_records_from_health(
         pet:    The newly created Pet instance.
         health: collected_data["health"] dict with string values.
     """
+    from datetime import timedelta
+
     from app.models.preventive_master import PreventiveMaster
     from app.models.preventive_record import PreventiveRecord
     from app.utils.date_utils import parse_date
-    from datetime import timedelta
 
     if not health:
         return
@@ -1311,7 +1312,6 @@ def _build_og_image_url(dashboard_token: str) -> str | None:
 
     Returns None if FRONTEND_URL is not set in settings.
     """
-    from app.config import settings
     frontend = getattr(settings, "FRONTEND_URL", "") or ""
     if not frontend or not dashboard_token:
         return None
@@ -1384,7 +1384,7 @@ async def _finalize_agentic_onboarding(
             session.is_complete = True
             cd["onboarding_complete"] = True
             if not user.onboarding_completed_at:
-                user.onboarding_completed_at = datetime.now(timezone.utc)
+                user.onboarding_completed_at = datetime.now(UTC)
             db.commit()
             logger.warning(
                 "Agentic onboarding: user %s already at max pets (%d)", str(user.id), MAX_PETS_PER_USER
@@ -1529,8 +1529,8 @@ async def _finalize_agentic_onboarding(
         # the reminder schedule was set up — same checklist line as deterministic flow.
         reminders_count = 0
         try:
-            from app.models.reminder import Reminder
             from app.models.preventive_record import PreventiveRecord
+            from app.models.reminder import Reminder
             reminders_count = (
                 db.query(Reminder)
                 .join(PreventiveRecord, Reminder.preventive_record_id == PreventiveRecord.id)
@@ -1546,7 +1546,7 @@ async def _finalize_agentic_onboarding(
 
         # --- Transition to awaiting_documents ---
         user.onboarding_state = "awaiting_documents"
-        user.doc_upload_deadline = datetime.now(timezone.utc) + timedelta(
+        user.doc_upload_deadline = datetime.now(UTC) + timedelta(
             seconds=DOC_UPLOAD_WINDOW_SECONDS
         )
 
@@ -1555,7 +1555,7 @@ async def _finalize_agentic_onboarding(
 
         # Record when onboarding completed for nudge O+N schedule (OQ1).
         if not user.onboarding_completed_at:
-            user.onboarding_completed_at = datetime.now(timezone.utc)
+            user.onboarding_completed_at = datetime.now(UTC)
 
         db.commit()
 
@@ -2098,9 +2098,11 @@ async def run_grooming_nudges(db: Session) -> dict:
         Dict with keys: checked, nudges_sent, errors.
     """
     from datetime import timedelta
+
     from sqlalchemy import text as sa_text
-    from app.models.user import User
+
     from app.core.encryption import decrypt_field
+    from app.models.user import User
     from app.services.whatsapp_sender import send_text_message
 
     NUDGE_AFTER_MINUTES = 30

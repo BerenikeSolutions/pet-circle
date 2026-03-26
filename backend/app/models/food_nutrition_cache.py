@@ -9,7 +9,7 @@ Cache staleness: 365 days.
 """
 
 from sqlalchemy import Column, String, UniqueConstraint
-from sqlalchemy.dialects.postgresql import UUID, JSON
+from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.sql import func
 from sqlalchemy.types import TIMESTAMP
 

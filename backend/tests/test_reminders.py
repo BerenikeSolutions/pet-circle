@@ -11,36 +11,36 @@ Tests the complete reminder pipeline:
 Uses production Supabase DB with isolated test data that is cleaned up.
 """
 
+import logging
 import os
 import sys
 import uuid
-import logging
 
 # Set test environment before any app imports
 os.environ["APP_ENV"] = "test"
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 from datetime import date, timedelta
-from app.database import SessionLocal
-from app.models.user import User
-from app.models.pet import Pet
-from app.models.preventive_record import PreventiveRecord
-from app.models.preventive_master import PreventiveMaster
-from app.models.reminder import Reminder
-from app.services.reminder_engine import run_reminder_engine
-from app.services.reminder_response import (
-    handle_reminder_response,
-    apply_reschedule_date,
-)
-from app.services.preventive_calculator import compute_next_due_date, compute_status
+
 from app.core.constants import (
+    REMINDER_CANCEL,
     REMINDER_DONE,
+    REMINDER_RESCHEDULE,
     REMINDER_SNOOZE_7,
     REMINDER_SNOOZE_DAYS,
-    REMINDER_RESCHEDULE,
-    REMINDER_CANCEL,
 )
 from app.core.encryption import encrypt_field, hash_field
+from app.database import SessionLocal
+from app.models.pet import Pet
+from app.models.preventive_master import PreventiveMaster
+from app.models.preventive_record import PreventiveRecord
+from app.models.reminder import Reminder
+from app.models.user import User
+from app.services.reminder_engine import run_reminder_engine
+from app.services.reminder_response import (
+    apply_reschedule_date,
+    handle_reminder_response,
+)
 from app.utils.date_utils import get_today_ist
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -211,7 +211,7 @@ def seed_test_reminders(db, pet, records):
     Bypasses the engine for records whose due dates don't trigger any stage today.
     Returns a dict keyed by label.
     """
-    today = get_today_ist()
+    get_today_ist()
     seeded = {}
 
     label_to_stage = {

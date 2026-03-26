@@ -12,13 +12,14 @@ Entry points:
 
 import logging
 from datetime import datetime, timedelta
+
 from sqlalchemy.orm import Session
 
+from app.core.constants import NUDGE_TRIGGER_INACTIVITY
 from app.models.nudge import Nudge
 from app.models.nudge_engagement import NudgeEngagement
 from app.models.pet import Pet
 from app.models.user import User
-from app.core.constants import NUDGE_TRIGGER_INACTIVITY
 from app.services.nudge_config_service import get_nudge_config_int
 
 logger = logging.getLogger(__name__)

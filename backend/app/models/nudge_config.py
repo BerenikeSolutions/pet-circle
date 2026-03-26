@@ -8,8 +8,10 @@ rather than hardcoded constants.
 
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Text, DateTime
+
+from sqlalchemy import Column, DateTime, String, Text
 from sqlalchemy.dialects.postgresql import UUID
+
 from app.database import Base
 
 

@@ -11,8 +11,8 @@ Then:
     cd backend && python -m pytest tests/test_dashboard_endpoints.py -v
 """
 
-import sys
 import os
+
 import httpx
 import pytest
 

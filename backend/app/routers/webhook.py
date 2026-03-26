@@ -19,16 +19,17 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict
-from fastapi import APIRouter, Request, HTTPException, Depends, Query
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
+
 from app.config import settings
-from app.database import get_db
-from app.core.security import verify_webhook_signature
 from app.core.log_sanitizer import mask_phone, sanitize_payload
 from app.core.rate_limiter import rate_limiter
+from app.core.security import verify_webhook_signature
+from app.database import get_db
 from app.models.message_log import MessageLog
-
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,7 @@ async def _process_message_background(message_data: dict) -> None:
         from app.services.message_router import route_message
         # 120s timeout — generous since we're no longer blocking the webhook.
         await asyncio.wait_for(route_message(bg_db, message_data), timeout=120)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.error(
             "Background message routing timed out for %s",
             mask_phone(from_number),

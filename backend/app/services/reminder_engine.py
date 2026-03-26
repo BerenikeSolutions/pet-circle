@@ -31,41 +31,45 @@ Routes: /internal/run-reminder-engine (full) / /internal/detect-ignores (detect 
 """
 
 import asyncio
-import concurrent.futures
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from typing import Optional
 from uuid import UUID
 
-from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
-from app.models.reminder import Reminder
-from app.models.preventive_record import PreventiveRecord
-from app.models.preventive_master import PreventiveMaster
-from app.models.custom_preventive_item import CustomPreventiveItem
-from app.models.pet import Pet
-from app.models.user import User
-from app.models.message_log import MessageLog
-from app.models.diet_item import DietItem
-from app.models.condition import Condition
-from app.models.condition_medication import ConditionMedication
-from app.models.condition_monitoring import ConditionMonitoring
-from app.models.hygiene_preference import HygienePreference
-from app.models.breed_consequence_library import BreedConsequenceLibrary
 from app.core.constants import (
-    STAGE_T7, STAGE_DUE, STAGE_D3, STAGE_OVERDUE,
-    STAGE_PRIORITY_ORDER,
-    REMINDER_IGNORE_THRESHOLD, REMINDER_MONTHLY_INTERVAL_DAYS,
-    REMINDER_MIN_GAP_DAYS,
-    SNOOZE_DAYS_VACCINE, SNOOZE_DAYS_DEWORMING, SNOOZE_DAYS_FLEA,
-    SNOOZE_DAYS_FOOD, SNOOZE_DAYS_SUPPLEMENT, SNOOZE_DAYS_MEDICINE,
-    SNOOZE_DAYS_VET_FOLLOWUP, SNOOZE_DAYS_HYGIENE,
+    REMINDER_IGNORE_THRESHOLD,
+    REMINDER_MONTHLY_INTERVAL_DAYS,
+    SNOOZE_DAYS_DEWORMING,
+    SNOOZE_DAYS_FLEA,
+    SNOOZE_DAYS_FOOD,
+    SNOOZE_DAYS_HYGIENE,
+    SNOOZE_DAYS_MEDICINE,
+    SNOOZE_DAYS_SUPPLEMENT,
+    SNOOZE_DAYS_VACCINE,
+    SNOOZE_DAYS_VET_FOLLOWUP,
+    STAGE_D3,
+    STAGE_DUE,
+    STAGE_OVERDUE,
+    STAGE_T7,
 )
 from app.core.encryption import decrypt_field
 from app.core.log_sanitizer import mask_phone
-from app.utils.date_utils import get_today_ist, IST, format_date_for_user
+from app.models.breed_consequence_library import BreedConsequenceLibrary
+from app.models.condition import Condition
+from app.models.condition_medication import ConditionMedication
+from app.models.condition_monitoring import ConditionMonitoring
+from app.models.diet_item import DietItem
+from app.models.hygiene_preference import HygienePreference
+from app.models.message_log import MessageLog
+from app.models.pet import Pet
+from app.models.preventive_master import PreventiveMaster
+from app.models.preventive_record import PreventiveRecord
+from app.models.reminder import Reminder
+from app.models.user import User
+from app.utils.date_utils import IST, format_date_for_user, get_today_ist
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +107,7 @@ class ReminderCandidate:
                              # condition_monitoring | hygiene_preference
     source_id: UUID          # ID of the source row
     # For preventive_record sources only — used for UNIQUE constraint dedup
-    preventive_record_id: Optional[UUID] = None
+    preventive_record_id: UUID | None = None
     # Snooze duration for this category
     snooze_days: int = 7
 
@@ -611,11 +615,10 @@ def _process_candidate(db: Session, cand: ReminderCandidate, today: date) -> tup
     Create a Reminder row and send the WhatsApp template message.
     Returns (created: bool, sent: bool).
     """
-    from app.services.whatsapp_sender import send_template_message
     from app.config import settings
+    from app.services.whatsapp_sender import send_template_message
 
     plaintext_mobile = decrypt_field(cand.user.mobile_number)
-    parent_name = cand.user.full_name or "Pet Parent"
     pet_name = cand.pet.name
 
     # --- Insert Reminder row ---
@@ -695,7 +698,7 @@ def _process_candidate(db: Session, cand: ReminderCandidate, today: date) -> tup
         return True, False
 
 
-def _build_template_params(cand: ReminderCandidate, settings, db: Session) -> tuple[Optional[str], list[str]]:
+def _build_template_params(cand: ReminderCandidate, settings, db: Session) -> tuple[str | None, list[str]]:
     """
     Select the correct WA template and build the parameter list for the given stage.
 
@@ -748,7 +751,7 @@ def _build_template_params(cand: ReminderCandidate, settings, db: Session) -> tu
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _determine_stage(db: Session, record_id: UUID, due_date: date, today: date,
-                     source_type: str = "preventive_record") -> Optional[str]:
+                     source_type: str = "preventive_record") -> str | None:
     """
     Determine which stage fires today for a preventive_record-based candidate.
     Returns None if no stage fires today.
@@ -758,7 +761,7 @@ def _determine_stage(db: Session, record_id: UUID, due_date: date, today: date,
 
 
 def _determine_stage_simple(db: Session, source_id: UUID, due_date: date, today: date,
-                             source_type: str) -> Optional[str]:
+                             source_type: str) -> str | None:
     """
     Generic stage determination for any source type.
     Checks existing reminder rows to decide which stage is eligible.
@@ -817,7 +820,7 @@ def _determine_stage_simple(db: Session, source_id: UUID, due_date: date, today:
     return None
 
 
-def _calculate_reorder_date(item: DietItem) -> Optional[date]:
+def _calculate_reorder_date(item: DietItem) -> date | None:
     """Calculate the next reorder date for a food or supplement item."""
     if item.last_purchase_date is None:
         return None
@@ -834,7 +837,7 @@ def _calculate_reorder_date(item: DietItem) -> Optional[date]:
     return None
 
 
-def _get_breed_consequence(db: Session, breed: Optional[str], category: str) -> str:
+def _get_breed_consequence(db: Session, breed: str | None, category: str) -> str:
     """Look up breed-specific consequence text for the overdue insight message."""
     # Normalize category to match breed_consequence_library
     cat_map = {
@@ -910,7 +913,7 @@ def _snooze_for_category(category: str) -> int:
     return mapping.get(category, 7)
 
 
-def _parse_hygiene_date(date_str: str) -> Optional[date]:
+def _parse_hygiene_date(date_str: str) -> date | None:
     """Parse a hygiene last_done date string (DD/MM/YYYY) to a date object."""
     if not date_str:
         return None
@@ -922,7 +925,7 @@ def _parse_hygiene_date(date_str: str) -> Optional[date]:
     return None
 
 
-def _freq_to_days(freq: int, unit: str) -> Optional[int]:
+def _freq_to_days(freq: int, unit: str) -> int | None:
     """Convert frequency + unit to total days."""
     if not freq or not unit:
         return None
@@ -933,7 +936,7 @@ def _freq_to_days(freq: int, unit: str) -> Optional[int]:
     return freq * days_per_unit
 
 
-def _hygiene_category_label(item_id: str, name: Optional[str]) -> str:
+def _hygiene_category_label(item_id: str, name: str | None) -> str:
     """Return a display label for a hygiene item."""
     label_map = {
         "bath-nail": "Bath, Brush & Nail Trim",

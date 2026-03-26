@@ -11,12 +11,13 @@ Security model:
 All security checks are structural — they run before any business logic.
 """
 
-import hmac
 import hashlib
+import hmac
 import logging
-from fastapi import Request, HTTPException, Header
-from app.config import settings
 
+from fastapi import Header, HTTPException
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 

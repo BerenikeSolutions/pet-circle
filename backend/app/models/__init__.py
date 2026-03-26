@@ -6,43 +6,43 @@ SQLAlchemy's declarative base. This is required for relationship
 resolution and for alembic/migration tooling to discover all tables.
 """
 
-from app.models.user import User
-from app.models.pet import Pet
-from app.models.preventive_master import PreventiveMaster
-from app.models.preventive_record import PreventiveRecord
-from app.models.reminder import Reminder
-from app.models.document import Document
-from app.models.message_log import MessageLog
-from app.models.dashboard_token import DashboardToken
-from app.models.conflict_flag import ConflictFlag
-from app.models.shown_fun_fact import ShownFunFact
-from app.models.diagnostic_test_result import DiagnosticTestResult
-from app.models.order import Order
-from app.models.order_recommendation import OrderRecommendation
-from app.models.pet_preference import PetPreference
+from app.models.agent_onboarding_session import AgentOnboardingSession
+from app.models.agent_order_session import AgentOrderSession
+from app.models.breed_consequence_library import BreedConsequenceLibrary
+from app.models.cart_item import CartItem
 from app.models.condition import Condition
 from app.models.condition_medication import ConditionMedication
 from app.models.condition_monitoring import ConditionMonitoring
+from app.models.conflict_flag import ConflictFlag
 from app.models.contact import Contact
-from app.models.weight_history import WeightHistory
+from app.models.custom_preventive_item import CustomPreventiveItem
+from app.models.dashboard_token import DashboardToken
+from app.models.dashboard_visit import DashboardVisit
+from app.models.diagnostic_test_result import DiagnosticTestResult
 from app.models.diet_item import DietItem
+from app.models.document import Document
+from app.models.food_nutrition_cache import FoodNutritionCache
 from app.models.hygiene_preference import HygienePreference
-from app.models.product_catalog import ProductCatalog
+from app.models.hygiene_tip_cache import HygieneTipCache
+from app.models.ideal_weight_cache import IdealWeightCache
+from app.models.message_log import MessageLog
 from app.models.nudge import Nudge
 from app.models.nudge_config import NudgeConfig
 from app.models.nudge_delivery_log import NudgeDeliveryLog
 from app.models.nudge_engagement import NudgeEngagement
-from app.models.cart_item import CartItem
-from app.models.ideal_weight_cache import IdealWeightCache
-from app.models.nutrition_target_cache import NutritionTargetCache
-from app.models.food_nutrition_cache import FoodNutritionCache
-from app.models.hygiene_tip_cache import HygieneTipCache
-from app.models.custom_preventive_item import CustomPreventiveItem
 from app.models.nudge_message_library import NudgeMessageLibrary
-from app.models.breed_consequence_library import BreedConsequenceLibrary
-from app.models.dashboard_visit import DashboardVisit
-from app.models.agent_onboarding_session import AgentOnboardingSession
-from app.models.agent_order_session import AgentOrderSession
+from app.models.nutrition_target_cache import NutritionTargetCache
+from app.models.order import Order
+from app.models.order_recommendation import OrderRecommendation
+from app.models.pet import Pet
+from app.models.pet_preference import PetPreference
+from app.models.preventive_master import PreventiveMaster
+from app.models.preventive_record import PreventiveRecord
+from app.models.product_catalog import ProductCatalog
+from app.models.reminder import Reminder
+from app.models.shown_fun_fact import ShownFunFact
+from app.models.user import User
+from app.models.weight_history import WeightHistory
 
 __all__ = [
     "User",

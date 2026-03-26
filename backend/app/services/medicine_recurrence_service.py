@@ -11,7 +11,7 @@ which is then used as custom_recurrence_days for the preventive record.
 
 import json
 import logging
-import asyncio
+
 from app.config import settings
 
 logger = logging.getLogger(__name__)

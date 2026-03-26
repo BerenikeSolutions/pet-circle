@@ -22,10 +22,23 @@ Ignore tracking:
 """
 
 import uuid
-from datetime import datetime, date
-from sqlalchemy import Column, String, Date, DateTime, Boolean, Integer, Text, ForeignKey, UniqueConstraint, Index
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from datetime import datetime
+
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
+
 from app.database import Base
 
 

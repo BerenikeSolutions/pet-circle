@@ -24,7 +24,7 @@ sensible default payload is returned so the dashboard never crashes.
 
 import json
 import logging
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import text

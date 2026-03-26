@@ -50,31 +50,31 @@ State transitions:
 import logging
 from datetime import date, timedelta
 from uuid import UUID
+
 from sqlalchemy.orm import Session
-from app.models.reminder import Reminder
-from app.models.preventive_record import PreventiveRecord
-from app.models.preventive_master import PreventiveMaster
-from app.models.diet_item import DietItem
+
+from app.core.constants import (
+    REMINDER_ALREADY_DONE,
+    REMINDER_CANCEL,
+    REMINDER_DONE,
+    REMINDER_ORDER_NOW,
+    REMINDER_PAYLOADS,
+    REMINDER_RESCHEDULE,
+    REMINDER_SCHEDULE,
+    REMINDER_SNOOZE_7,
+    REMINDER_STILL_PENDING,
+)
 from app.models.condition_medication import ConditionMedication
 from app.models.condition_monitoring import ConditionMonitoring
-from app.core.constants import (
-    REMINDER_DONE,
-    REMINDER_ALREADY_DONE,
-    REMINDER_SNOOZE_7,
-    REMINDER_SNOOZE_DAYS,
-    REMINDER_ORDER_NOW,
-    REMINDER_STILL_PENDING,
-    REMINDER_SCHEDULE,
-    REMINDER_RESCHEDULE,
-    REMINDER_CANCEL,
-    REMINDER_PAYLOADS,
-)
+from app.models.diet_item import DietItem
+from app.models.preventive_master import PreventiveMaster
+from app.models.preventive_record import PreventiveRecord
+from app.models.reminder import Reminder
 from app.services.preventive_calculator import (
     compute_next_due_date,
     compute_status,
 )
-from app.utils.date_utils import get_today_ist, format_date_for_user
-
+from app.utils.date_utils import format_date_for_user, get_today_ist
 
 logger = logging.getLogger(__name__)
 
@@ -356,6 +356,7 @@ def _handle_still_pending(db: Session, reminder: Reminder) -> dict:
     Does NOT change reminder.status — it stays 'sent' for future follow-up.
     """
     from datetime import datetime
+
     from app.utils.date_utils import IST
     reminder.last_ignored_at = datetime.now(IST)
     # Don't increment ignore_count — user actively acknowledged it

@@ -10,10 +10,10 @@ No business logic lives here — only app bootstrapping.
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+
 from app.config import settings
 from app.core.constants import APP_API_TITLE
-from app.routers import webhook, admin, internal, dashboard
-
+from app.routers import admin, dashboard, internal, webhook
 
 # Application initialization.
 # Settings are validated at import time (app/config.py).

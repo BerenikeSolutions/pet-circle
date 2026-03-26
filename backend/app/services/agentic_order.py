@@ -26,12 +26,11 @@ IMPORTANT — JSONB mutation tracking:
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
-from app.config import settings
 from app.core.encryption import decrypt_field
 from app.models.agent_order_session import AgentOrderSession
 from app.models.order import Order
@@ -246,7 +245,6 @@ def _get_or_create_session(db: Session, user: User) -> AgentOrderSession:
     a draft Order row and sets user.active_order_id so the order is visible
     to admin tooling and external checks throughout the conversation.
     """
-    from datetime import timezone as _tz
 
     session = (
         db.query(AgentOrderSession)
@@ -259,7 +257,7 @@ def _get_or_create_session(db: Session, user: User) -> AgentOrderSession:
 
     # Expire sessions older than TTL so abandoned conversations don't persist.
     if session is not None:
-        cutoff = datetime.now(_tz.utc).replace(tzinfo=None)  # naive UTC
+        cutoff = datetime.now(UTC).replace(tzinfo=None)  # naive UTC
         created = session.created_at
         if created and hasattr(created, "tzinfo") and created.tzinfo:
             created = created.replace(tzinfo=None)  # normalise to naive
@@ -637,6 +635,7 @@ async def _dispatch_tool_call(
 
         try:
             from uuid import UUID as _UUID
+
             from app.services.recommendation_service import (
                 get_or_generate_recommendations,
                 get_pet_top_preferences,

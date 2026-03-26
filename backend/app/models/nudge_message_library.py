@@ -29,8 +29,10 @@ Template mapping (scheduler fills pet_name from DB at send time):
 
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Integer, Text, UniqueConstraint
+
+from sqlalchemy import Column, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
+
 from app.database import Base
 
 

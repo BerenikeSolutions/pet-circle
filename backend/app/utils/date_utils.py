@@ -128,6 +128,7 @@ async def parse_date_with_ai(raw_date: str) -> date:
         ValueError: If AI also cannot parse the date.
     """
     from openai import AsyncOpenAI
+
     from app.config import settings
     from app.core.constants import OPENAI_QUERY_MODEL
 

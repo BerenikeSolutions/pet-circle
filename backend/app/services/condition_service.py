@@ -16,15 +16,16 @@ Provides condition management logic:
 """
 
 import logging
-from datetime import date, timedelta
+from datetime import date
 from uuid import UUID
+
 from sqlalchemy.orm import Session, selectinload
 
 from app.models.condition import Condition
 from app.models.condition_medication import ConditionMedication
 from app.models.condition_monitoring import ConditionMonitoring
-from app.models.preventive_record import PreventiveRecord
 from app.models.contact import Contact
+from app.models.preventive_record import PreventiveRecord
 
 logger = logging.getLogger(__name__)
 

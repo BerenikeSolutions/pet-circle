@@ -17,9 +17,11 @@ Constraints:
 
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey
+
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
+
 from app.database import Base
 
 
@@ -81,7 +83,7 @@ class User(Base):
     # the extraction summary once all docs finish processing.
     # Cleared to False by _send_extraction_summary() after the link is sent.
     dashboard_link_pending = Column(Boolean, default=False, nullable=False)
-    
+
     # Timestamp when the user completed onboarding (state reached 'complete').
     # Used by nudge_scheduler as O (Onboarding Day) to compute O+N nudge slots.
     # Nullable — None until onboarding finishes.

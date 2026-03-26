@@ -34,21 +34,21 @@ Note on pet photos:
 import logging
 from datetime import datetime
 from uuid import UUID
-from sqlalchemy.orm import Session
+
+import pytz
 from sqlalchemy import func
-from app.models.document import Document
-from app.models.pet import Pet
+from sqlalchemy.orm import Session
+
+from app.config import settings
 from app.core.constants import (
+    ALLOWED_MIME_TYPES,
     MAX_UPLOAD_BYTES,
     MAX_UPLOAD_MB,
     MAX_UPLOADS_PER_PET_PER_DAY,
-    ALLOWED_MIME_TYPES,
     STORAGE_PATH_TEMPLATE,
 )
-from app.config import settings
-import pytz
-from app.utils.date_utils import get_today_ist, IST
-
+from app.models.document import Document
+from app.utils.date_utils import IST
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ def check_daily_upload_limit(
     Raises:
         ValueError: If the daily upload limit has been reached.
     """
-    from datetime import datetime, timedelta
+    from datetime import timedelta
     # Compute IST day boundaries in UTC for accurate comparison.
     # created_at is stored as UTC, so we need UTC timestamps for IST midnight.
     now_ist = datetime.now(IST)

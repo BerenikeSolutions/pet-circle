@@ -46,10 +46,11 @@ Return structure:
 
 import logging
 from uuid import UUID
-from sqlalchemy.orm import Session, selectinload
-from app.models.preventive_record import PreventiveRecord
-from app.models.preventive_master import PreventiveMaster
 
+from sqlalchemy.orm import Session, selectinload
+
+from app.models.preventive_master import PreventiveMaster
+from app.models.preventive_record import PreventiveRecord
 
 logger = logging.getLogger(__name__)
 

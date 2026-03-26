@@ -23,56 +23,75 @@ Rules:
 """
 
 import logging
-from datetime import datetime, timedelta
-from typing import Optional, List
-from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Response, UploadFile, File
+
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from fastapi.responses import Response as FastAPIResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from app.database import get_db
+
 from app.core.rate_limiter import check_dashboard_rate_limit
-from app.services.dashboard_service import (
-    get_dashboard_data,
-    get_health_trends,
-    update_pet_weight,
-    update_preventive_date,
-    retry_document_extraction,
-    get_document_file_for_token,
-    get_pet_photo_for_token,
-    validate_dashboard_token,
-)
+from app.database import get_db
+from app.models.cart_item import CartItem
 from app.models.condition import Condition
 from app.models.condition_medication import ConditionMedication
 from app.models.condition_monitoring import ConditionMonitoring
 from app.models.contact import Contact
-from app.models.diet_item import DietItem
-from app.models.hygiene_preference import HygienePreference
 from app.models.nudge import Nudge
-from app.models.cart_item import CartItem
-from app.utils.date_utils import parse_date
-from app.services.weight_service import get_weight_history, add_weight_entry
-from app.services.diet_service import get_diet_items, add_diet_item, update_diet_item, delete_diet_item
-from app.services.hygiene_service import get_hygiene_preferences, upsert_hygiene_preference, update_hygiene_date, add_hygiene_item, delete_hygiene_item
-from app.services.nutrition_service import analyze_nutrition
-from app.services.nudge_engine import generate_nudges
-from app.services.ai_insights_service import get_or_generate_insight, get_or_generate_nutrition_importance, AI_INSIGHT_CACHE_DAYS
-from app.models.pet_ai_insight import PetAiInsight
-from app.services.cart_service import get_cart, toggle_cart_item, update_quantity, initialize_cart, place_order, add_to_cart, remove_from_cart, get_recommendations, get_last_bought, _format_last_bought_label
-from app.services.razorpay_service import create_razorpay_payment, verify_razorpay_payment
+from app.services.ai_insights_service import (
+    get_or_generate_insight,
+    get_or_generate_nutrition_importance,
+)
+from app.services.cart_service import (
+    _format_last_bought_label,
+    add_to_cart,
+    get_cart,
+    get_last_bought,
+    get_recommendations,
+    place_order,
+    remove_from_cart,
+    toggle_cart_item,
+    update_quantity,
+)
 from app.services.condition_service import (
-    get_condition_timeline,
+    add_condition_medication,
+    add_condition_monitoring,
+    delete_condition_medication,
+    delete_condition_monitoring,
     get_condition_recommendations,
+    get_condition_timeline,
     get_last_vet_visit,
     update_condition,
-    add_condition_medication,
     update_condition_medication,
-    delete_condition_medication,
-    add_condition_monitoring,
     update_condition_monitoring,
-    delete_condition_monitoring,
 )
-
+from app.services.dashboard_service import (
+    get_dashboard_data,
+    get_document_file_for_token,
+    get_health_trends,
+    get_pet_photo_for_token,
+    retry_document_extraction,
+    update_pet_weight,
+    update_preventive_date,
+    validate_dashboard_token,
+)
+from app.services.diet_service import (
+    add_diet_item,
+    delete_diet_item,
+    get_diet_items,
+    update_diet_item,
+)
+from app.services.hygiene_service import (
+    add_hygiene_item,
+    delete_hygiene_item,
+    get_hygiene_preferences,
+    update_hygiene_date,
+    upsert_hygiene_preference,
+)
+from app.services.nudge_engine import generate_nudges
+from app.services.nutrition_service import analyze_nutrition
+from app.services.razorpay_service import create_razorpay_payment, verify_razorpay_payment
+from app.services.weight_service import add_weight_entry, get_weight_history
+from app.utils.date_utils import parse_date
 
 logger = logging.getLogger(__name__)
 
@@ -449,11 +468,12 @@ async def dashboard_upload_document(
 ):
     """Upload a document from the dashboard and trigger GPT extraction."""
     import asyncio
+
     from app.services.document_upload import (
-        validate_file_upload,
-        check_daily_upload_limit,
         build_storage_path,
+        check_daily_upload_limit,
         create_document_record,
+        validate_file_upload,
     )
     from app.services.storage_service import upload_file as storage_upload
 
@@ -484,7 +504,7 @@ async def dashboard_upload_document(
     try:
         storage_path = build_storage_path(pet.user_id, pet.id, filename)
         _, backend = await storage_upload(file_content, storage_path, mime_type)
-    except RuntimeError as e:
+    except RuntimeError:
         raise HTTPException(status_code=503, detail="File upload failed. Please try again.")
 
     # Create DB record
@@ -543,7 +563,7 @@ def dashboard_health_trends(
     """
     try:
         return get_health_trends(db, token)
-    except ValueError as e:
+    except ValueError:
         raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
     except Exception as e:
         logger.error("Health trends error: %s", str(e), exc_info=True)
@@ -554,28 +574,28 @@ def dashboard_health_trends(
 
 class ConditionMedicationInput(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
-    dose: Optional[str] = Field(None, max_length=100)
-    frequency: Optional[str] = Field(None, max_length=100)
-    route: Optional[str] = Field(None, max_length=50)
-    refill_due_date: Optional[str] = None
-    price: Optional[str] = Field(None, max_length=20)
+    dose: str | None = Field(None, max_length=100)
+    frequency: str | None = Field(None, max_length=100)
+    route: str | None = Field(None, max_length=50)
+    refill_due_date: str | None = None
+    price: str | None = Field(None, max_length=20)
 
 class ConditionMonitoringInput(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
-    frequency: Optional[str] = Field(None, max_length=100)
-    next_due_date: Optional[str] = None
-    last_done_date: Optional[str] = None
+    frequency: str | None = Field(None, max_length=100)
+    next_due_date: str | None = None
+    last_done_date: str | None = None
 
 class AddConditionRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
-    diagnosis: Optional[str] = Field(None, max_length=500)
+    diagnosis: str | None = Field(None, max_length=500)
     condition_type: str = Field("chronic", pattern=r"^(chronic|episodic|resolved)$")
-    diagnosed_at: Optional[str] = None
-    notes: Optional[str] = Field(None, max_length=1000)
-    icon: Optional[str] = Field(None, max_length=10)
-    managed_by: Optional[str] = Field(None, max_length=200)
-    medications: List[ConditionMedicationInput] = []
-    monitoring: List[ConditionMonitoringInput] = []
+    diagnosed_at: str | None = None
+    notes: str | None = Field(None, max_length=1000)
+    icon: str | None = Field(None, max_length=10)
+    managed_by: str | None = Field(None, max_length=200)
+    medications: list[ConditionMedicationInput] = []
+    monitoring: list[ConditionMonitoringInput] = []
 
 
 @router.post("/{token}/conditions")
@@ -673,7 +693,7 @@ def dashboard_add_condition(
 
     except HTTPException:
         raise
-    except ValueError as e:
+    except ValueError:
         raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
     except Exception as e:
         logger.error("Add condition error: %s", str(e), exc_info=True)
@@ -711,13 +731,13 @@ def dashboard_delete_condition(
 
 
 class UpdateConditionRequest(BaseModel):
-    name: Optional[str] = Field(None, min_length=1, max_length=200)
-    diagnosis: Optional[str] = Field(None, max_length=500)
-    condition_type: Optional[str] = Field(None, pattern=r"^(chronic|episodic|resolved)$")
-    diagnosed_at: Optional[str] = None
-    notes: Optional[str] = Field(None, max_length=1000)
-    icon: Optional[str] = Field(None, max_length=10)
-    managed_by: Optional[str] = Field(None, max_length=200)
+    name: str | None = Field(None, min_length=1, max_length=200)
+    diagnosis: str | None = Field(None, max_length=500)
+    condition_type: str | None = Field(None, pattern=r"^(chronic|episodic|resolved)$")
+    diagnosed_at: str | None = None
+    notes: str | None = Field(None, max_length=1000)
+    icon: str | None = Field(None, max_length=10)
+    managed_by: str | None = Field(None, max_length=200)
 
 
 @router.put("/{token}/conditions/{condition_id}")
@@ -857,18 +877,18 @@ def dashboard_delete_monitoring(
 class AddContactRequest(BaseModel):
     role: str = Field("veterinarian", pattern=r"^(veterinarian|groomer|trainer|specialist|other)$")
     name: str = Field(..., min_length=1, max_length=200)
-    clinic_name: Optional[str] = Field(None, max_length=200)
-    phone: Optional[str] = Field(None, max_length=30)
-    email: Optional[str] = Field(None, max_length=200)
-    address: Optional[str] = Field(None, max_length=500)
+    clinic_name: str | None = Field(None, max_length=200)
+    phone: str | None = Field(None, max_length=30)
+    email: str | None = Field(None, max_length=200)
+    address: str | None = Field(None, max_length=500)
 
 class UpdateContactRequest(BaseModel):
-    role: Optional[str] = Field(None, pattern=r"^(veterinarian|groomer|trainer|specialist|other)$")
-    name: Optional[str] = Field(None, min_length=1, max_length=200)
-    clinic_name: Optional[str] = Field(None, max_length=200)
-    phone: Optional[str] = Field(None, max_length=30)
-    email: Optional[str] = Field(None, max_length=200)
-    address: Optional[str] = Field(None, max_length=500)
+    role: str | None = Field(None, pattern=r"^(veterinarian|groomer|trainer|specialist|other)$")
+    name: str | None = Field(None, min_length=1, max_length=200)
+    clinic_name: str | None = Field(None, max_length=200)
+    phone: str | None = Field(None, max_length=30)
+    email: str | None = Field(None, max_length=200)
+    address: str | None = Field(None, max_length=500)
 
 
 @router.post("/{token}/contacts")
@@ -991,7 +1011,7 @@ def dashboard_delete_contact(
 class WeightEntryRequest(BaseModel):
     weight: float = Field(..., gt=0, le=999.99)
     recorded_at: str = Field(..., min_length=1)
-    note: Optional[str] = Field(None, max_length=255)
+    note: str | None = Field(None, max_length=255)
 
 
 @router.get("/{token}/weight-history")
@@ -1047,8 +1067,8 @@ def dashboard_update_frequency(
     """Update custom recurrence for a preventive item (e.g., vaccine frequency)."""
     try:
         dt = validate_dashboard_token(db, token)
-        from app.models.preventive_record import PreventiveRecord
         from app.models.preventive_master import PreventiveMaster
+        from app.models.preventive_record import PreventiveRecord
 
         result = (
             db.query(PreventiveRecord, PreventiveMaster)
@@ -1068,7 +1088,8 @@ def dashboard_update_frequency(
 
         # Recalculate next_due_date if last_done_date exists
         if record.last_done_date:
-            from datetime import timedelta, date as date_type
+            from datetime import date as date_type
+            from datetime import timedelta
             record.next_due_date = record.last_done_date + timedelta(days=body.recurrence_days)
             today = date_type.today()
             if record.next_due_date < today:
@@ -1115,9 +1136,9 @@ def dashboard_update_medicine_name(
     """
     try:
         dt = validate_dashboard_token(db, token)
-        from app.models.preventive_record import PreventiveRecord
-        from app.models.preventive_master import PreventiveMaster
         from app.models.pet import Pet
+        from app.models.preventive_master import PreventiveMaster
+        from app.models.preventive_record import PreventiveRecord
 
         result = (
             db.query(PreventiveRecord, PreventiveMaster)
@@ -1153,7 +1174,8 @@ def dashboard_update_medicine_name(
 
         # Recalculate next_due_date if last_done_date exists
         if record.last_done_date:
-            from datetime import timedelta, date as date_type
+            from datetime import date as date_type
+            from datetime import timedelta
             record.next_due_date = record.last_done_date + timedelta(days=ai_days)
             today = date_type.today()
             if record.next_due_date < today:
@@ -1188,12 +1210,12 @@ def dashboard_update_medicine_name(
 class DietItemRequest(BaseModel):
     type: str = Field("packaged", pattern=r"^(packaged|homemade|supplement)$")
     label: str = Field(..., min_length=1, max_length=200)
-    detail: Optional[str] = Field(None, max_length=200)
-    icon: Optional[str] = Field(None, max_length=10)
+    detail: str | None = Field(None, max_length=200)
+    icon: str | None = Field(None, max_length=10)
 
 class DietItemUpdateRequest(BaseModel):
     label: str = Field(..., min_length=1, max_length=200)
-    detail: Optional[str] = Field(None, max_length=200)
+    detail: str | None = Field(None, max_length=200)
 
 
 @router.get("/{token}/diet-items")
@@ -1273,7 +1295,7 @@ class HygienePreferenceRequest(BaseModel):
     freq: int = Field(..., gt=0, le=365)
     unit: str = Field("month", pattern=r"^(day|week|month|year)$")
     reminder: bool = False
-    last_done: Optional[str] = None
+    last_done: str | None = None
 
 class HygieneAddRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
@@ -1707,8 +1729,8 @@ async def dashboard_apply_coupon(
 
 class PlaceOrderRequest(BaseModel):
     payment_method: str = Field(..., pattern=r"^(upi|card|netbanking|cod)$")
-    address: Optional[dict] = None
-    coupon: Optional[str] = None
+    address: dict | None = None
+    coupon: str | None = None
 
 
 @router.post("/{token}/place-order")
@@ -1730,8 +1752,8 @@ async def dashboard_place_order(
 
 class CreatePaymentRequest(BaseModel):
     payment_method: str = Field(..., pattern=r"^(upi|card|netbanking)$")
-    address: Optional[dict] = None
-    coupon: Optional[str] = None
+    address: dict | None = None
+    coupon: str | None = None
     coupon_discount_percent: int = Field(default=0, ge=0, le=100)
 
 
@@ -1812,10 +1834,10 @@ class AddToCartRequest(BaseModel):
     product_id: str = Field(..., min_length=1)
     name: str = Field(..., min_length=1, max_length=200)
     price: int = Field(..., ge=0)
-    icon: Optional[str] = None
-    sub: Optional[str] = None
-    tag: Optional[str] = None
-    tag_color: Optional[str] = None
+    icon: str | None = None
+    sub: str | None = None
+    tag: str | None = None
+    tag_color: str | None = None
 
 
 @router.post("/{token}/cart/add")

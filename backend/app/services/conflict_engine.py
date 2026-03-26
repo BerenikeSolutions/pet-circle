@@ -23,12 +23,13 @@ Rules:
 import logging
 from datetime import date
 from uuid import UUID
-from sqlalchemy.orm import Session
-from app.models.preventive_record import PreventiveRecord
-from app.models.conflict_flag import ConflictFlag
-from app.core.constants import CONFLICT_USE_NEW, CONFLICT_KEEP_EXISTING
-from app.services.preventive_calculator import calculate_and_update_record
 
+from sqlalchemy.orm import Session
+
+from app.core.constants import CONFLICT_KEEP_EXISTING, CONFLICT_USE_NEW
+from app.models.conflict_flag import ConflictFlag
+from app.models.preventive_record import PreventiveRecord
+from app.services.preventive_calculator import calculate_and_update_record
 
 logger = logging.getLogger(__name__)
 
