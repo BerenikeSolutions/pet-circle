@@ -1,13 +1,11 @@
 """
 PetCircle Phase 1 — Nudge Sender Service
 
-Engagement tracking, inactivity detection, and rate-limit helpers.
+Engagement tracking and inactivity detection.
 
-NOTE (Excel v5): WhatsApp nudge delivery is now handled by nudge_scheduler.py
-(Level 0/1/2 system). send_pending_nudges() and send_immediate_nudge() have
-been removed from this file. Use nudge_scheduler.run_nudge_scheduler(db) instead.
+WhatsApp nudge delivery (Excel v5) is handled by nudge_scheduler.py.
 
-Remaining entry points:
+Entry points:
     - check_inactivity_nudges(db): Detect 30d inactive users, create re-engagement nudges
     - record_nudge_engagement(db, user_id, pet_id): On user action (button tap)
 """
@@ -15,10 +13,8 @@ Remaining entry points:
 import logging
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
-from sqlalchemy import func
 
 from app.models.nudge import Nudge
-from app.models.nudge_delivery_log import NudgeDeliveryLog
 from app.models.nudge_engagement import NudgeEngagement
 from app.models.pet import Pet
 from app.models.user import User
@@ -26,19 +22,6 @@ from app.core.constants import NUDGE_TRIGGER_INACTIVITY
 from app.services.nudge_config_service import get_nudge_config_int
 
 logger = logging.getLogger(__name__)
-
-
-def send_pending_nudges(db: Session) -> dict:
-    """
-    DEPRECATED — WhatsApp nudge delivery is now handled by nudge_scheduler.py.
-
-    This stub is retained for backward-compat with any callers. Call
-    nudge_scheduler.run_nudge_scheduler(db) instead.
-    """
-    logger.warning(
-        "send_pending_nudges() is deprecated — use nudge_scheduler.run_nudge_scheduler(db) instead."
-    )
-    return {"sent": 0, "skipped": 0, "failed": 0}
 
 
 def check_inactivity_nudges(db: Session) -> dict:
@@ -142,81 +125,3 @@ def record_nudge_engagement(db: Session, user_id, pet_id):
     except Exception:
         db.rollback()
         logger.exception("Failed to record nudge engagement")
-
-
-async def send_immediate_nudge(db: Session, pet_id) -> dict:
-    """
-    DEPRECATED — WhatsApp nudge delivery is now handled by nudge_scheduler.py.
-
-    This stub is retained for backward-compat. The cron-driven scheduler
-    (nudge_scheduler.run_nudge_scheduler) replaces per-upload immediate sends.
-    """
-    logger.warning(
-        "send_immediate_nudge() is deprecated — nudge_scheduler handles WA delivery."
-    )
-    return {"sent": False, "reason": "deprecated"}
-
-
-# ──────────────────────────────────────────────────────────────────
-# Internal helpers
-# ──────────────────────────────────────────────────────────────────
-
-def _check_rate_limits(db: Session, user_id) -> bool:
-    """Check if user is within nudge rate limits (from nudge_config)."""
-    max_24h = get_nudge_config_int(db, "max_per_24h", 1)
-    max_7d = get_nudge_config_int(db, "max_per_7d", 3)
-
-    now = datetime.utcnow()
-
-    count_24h = (
-        db.query(func.count(NudgeDeliveryLog.id))
-        .filter(
-            NudgeDeliveryLog.user_id == user_id,
-            NudgeDeliveryLog.wa_status == "sent",
-            NudgeDeliveryLog.sent_at >= now - timedelta(hours=24),
-        )
-        .scalar() or 0
-    )
-
-    if count_24h >= max_24h:
-        return False
-
-    count_7d = (
-        db.query(func.count(NudgeDeliveryLog.id))
-        .filter(
-            NudgeDeliveryLog.user_id == user_id,
-            NudgeDeliveryLog.wa_status == "sent",
-            NudgeDeliveryLog.sent_at >= now - timedelta(days=7),
-        )
-        .scalar() or 0
-    )
-
-    if count_7d >= max_7d:
-        return False
-
-    return True
-
-
-def _update_engagement_sent(db: Session, user_id, pet_id):
-    """Increment total_nudges_sent counter in engagement table."""
-    engagement = (
-        db.query(NudgeEngagement)
-        .filter(NudgeEngagement.user_id == user_id, NudgeEngagement.pet_id == pet_id)
-        .first()
-    )
-
-    pause_days = get_nudge_config_int(db, "pause_days_if_inactive", 14)
-
-    if engagement:
-        engagement.total_nudges_sent = (engagement.total_nudges_sent or 0) + 1
-        # Auto-pause if no engagement and sent too many
-        if (engagement.total_acted_on or 0) == 0 and (engagement.total_nudges_sent or 0) >= 3:
-            engagement.paused_until = datetime.utcnow() + timedelta(days=pause_days)
-            logger.info("Pausing nudges for user %s pet %s for %d days", user_id, pet_id, pause_days)
-    else:
-        engagement = NudgeEngagement(
-            user_id=user_id,
-            pet_id=pet_id,
-            total_nudges_sent=1,
-        )
-        db.add(engagement)
