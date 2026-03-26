@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import type { DashboardData, WeightEntry, WeightHistoryResponse } from '@/lib/api';
+import type { DashboardData, PreventiveRecord, WeightEntry, WeightHistoryResponse } from '@/lib/api';
 import {
   updatePreventiveDate, updateWeight, updatePreventiveFrequency,
   getWeightHistory, addWeightEntry, updateMedicineName, addToCart,
@@ -66,13 +66,13 @@ function monStatus(nextDue: string | null, lastDone: string | null): string {
 //     component identity across re-renders (avoids unmount/remount on every
 //     parent state change which resets all internal useState values).
 interface VaxRowProps {
-  vax: { item_name: string; last_done_date: string | null; next_due_date: string | null; custom_recurrence_days: number | null; recurrence_days: number; [key: string]: unknown };
+  vax: PreventiveRecord;
   isOptional: boolean;
   onEditVax: (name: string) => void;
   onFreqChange: (name: string, months: number, unit: string) => void;
 }
 function VaxRow({ vax, isOptional, onEditVax, onFreqChange }: VaxRowProps) {
-  const status = getStatusForRecord(vax as unknown as Parameters<typeof getStatusForRecord>[0]);
+  const status = getStatusForRecord(vax);
   const initialFreq = daysToFreq(vax.custom_recurrence_days ?? vax.recurrence_days);
   const [reminderOn, setReminderOn] = useState(true);
   const [freq, setFreq] = useState(initialFreq.freq);
