@@ -13,7 +13,7 @@ services:
     region: singapore
     plan: free
     branch: dev
-    buildCommand: cd backend && pip install -r requirements.txt
+    buildCommand: cd backend && pip install --only-binary=PyMuPDF -r requirements.txt
     startCommand: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: APP_ENV
@@ -72,7 +72,7 @@ services:
     region: singapore
     plan: free
     branch: main
-    buildCommand: cd backend && pip install -r requirements.txt
+    buildCommand: cd backend && pip install --only-binary=PyMuPDF -r requirements.txt
     startCommand: cd backend && uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: APP_ENV
