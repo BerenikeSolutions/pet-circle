@@ -110,6 +110,10 @@ class ReminderCandidate:
     preventive_record_id: UUID | None = None
     # Snooze duration for this category
     snooze_days: int = 7
+    # Sub-type for food / supplement / chronic_medicine categories (v6).
+    # 'supply_led' — triggered by pack supply countdown (existing behaviour)
+    # 'scheduled'  — O+21 first-time prompt; selects a different WA template
+    sub_type: str = "supply_led"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -375,12 +379,15 @@ def _candidates_from_diet_items(db: Session, today: date) -> list[ReminderCandid
         snooze = SNOOZE_DAYS_FOOD if category == "food" else SNOOZE_DAYS_SUPPLEMENT
 
         reorder_date = _calculate_reorder_date(item)
+        sub_type = "supply_led"
+
         if reorder_date is None:
-            # No pack data — check O+21 fallback
+            # No pack data — check O+21 fallback (Scheduled variant)
             if item.reminder_order_at_o21 and user.onboarding_completed_at:
                 o21 = (user.onboarding_completed_at.date() + timedelta(days=21))
                 if today == o21:
                     reorder_date = today
+                    sub_type = "scheduled"
                 else:
                     continue
             else:
@@ -402,6 +409,7 @@ def _candidates_from_diet_items(db: Session, today: date) -> list[ReminderCandid
             source_type="diet_item",
             source_id=item.id,
             snooze_days=snooze,
+            sub_type=sub_type,
         ))
 
     return candidates
@@ -416,7 +424,6 @@ def _candidates_from_chronic_medicine(db: Session, today: date) -> list[Reminder
         .join(User, Pet.user_id == User.id)
         .filter(
             ConditionMedication.status == "active",
-            ConditionMedication.refill_due_date.isnot(None),
             Pet.is_deleted == False,
             User.is_deleted == False,
         )
@@ -426,7 +433,21 @@ def _candidates_from_chronic_medicine(db: Session, today: date) -> list[Reminder
     candidates: list[ReminderCandidate] = []
 
     for med, condition, pet, user in rows:
+        sub_type = "supply_led"
         due = med.refill_due_date
+
+        if due is None:
+            # No refill date — check O+21 scheduled variant for first-time prompt
+            if user.onboarding_completed_at:
+                o21 = (user.onboarding_completed_at.date() + timedelta(days=21))
+                if today == o21:
+                    due = today
+                    sub_type = "scheduled"
+                else:
+                    continue
+            else:
+                continue
+
         stage = _determine_stage_simple(db, med.id, due, today, source_type="condition_medication")
         if stage is None:
             continue
@@ -442,6 +463,7 @@ def _candidates_from_chronic_medicine(db: Session, today: date) -> list[Reminder
             source_type="condition_medication",
             source_id=med.id,
             snooze_days=SNOOZE_DAYS_MEDICINE,
+            sub_type=sub_type,
         ))
 
     return candidates
@@ -633,6 +655,7 @@ def _process_candidate(db: Session, cand: ReminderCandidate, today: date) -> tup
             source_type=cand.source_type,
             source_id=cand.source_id,
             item_desc=cand.item_desc,
+            sub_type=cand.sub_type if cand.sub_type != "supply_led" else None,
         )
         db.add(reminder)
         db.flush()
@@ -707,12 +730,30 @@ def _build_template_params(cand: ReminderCandidate, settings, db: Session) -> tu
         Due:      [parent_name, pet_name, item_desc]
         D+3:      [parent_name, pet_name, item_desc, original_due_str]
         Overdue:  [parent_name, pet_name, item_desc, days_overdue_str, consequence]
+
+    Scheduled variants (food / supplement / chronic_medicine, sub_type='scheduled'):
+        Due only: [parent_name, pet_name, item_desc]
+        — uses a separate template that prompts the user to check/reorder stock.
     """
     parent_name = cand.user.full_name or "Pet Parent"
     pet_name = cand.pet.name
     item_desc = cand.item_desc
     due_str = format_date_for_user(cand.due_date)
     today = get_today_ist()
+
+    # --- Scheduled variant (v6): first-time food / supplement / chronic prompt ---
+    # Only fires at the 'due' stage; uses a dedicated template per category.
+    if cand.sub_type == "scheduled" and cand.stage == STAGE_DUE:
+        _scheduled_template_map = {
+            "food":             getattr(settings, "WHATSAPP_TEMPLATE_REMINDER_FOOD_SCHEDULED", None),
+            "supplement":       getattr(settings, "WHATSAPP_TEMPLATE_REMINDER_SUPPLEMENT_SCHEDULED", None),
+            "chronic_medicine": getattr(settings, "WHATSAPP_TEMPLATE_REMINDER_CHRONIC_SCHEDULED", None),
+        }
+        template = _scheduled_template_map.get(cand.category)
+        if not template:
+            return None, []
+        # {{1}}=parent_name, {{2}}=pet_name, {{3}}=item_desc (all items list)
+        return template, [parent_name, pet_name, item_desc]
 
     if cand.stage == STAGE_T7:
         template = settings.WHATSAPP_TEMPLATE_REMINDER_T7

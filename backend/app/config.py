@@ -79,6 +79,19 @@ class Settings(BaseSettings):
     WHATSAPP_TEMPLATE_NUDGE_BREED: str | None = None
     WHATSAPP_TEMPLATE_NUDGE_BREED_DATA: str | None = None
 
+    # No-breed fallback templates (v6) — fired when pet has no breed set.
+    # Registered in Meta separately; body_text seeded via migration 032.
+    WHATSAPP_TEMPLATE_NUDGE_NO_BREED: str | None = None
+    WHATSAPP_TEMPLATE_NUDGE_ENGAGEMENT_NO_BREED: str | None = None
+    WHATSAPP_TEMPLATE_NUDGE_BREED_DATA_NO_BREED: str | None = None
+
+    # --- Scheduled Reminder Templates (v6) ---
+    # Fired at O+21 for first-time users with no supply data.
+    # Registered in Meta separately; body_text seeded via migration 033.
+    WHATSAPP_TEMPLATE_REMINDER_FOOD_SCHEDULED: str | None = None
+    WHATSAPP_TEMPLATE_REMINDER_SUPPLEMENT_SCHEDULED: str | None = None
+    WHATSAPP_TEMPLATE_REMINDER_CHRONIC_SCHEDULED: str | None = None
+
     # --- Admin ---
     # Secret key for admin API authentication via X-ADMIN-KEY header.
     ADMIN_SECRET_KEY: str

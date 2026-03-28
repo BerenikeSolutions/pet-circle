@@ -140,6 +140,14 @@ class Reminder(Base):
     # Exact text the user received on WhatsApp.
     message_body = Column(Text, nullable=True)
 
+    # --- Sub-Type (migration 033) ---
+    # Distinguishes supply-led vs scheduled reminder flows for food / supplement /
+    # chronic_medicine categories.
+    # 'supply_led' — triggered by pack supply countdown (pack_size ÷ daily_portion)
+    # 'scheduled'  — O+21 first-time prompt; repeats every 30 days
+    # NULL         — legacy reminder, treated identically to 'supply_led'
+    sub_type = Column(String(30), nullable=True)
+
     # Timestamp when the reminder was created.
     created_at = Column(DateTime, default=datetime.utcnow)
 

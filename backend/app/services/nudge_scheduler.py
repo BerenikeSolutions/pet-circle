@@ -359,41 +359,46 @@ def _build_l1_message(
     breed = (getattr(pet, "breed", None) or "").strip() or "All"
 
     if msg_type in ("engagement_only", "breed_only"):
-        # Try breed-specific row first, then 'All' fallback
-        lib_row = (
-            db.query(NudgeMessageLibrary)
-            .filter(
-                NudgeMessageLibrary.level == 1,
-                NudgeMessageLibrary.message_type == msg_type,
-                NudgeMessageLibrary.breed == breed,
-            )
-            .first()
-        )
-        if not lib_row:
+        # Fallback chain: specific breed → 'Generic' (no-breed rows) → 'All'
+        lib_row = None
+        for fallback_breed in [breed, "Generic", "All"]:
             lib_row = (
                 db.query(NudgeMessageLibrary)
                 .filter(
                     NudgeMessageLibrary.level == 1,
                     NudgeMessageLibrary.message_type == msg_type,
-                    NudgeMessageLibrary.breed == "All",
+                    NudgeMessageLibrary.breed == fallback_breed,
                 )
+                .order_by(NudgeMessageLibrary.seq.asc())
                 .first()
             )
+            if lib_row:
+                break
+
+        if not lib_row:
+            return None
+
+        var1 = (lib_row.template_var_1 or "").replace("{breed}", breed)
+        var2 = lib_row.template_var_2 or ""
 
         if msg_type == "engagement_only":
-            template_key = getattr(settings, "WHATSAPP_TEMPLATE_NUDGE_ENGAGEMENT", None)
-            if not template_key or not lib_row:
+            # Use no-breed template when the matched row is a Generic row
+            if lib_row.breed == "Generic":
+                template_key = getattr(settings, "WHATSAPP_TEMPLATE_NUDGE_ENGAGEMENT_NO_BREED", None)
+            else:
+                template_key = getattr(settings, "WHATSAPP_TEMPLATE_NUDGE_ENGAGEMENT", None)
+            if not template_key:
                 return None
-            var1 = (lib_row.template_var_1 or "").replace("{breed}", breed)
-            var2 = lib_row.template_var_2 or ""
             return (template_key, [var1, var2])
 
         if msg_type == "breed_only":
-            template_key = getattr(settings, "WHATSAPP_TEMPLATE_NUDGE_BREED", None)
-            if not template_key or not lib_row:
+            # Use no-breed template when the matched row is a Generic row
+            if lib_row.breed == "Generic":
+                template_key = getattr(settings, "WHATSAPP_TEMPLATE_NUDGE_NO_BREED", None)
+            else:
+                template_key = getattr(settings, "WHATSAPP_TEMPLATE_NUDGE_BREED", None)
+            if not template_key:
                 return None
-            var1 = (lib_row.template_var_1 or "").replace("{breed}", breed)
-            var2 = lib_row.template_var_2 or ""
             return (template_key, [var1, var2])
 
     # value_add: use PERSONAL template with pet_name + tip text from library
@@ -459,39 +464,47 @@ def _build_breed_data_message(
     Pick the top missing data category (from NUDGE_L2_DATA_PRIORITY) and
     build a Breed + Data nudge. Uses GPT topic detection (N9) to re-sort.
     """
-    breed = (getattr(pet, "breed", None) or "").strip() or "Other"
+    breed = (getattr(pet, "breed", None) or "").strip()
     category = _pick_data_category(db, pet, slot_idx)
 
-    lib_row = (
-        db.query(NudgeMessageLibrary)
-        .filter(
-            NudgeMessageLibrary.level == 2,
-            NudgeMessageLibrary.message_type == "breed_data",
-            NudgeMessageLibrary.breed == breed,
-            NudgeMessageLibrary.category == category,
-        )
-        .first()
-    )
-    if not lib_row:
-        # Fallback to 'Other'
+    # Fallback chain: specific breed → 'Generic' (no-breed rows) → 'All'
+    lib_row = None
+    fallback_breeds = [breed, "Generic", "All"] if breed else ["Generic", "All"]
+    for fallback_breed in fallback_breeds:
         lib_row = (
             db.query(NudgeMessageLibrary)
             .filter(
                 NudgeMessageLibrary.level == 2,
                 NudgeMessageLibrary.message_type == "breed_data",
-                NudgeMessageLibrary.breed == "Other",
+                NudgeMessageLibrary.breed == fallback_breed,
                 NudgeMessageLibrary.category == category,
             )
             .first()
         )
+        if lib_row:
+            break
 
-    template_key = getattr(settings, "WHATSAPP_TEMPLATE_NUDGE_BREED_DATA", None)
-    if not template_key or not lib_row:
+    if not lib_row:
         return None
 
     pet_name = pet.name or "your pet"
-    # Template: {{1}}=pet_name, {{2}}=insight, {{3}}=health_area, {{4}}=CTA, {{5}}=breed
-    # var_1 is the insight text; var_3 is category label; var_4 is CTA text.
+
+    # No-breed Generic rows use a different template with a different variable order:
+    #   {{1}}=insight, {{2}}=pet_name, {{3}}=care_category, {{4}}=CTA
+    if lib_row.breed == "Generic":
+        template_key = getattr(settings, "WHATSAPP_TEMPLATE_NUDGE_BREED_DATA_NO_BREED", None)
+        if not template_key:
+            return None
+        insight = lib_row.template_var_1 or ""
+        health_area = lib_row.template_var_3 or category
+        cta = lib_row.template_var_4 or ""
+        return (template_key, [insight, pet_name, health_area, cta])
+
+    # Breed-specific rows use the standard template:
+    #   {{1}}=pet_name, {{2}}=insight, {{3}}=health_area, {{4}}=CTA, {{5}}=breed
+    template_key = getattr(settings, "WHATSAPP_TEMPLATE_NUDGE_BREED_DATA", None)
+    if not template_key:
+        return None
     insight = (lib_row.template_var_1 or "").replace("{pet_name}", pet_name)
     health_area = lib_row.template_var_3 or category
     cta = lib_row.template_var_4 or ""

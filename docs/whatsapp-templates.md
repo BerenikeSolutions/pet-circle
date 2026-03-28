@@ -135,6 +135,102 @@ We're here to help you stay on track. Tap below to log it as done, snooze, or re
 
 ---
 
+## Group 1b — Scheduled Order Reminders (Category: Utility)
+
+These fire at **O+21** for first-time users who have no supply data (no pack size or last purchase date). They list all current items of that category and prompt the user to check stock and reorder. Repeat every 30 days until a supply-led reminder takes over.
+
+---
+
+### `petcircle_reminder_food_scheduled_v1`
+**Env var:** `WHATSAPP_TEMPLATE_REMINDER_FOOD_SCHEDULED`
+**Sent:** O+21 from onboarding (first-time food prompt), then every 30 days
+**sub_type:** `scheduled`
+
+**Body:**
+```
+Hi {{1}} 🐾 Time for a quick check — how's {{2}}'s food supply looking? If you're getting low, tap below to reorder and keep their routine on track.
+
+{{3}}
+
+PetCircle is here for you.
+```
+
+**Sample Variables:**
+| Variable | Example |
+|----------|---------|
+| `{{1}}` | Priya |
+| `{{2}}` | Bruno |
+| `{{3}}` | • Royal Canin Labrador Adult 3kg |
+
+**Quick Reply Buttons** (add in Meta template builder):
+| Button Title | Payload |
+|---|---|
+| Order Now | `REMINDER_ORDER_NOW` |
+| Already Ordered | `REMINDER_ALREADY_DONE` |
+| Remind Me Later | `REMINDER_SNOOZE_7` |
+
+---
+
+### `petcircle_reminder_supplement_scheduled_v1`
+**Env var:** `WHATSAPP_TEMPLATE_REMINDER_SUPPLEMENT_SCHEDULED`
+**Sent:** O+21 from onboarding (first-time supplement prompt), then every 30 days
+**sub_type:** `scheduled`
+
+**Body:**
+```
+Hi {{1}} 🐾 Quick reminder to check {{2}}'s supplement supply! Running low on any of them? Tap below to reorder and keep their daily routine on track.
+
+{{3}}
+
+PetCircle is here for you.
+```
+
+**Sample Variables:**
+| Variable | Example |
+|----------|---------|
+| `{{1}}` | Priya |
+| `{{2}}` | Bruno |
+| `{{3}}` | • Omega-3 Fish Oil • Joint Support Tablets |
+
+**Quick Reply Buttons** (add in Meta template builder):
+| Button Title | Payload |
+|---|---|
+| Order Now | `REMINDER_ORDER_NOW` |
+| Already Ordered | `REMINDER_ALREADY_DONE` |
+| Remind Me Later | `REMINDER_SNOOZE_7` |
+
+---
+
+### `petcircle_reminder_chronic_scheduled_v1`
+**Env var:** `WHATSAPP_TEMPLATE_REMINDER_CHRONIC_SCHEDULED`
+**Sent:** O+21 from onboarding (first-time chronic medicine prompt), then every 30 days
+**sub_type:** `scheduled`
+
+**Body:**
+```
+Hi {{1}} 🐾 Quick reminder to check {{2}}'s medicine supply! Running low on any of them? Tap below to reorder and keep their daily routine on track.
+
+{{3}}
+
+PetCircle is here for you.
+```
+
+**Sample Variables:**
+| Variable | Example |
+|----------|---------|
+| `{{1}}` | Priya |
+| `{{2}}` | Bruno |
+| `{{3}}` | • Thyronorm 0.1mg (Hypothyroidism) |
+
+**Quick Reply Buttons** (add in Meta template builder):
+| Button Title | Payload |
+|---|---|
+| Order Now | `REMINDER_ORDER_NOW` |
+| Already Ordered | `REMINDER_ALREADY_DONE` |
+| Remind Me Later | `REMINDER_SNOOZE_7` |
+
+---
+
 ## Group 2 — Nudges (Category: Marketing)
 
 ---
@@ -226,6 +322,73 @@ We are here to help.
 | `{{3}}` | Deworming |
 | `{{4}}` | Tap to log a record or ask us anything. |
 | `{{5}}` | Labrador |
+
+---
+
+## Group 2b — No-Breed Nudges (Category: Marketing)
+
+Fired when the user's pet has **no breed set**. These replace the generic `breed='All'` fallback with dedicated messages that don't reference a breed. Used by the nudge scheduler when `breed='Generic'` rows are matched.
+
+---
+
+### `petcircle_nudge_no_breed_v1`
+**Env var:** `WHATSAPP_TEMPLATE_NUDGE_NO_BREED`
+**Used for:** Level 1 breed_only slot (O+30) when no breed is set
+
+**Body:**
+```
+Here's something every dog parent should know — {{1}} 🐾 Worth knowing for your pet. {{2}}
+
+PetCircle is here for you.
+```
+
+**Sample Variables:**
+| Variable | Example |
+|----------|---------|
+| `{{1}}` | staying current on vaccinations and an annual blood panel covers the majority of preventable health risks for most dogs. Two simple things. That's the foundation of a long, healthy life for your pet. |
+| `{{2}}` | Is your pet vaccinated and up to date on blood checks? |
+
+---
+
+### `petcircle_nudge_engagement_no_breed_v1`
+**Env var:** `WHATSAPP_TEMPLATE_NUDGE_ENGAGEMENT_NO_BREED`
+**Used for:** Level 1 engagement_only slots (O+5, O+20) when no breed is set
+
+**Body:**
+```
+Here's something most dog parents find fascinating — {{1}} 🐾 Does this sound like your pet? {{2}}
+
+PetCircle is here for you.
+```
+
+**Sample Variables:**
+| Variable | Example |
+|----------|---------|
+| `{{1}}` | Dogs are the only animals on Earth that have evolved specifically to understand human emotion — they can read your facial expressions, interpret your tone of voice, and even follow your gaze in a way no other species can. Your pet was literally shaped by evolution to understand you. |
+| `{{2}}` | Have you caught your pet reading your mood? |
+
+---
+
+### `petcircle_nudge_breed_data_no_breed_v1`
+**Env var:** `WHATSAPP_TEMPLATE_NUDGE_BREED_DATA_NO_BREED`
+**Used for:** Level 2 breed+data slots (O+1 to O+3) when no breed is set
+
+**Body:**
+```
+Here's something every dog parent should know — {{1}} 🐾 Worth knowing for your pet {{2}}.
+
+Here's what {{3}} recommends: {{4}}
+
+PetCircle is here for you.
+```
+
+**Sample Variables:**
+| Variable | Example |
+|----------|---------|
+| `{{1}}` | most preventable diseases in dogs are stopped by one simple habit — staying current on vaccinations. A missed booster can leave your pet exposed to conditions that are almost entirely avoidable with an up-to-date schedule. |
+| `{{2}}` | Bruno |
+| `{{3}}` | vaccination |
+| `{{4}}` | Is your pet's vaccination up to date? Share the last record. |
 
 ---
 
@@ -321,16 +484,22 @@ Please process and confirm delivery with the customer.
 
 ## Summary Checklist
 
-| Template Name | Category | Variables | Buttons in Meta | Status |
-|---|---|---|---|---|
-| `petcircle_reminder_t7_v1` | Utility | 4 | 2 (Already Done, Remind Me Later) | ☐ |
-| `petcircle_reminder_due_v1` | Utility | 3 | 3 (Done — Log It, Remind Me Later, Order Now) | ☐ |
-| `petcircle_reminder_d3_v1` | Utility | 4 | 3 (Still Pending, Schedule, Cancel) | ☐ |
-| `petcircle_reminder_overdue_v1` | Utility | 5 | 3 (Still Pending, Schedule, Cancel) | ☐ |
-| `petcircle_nudge_va_personal_v1` | Marketing | 3 | None | ☐ |
-| `petcircle_nudge_engagement_v1` | Marketing | 2 | None | ☐ |
-| `petcircle_nudge_breed_v1` | Marketing | 2 | None | ☐ |
-| `petcircle_nudge_breed_data_v1` | Marketing | 5 | None | ☐ |
-| `petcircle_conflict_v1` | Utility | 4 | 2 (Keep Existing, Use New) | ☐ |
-| `birthday_celebration_v1` | Marketing | 2 | None | ☐ |
-| `order_fulfillment_check_v1` | Utility | 6 | 2 (Yes fulfilled, No cancelled) | ☐ |
+| Template Name | Env Var | Category | Variables | Buttons in Meta | Status |
+|---|---|---|---|---|---|
+| `petcircle_reminder_t7_v1` | `WHATSAPP_TEMPLATE_REMINDER_T7` | Utility | 4 | 2 (Already Done, Remind Me Later) | ☐ |
+| `petcircle_reminder_due_v1` | `WHATSAPP_TEMPLATE_REMINDER_DUE` | Utility | 3 | 3 (Done — Log It, Remind Me Later, Order Now) | ☐ |
+| `petcircle_reminder_d3_v1` | `WHATSAPP_TEMPLATE_REMINDER_D3` | Utility | 4 | 3 (Still Pending, Schedule, Cancel) | ☐ |
+| `petcircle_reminder_overdue_v1` | `WHATSAPP_TEMPLATE_REMINDER_OVERDUE` | Utility | 5 | 3 (Still Pending, Schedule, Cancel) | ☐ |
+| `petcircle_reminder_food_scheduled_v1` | `WHATSAPP_TEMPLATE_REMINDER_FOOD_SCHEDULED` | Utility | 3 | 3 (Order Now, Already Ordered, Remind Me Later) | ☐ |
+| `petcircle_reminder_supplement_scheduled_v1` | `WHATSAPP_TEMPLATE_REMINDER_SUPPLEMENT_SCHEDULED` | Utility | 3 | 3 (Order Now, Already Ordered, Remind Me Later) | ☐ |
+| `petcircle_reminder_chronic_scheduled_v1` | `WHATSAPP_TEMPLATE_REMINDER_CHRONIC_SCHEDULED` | Utility | 3 | 3 (Order Now, Already Ordered, Remind Me Later) | ☐ |
+| `petcircle_nudge_va_personal_v1` | `WHATSAPP_TEMPLATE_NUDGE_VALUE_ADD_PERSONAL` | Marketing | 3 | None | ☐ |
+| `petcircle_nudge_engagement_v1` | `WHATSAPP_TEMPLATE_NUDGE_ENGAGEMENT` | Marketing | 2 | None | ☐ |
+| `petcircle_nudge_breed_v1` | `WHATSAPP_TEMPLATE_NUDGE_BREED` | Marketing | 2 | None | ☐ |
+| `petcircle_nudge_breed_data_v1` | `WHATSAPP_TEMPLATE_NUDGE_BREED_DATA` | Marketing | 5 | None | ☐ |
+| `petcircle_nudge_no_breed_v1` | `WHATSAPP_TEMPLATE_NUDGE_NO_BREED` | Marketing | 2 | None | ☐ |
+| `petcircle_nudge_engagement_no_breed_v1` | `WHATSAPP_TEMPLATE_NUDGE_ENGAGEMENT_NO_BREED` | Marketing | 2 | None | ☐ |
+| `petcircle_nudge_breed_data_no_breed_v1` | `WHATSAPP_TEMPLATE_NUDGE_BREED_DATA_NO_BREED` | Marketing | 4 | None | ☐ |
+| `petcircle_conflict_v1` | `WHATSAPP_TEMPLATE_CONFLICT` | Utility | 4 | 2 (Keep Existing, Use New) | ☐ |
+| `birthday_celebration_v1` | `WHATSAPP_TEMPLATE_BIRTHDAY` | Marketing | 2 | None | ☐ |
+| `order_fulfillment_check_v1` | `WHATSAPP_TEMPLATE_ORDER_FULFILLMENT_CHECK` | Utility | 6 | 2 (Yes fulfilled, No cancelled) | ☐ |
