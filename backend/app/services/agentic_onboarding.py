@@ -2360,11 +2360,59 @@ async def handle_agentic_onboarding_step(
             text, str(user.id),
         )
 
+    # --- Deterministic fast-path for name / pet-name transitions ---
+    # GPT-4.1 unreliably follows step hints for these simple transitions,
+    # often re-asking the same question (infinite loop).  When the data was
+    # set deterministically above, skip the LLM entirely and send a canned
+    # reply.  This is faster, cheaper, and 100 % reliable.
+    if just_set_parent and not injected_context:
+        saved_name = cd.get("user", {}).get("full_name", "")
+        if not has_messages:
+            # First turn — consent just given, name auto-set from WhatsApp profile
+            deterministic_reply = (
+                f"Thank you for your consent! Let's get you set up, *{saved_name}* 🐾\n\n"
+                f"What is your *pet's name*?"
+            )
+        else:
+            # Follow-up turn — user typed their name in response to "What is your full name?"
+            deterministic_reply = (
+                f"Nice to meet you, *{saved_name}*! 🐾\n\n"
+                f"What is your *pet's name*?"
+            )
+        # Record the exchange in session history so later turns have context
+        session.messages.append({"role": "user", "content": text or "(consent)"})
+        session.messages.append({"role": "assistant", "content": deterministic_reply})
+        _save_session(db, session)
+        if mobile:
+            await send_fn(db, mobile, deterministic_reply)
+        logger.info(
+            "Deterministic fast-path: parent_name='%s' → asking pet name for user %s",
+            saved_name, str(user.id),
+        )
+        return
+
+    if just_set_pet_name and not injected_context:
+        saved_pet = cd.get("pet", {}).get("name", "")
+        deterministic_reply = (
+            f"Love that name — *{saved_pet}*! 🐾\n\n"
+            f"Do you have a photo of {saved_pet} you'd like to share? "
+            f"We'd love to meet them! 📸\n\n"
+            f"Or you can type *skip* to continue without a photo."
+        )
+        session.messages.append({"role": "user", "content": text or ""})
+        session.messages.append({"role": "assistant", "content": deterministic_reply})
+        _save_session(db, session)
+        if mobile:
+            await send_fn(db, mobile, deterministic_reply)
+        logger.info(
+            "Deterministic fast-path: pet_name='%s' → asking for photo for user %s",
+            saved_pet, str(user.id),
+        )
+        return
+
     # --- Inject system context hints for key transitions ---
     # These [System: ...] hints are prepended to the user message so the LLM
-    # knows EXACTLY which tool to call and what to do next. When data was set
-    # deterministically above, the hint tells the LLM to acknowledge and move
-    # to the next step (no tool call needed).
+    # knows EXACTLY which tool to call and what to do next.
     step_hint, forced_tool = _build_step_hint(
         cd, session,
         just_set_parent=just_set_parent,
