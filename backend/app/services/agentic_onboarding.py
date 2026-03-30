@@ -486,14 +486,21 @@ RESTART → Clear session and start onboarding from Step 1
 """
 
 
-def _build_step_hint(cd: dict, session: "AgentOnboardingSession") -> str:
+def _build_step_hint(cd: dict, session: "AgentOnboardingSession") -> tuple[str, str | None]:
     """
-    Return a [System: ...] instruction string that tells the LLM exactly
-    which tool to call for the current step.
+    Return a (hint_text, forced_tool_name) tuple.
 
-    This is injected into the user message content so the LLM cannot miss it.
-    Without these, the LLM tends to reply with text only (skipping tool calls),
-    which leaves session state unchanged and causes infinite re-ask loops.
+    hint_text:  A [System: ...] instruction string injected into the user
+                message so the LLM knows which tool to call.
+    forced_tool_name:  When set, the agent loop will use
+                tool_choice={"type":"function","function":{"name":...}} on
+                the FIRST API call to guarantee the tool fires. This prevents
+                the infinite re-ask loop where GPT-4.1 skips the tool call
+                and just repeats the previous question.
+
+    Without forced tool_choice, GPT-4.1 tends to reply with text only
+    (skipping tool calls), which leaves session state unchanged and causes
+    infinite re-ask loops — especially for short/unusual user inputs.
     """
     parent_name = cd.get("user", {}).get("full_name", "")
     pet_name = cd.get("pet", {}).get("name", "")
@@ -506,61 +513,67 @@ def _build_step_hint(cd: dict, session: "AgentOnboardingSession") -> str:
     if not parent_name:
         wa_name = cd.get("user", {}).get("whatsapp_name", "")
         if not has_messages:
-            # First turn after consent
+            # First turn after consent — no tool force (LLM must ask first)
             if wa_name:
                 return (
                     f"[System: User just gave consent. Their WhatsApp profile "
                     f"name is \"{wa_name}\". Start Step 1 — offer this name "
-                    f"and ask if they want to use it. Call set_user_info when "
-                    f"they confirm.]"
-                )
+                    f"and ask if they want to use it. Do NOT ask 'What is "
+                    f"your full name?' — the name is already known. Say: "
+                    f"'Your WhatsApp name is *{wa_name}*. Should I use this "
+                    f"as your name? Reply yes or enter a different name.' "
+                    f"Call set_user_info when they confirm.]"
+                ), None
             return (
                 "[System: User just gave consent. No WhatsApp profile name "
                 "available. Start Step 1 — ask for their full name. Call "
                 "set_user_info when they provide it.]"
-            )
-        # Follow-up — user is answering the name question
+            ), None
+        # Follow-up — user is answering the name question → force the tool
         if wa_name:
             return (
                 f"[System: You asked for the user's name. Their WhatsApp "
-                f"name is \"{wa_name}\". If they say yes/y, call "
+                f"name is \"{wa_name}\". If they say yes/y/ha/haan, call "
                 f"set_user_info(full_name=\"{wa_name}\"). If they type a "
                 f"different name, call set_user_info with that name. "
+                f"You MUST call set_user_info now. "
                 f"Then move to Step 2 (pet name).]"
-            )
+            ), "set_user_info"
         return (
             "[System: You asked for the user's name. Call "
             "set_user_info(full_name=<their reply>) now, then move "
-            "to Step 2 (pet name).]"
-        )
+            "to Step 2 (pet name). You MUST call set_user_info now.]"
+        ), "set_user_info"
 
-    # Step 2 — Pet name
+    # Step 2 — Pet name → force set_pet_info
     if not pet_name and has_messages:
         return (
-            "[System: You asked for the pet's name. Call "
+            "[System: You asked for the pet's name. The user's reply IS "
+            "the pet name — store it exactly as given. Call "
             "set_pet_info(name=<their reply>) now, then move to Step 3 "
-            "(photo request).]"
-        )
+            "(photo request). You MUST call set_pet_info now.]"
+        ), "set_pet_info"
 
-    # Step 3b — Species/breed/gender/DOB (after photo skip or photo analysis)
+    # Step 3b — Species/breed/gender/DOB → force set_pet_info
     if pet_name and not species and has_messages:
         return (
             "[System: You asked for pet details (species, breed, gender, DOB). "
             "Call set_pet_info with all fields the user provided. Species must "
             "be 'dog' or 'cat'. Gender must be 'male' or 'female'. DOB must "
-            "be YYYY-MM-DD. Then move to Step 4 (path selection).]"
-        )
+            "be YYYY-MM-DD. Then move to Step 4 (path selection). "
+            "You MUST call set_pet_info now.]"
+        ), "set_pet_info"
 
-    # Step 4 — Path selection (1 or 2)
+    # Step 4 — Path selection (1 or 2) — no tool force needed
     if pet_name and species and not path and has_messages:
         return (
             "[System: You asked the user to pick path 1 or 2. If they said 1, "
             "proceed to Path A (health questions). If they said 2, proceed to "
             "Path B (ask them to share records). No tool call needed — just "
             "continue with the correct path.]"
-        )
+        ), None
 
-    # Health step — user providing health data
+    # Health step — force add_health_records
     if current_step == "health" or (path and current_step == "entry"):
         health = cd.get("health", {})
         has_health = any(health.get(k) for k in ("vaccines", "deworming", "flea_tick", "blood_tests", "allergies_medications"))
@@ -570,10 +583,10 @@ def _build_step_hint(cd: dict, session: "AgentOnboardingSession") -> str:
                 "add_health_records with the data the user provided. Include "
                 "all fields mentioned: vaccines, deworming, flea_tick, "
                 "blood_tests, allergies_medications. Then say 'All saved!' "
-                "and move to nutrition.]"
-            )
+                "and move to nutrition. You MUST call add_health_records now.]"
+            ), "add_health_records"
 
-    # Nutrition step
+    # Nutrition step — force add_diet_items
     if current_step == "nutrition":
         diet = cd.get("diet", {})
         has_diet = any(diet.get(k) for k in ("packaged", "homemade", "supplements"))
@@ -582,10 +595,10 @@ def _build_step_hint(cd: dict, session: "AgentOnboardingSession") -> str:
                 "[System: You asked about the pet's diet. Call add_diet_items "
                 "with all food items the user mentioned. type must be "
                 "'packaged', 'homemade', or 'supplement'. Then move to "
-                "grooming questions.]"
-            )
+                "grooming questions. You MUST call add_diet_items now.]"
+            ), "add_diet_items"
 
-    # Grooming step
+    # Grooming step — force add_grooming_items
     if current_step == "grooming":
         grooming = cd.get("grooming", [])
         if not grooming and has_messages:
@@ -593,10 +606,11 @@ def _build_step_hint(cd: dict, session: "AgentOnboardingSession") -> str:
                 "[System: You asked about grooming. Call add_grooming_items "
                 "with the activities the user mentioned. Each item needs name, "
                 "freq (integer), and unit ('day'/'week'/'month'/'year'). "
-                "Then call complete_onboarding to finish.]"
-            )
+                "Then call complete_onboarding to finish. "
+                "You MUST call add_grooming_items now.]"
+            ), "add_grooming_items"
 
-    return ""
+    return "", None
 
 
 def _build_system_prompt(session: "AgentOnboardingSession") -> str:
@@ -1291,13 +1305,25 @@ def _trim_messages(
     return [{"role": "system", "content": system_content}] + sliced
 
 
-async def _call_openai_with_tools(messages: list) -> object:
+async def _call_openai_with_tools(
+    messages: list,
+    forced_tool_name: str | None = None,
+) -> object:
     """
     Single OpenAI chat completion call with tool support.
 
     Uses gpt-4.1 at temperature=0 for consistent extraction.
+
+    Args:
+        forced_tool_name: If set, uses tool_choice to force a specific
+            function call instead of "auto". This guarantees the model
+            calls the tool — preventing infinite re-ask loops where the
+            model skips the tool and just repeats the question.
     """
     client = _get_openai_onboarding_client()
+    tool_choice = "auto"
+    if forced_tool_name:
+        tool_choice = {"type": "function", "function": {"name": forced_tool_name}}
 
     async def _make_call():
         return await client.chat.completions.create(
@@ -1305,7 +1331,7 @@ async def _call_openai_with_tools(messages: list) -> object:
             temperature=0,
             max_tokens=1000,
             tools=_ONBOARDING_TOOLS,
-            tool_choice="auto",
+            tool_choice=tool_choice,
             messages=messages,
         )
 
@@ -1925,6 +1951,7 @@ async def _run_agent_loop(
     db: Session,
     user: User,
     session: AgentOnboardingSession,
+    forced_tool: str | None = None,
 ) -> str | None:
     """
     Execute the OpenAI tool-calling loop for one user turn.
@@ -1934,14 +1961,23 @@ async def _run_agent_loop(
     - complete_onboarding fires → finalize, let model produce closing message, return it.
     - Max iterations exceeded → return a safe fallback.
 
+    Args:
+        forced_tool: If set, the first API call uses tool_choice to force
+            this specific tool. Subsequent iterations revert to "auto".
+            This prevents GPT-4.1 from skipping critical tool calls
+            (e.g. set_pet_info) which causes infinite re-ask loops.
+
     Returns:
         The text to send to the user, or None on unexpected failure.
     """
     MAX_ITERATIONS = 5
 
     for iteration in range(MAX_ITERATIONS):
+        # Force the specific tool on iteration 0 if requested; auto afterwards
+        force_name = forced_tool if iteration == 0 else None
         response = await _call_openai_with_tools(
-            _trim_messages(session.messages, session)
+            _trim_messages(session.messages, session),
+            forced_tool_name=force_name,
         )
         choice = response.choices[0]
         message = choice.message
@@ -2232,7 +2268,16 @@ async def handle_agentic_onboarding_step(
     # knows EXACTLY which tool to call and what to do next. Without these,
     # GPT-4.1 tends to reply with text only (skipping the tool call), which
     # leaves session state unchanged and causes infinite re-ask loops.
-    step_hint = _build_step_hint(cd, session)
+    step_hint, forced_tool = _build_step_hint(cd, session)
+
+    # --- First turn after consent: strip the consent word ("y"/"yes") ---
+    # The consent text is NOT a user answer to any onboarding question.
+    # Passing it as "User message: y" confuses the LLM into thinking the
+    # user is already confirming their WhatsApp name. Replace it with a
+    # neutral directive so the LLM starts Step 1 cleanly.
+    _CONSENT_WORDS = {"y", "yes", "yeah", "yep", "ok", "okay", "ha", "haan"}
+    if not session.messages and text and text.lower() in _CONSENT_WORDS:
+        text = ""  # drop consent word — step_hint alone is sufficient
 
     if injected_context and text:
         user_content = f"{injected_context}\n\nUser message: {text}"
@@ -2257,16 +2302,18 @@ async def handle_agentic_onboarding_step(
     # --- Run the agent loop ---
     logger.info(
         "Agentic onboarding: running agent loop for user %s. "
-        "whatsapp_name='%s', parent_name='%s', current_step='%s', user_content='%s'",
+        "whatsapp_name='%s', parent_name='%s', current_step='%s', "
+        "forced_tool='%s', user_content='%s'",
         str(user.id),
         cd.get("user", {}).get("whatsapp_name", ""),
         cd.get("user", {}).get("full_name", ""),
         cd.get("current_step", "entry"),
+        forced_tool or "none",
         user_content[:100] if user_content else "",
     )
     reply_text: str | None = None
     try:
-        reply_text = await _run_agent_loop(db, user, session)
+        reply_text = await _run_agent_loop(db, user, session, forced_tool=forced_tool)
     except Exception as e:
         logger.error(
             "Agent loop failed for user %s: %s", str(user.id), str(e), exc_info=True
