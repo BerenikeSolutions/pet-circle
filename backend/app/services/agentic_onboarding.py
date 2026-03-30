@@ -599,6 +599,20 @@ def _build_step_hint(
             "You MUST call set_pet_info now.]"
         ), "set_pet_info"
 
+    # Step 3c — Species set (e.g. from photo) but gender/DOB still missing
+    pet_data = cd.get("pet", {})
+    gender = pet_data.get("gender", "")
+    dob = pet_data.get("dob", "")
+    if pet_name and species and (not gender or not dob) and not path and has_messages:
+        return (
+            "[System: Species/breed already detected from the photo. "
+            "You asked for gender and date of birth. The user just replied. "
+            "Call set_pet_info with gender ('male' or 'female') and dob "
+            "(YYYY-MM-DD). Include species and breed too so nothing is lost. "
+            "Then move to Step 4 (path selection). "
+            "You MUST call set_pet_info now.]"
+        ), "set_pet_info"
+
     # Step 4 — Path selection (1 or 2) — no tool force needed
     if pet_name and species and not path and has_messages:
         return (
