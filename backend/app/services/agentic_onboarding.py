@@ -486,21 +486,25 @@ RESTART → Clear session and start onboarding from Step 1
 """
 
 
-def _build_step_hint(cd: dict, session: "AgentOnboardingSession") -> tuple[str, str | None]:
+def _build_step_hint(
+    cd: dict,
+    session: "AgentOnboardingSession",
+    just_set_parent: bool = False,
+    just_set_pet_name: bool = False,
+) -> tuple[str, str | None]:
     """
     Return a (hint_text, forced_tool_name) tuple.
 
     hint_text:  A [System: ...] instruction string injected into the user
-                message so the LLM knows which tool to call.
+                message so the LLM knows what to do next.
     forced_tool_name:  When set, the agent loop will use
                 tool_choice={"type":"function","function":{"name":...}} on
-                the FIRST API call to guarantee the tool fires. This prevents
-                the infinite re-ask loop where GPT-4.1 skips the tool call
-                and just repeats the previous question.
+                the FIRST API call to guarantee the tool fires.
 
-    Without forced tool_choice, GPT-4.1 tends to reply with text only
-    (skipping tool calls), which leaves session state unchanged and causes
-    infinite re-ask loops — especially for short/unusual user inputs.
+    just_set_parent / just_set_pet_name:  Flags from the deterministic
+                pre-processor indicating that the parent name or pet name
+                was stored THIS turn. The LLM should acknowledge and ask
+                the next question — NOT re-ask or call the tool again.
     """
     parent_name = cd.get("user", {}).get("full_name", "")
     pet_name = cd.get("pet", {}).get("name", "")
@@ -508,6 +512,37 @@ def _build_step_hint(cd: dict, session: "AgentOnboardingSession") -> tuple[str, 
     path = cd.get("path", "")
     current_step = cd.get("current_step", "entry")
     has_messages = bool(session.messages)
+
+    # --- Parent name was just set deterministically this turn ---
+    # LLM should acknowledge and ask for pet name. No tool call needed.
+    if just_set_parent:
+        if not has_messages:
+            # First turn — WhatsApp name was auto-used after consent
+            return (
+                f"[System: User just gave consent. Their name \"{parent_name}\" "
+                f"has been auto-saved from their WhatsApp profile. "
+                f"Do NOT call set_user_info — it is already stored. "
+                f"Do NOT ask for the user's name — it is already known. "
+                f"Say: \"Thank you for your consent! Let's get you set up, "
+                f"{parent_name}.\" Then ask: \"What is your pet's name?\"]"
+            ), None
+        return (
+            f"[System: The user's name has been saved as \"{parent_name}\". "
+            f"Do NOT call set_user_info — it is already stored. "
+            f"Acknowledge the name warmly (use \"{parent_name}\") and "
+            f"ask: \"What is your pet's name?\"]"
+        ), None
+
+    # --- Pet name was just set deterministically this turn ---
+    # LLM should acknowledge and ask for photo / species details.
+    if just_set_pet_name:
+        return (
+            f"[System: The pet's name has been saved as \"{pet_name}\". "
+            f"Do NOT call set_pet_info for the name — it is already stored. "
+            f"Acknowledge the name warmly (use \"{pet_name}\") and ask: "
+            f"\"Do you have a photo of {pet_name} you'd like to share?\" "
+            f"(Step 3 — photo request).]"
+        ), None
 
     # Step 1 — Name collection
     if not parent_name:
@@ -2263,21 +2298,78 @@ async def handle_agentic_onboarding_step(
                 await send_fn(db, mobile, resume_msg)
                 return
 
+    # --- Deterministic pre-processing for simple data collection steps ---
+    # GPT-4.1 with tool_choice="auto" frequently skips tool calls or passes
+    # the wrong argument (e.g., using the WhatsApp name instead of what the
+    # user actually typed). For name and pet-name steps, we set the data
+    # deterministically BEFORE the LLM runs, so the session state is already
+    # correct and the LLM just needs to produce the next conversational reply.
+
+    _CONSENT_WORDS = {"y", "yes", "yeah", "yep", "ok", "okay", "ha", "haan"}
+    _YES_WORDS = {"y", "yes", "yeah", "yep", "ha", "haan", "sure", "ok", "okay"}
+    parent_name = cd.get("user", {}).get("full_name", "")
+    pet_name = cd.get("pet", {}).get("name", "")
+    has_messages = bool(session.messages)
+    text_lower = text.lower() if text else ""
+    just_set_parent = False
+    just_set_pet_name = False
+
+    # First turn after consent: auto-set WhatsApp name and strip consent word
+    if not has_messages and not parent_name:
+        wa_name = cd.get("user", {}).get("whatsapp_name", "")
+        if wa_name:
+            cd.setdefault("user", {})["full_name"] = wa_name
+            just_set_parent = True
+            logger.info(
+                "Deterministic: auto-set parent_name='%s' (WhatsApp name, first turn) for user %s",
+                wa_name, str(user.id),
+            )
+        if text and text_lower in _CONSENT_WORDS:
+            text = ""
+            text_lower = ""
+
+    # Step 1 follow-up: user is answering the name question (only if no WhatsApp name was auto-set)
+    if has_messages and not parent_name and not just_set_parent and msg_type == "text" and text:
+        wa_name = cd.get("user", {}).get("whatsapp_name", "")
+        if wa_name and text_lower in _YES_WORDS:
+            # User confirmed WhatsApp name
+            cd.setdefault("user", {})["full_name"] = wa_name
+            just_set_parent = True
+            logger.info(
+                "Deterministic: set parent_name='%s' (confirmed WhatsApp name) for user %s",
+                wa_name, str(user.id),
+            )
+        else:
+            # User typed a different name — use EXACTLY what they typed
+            cd.setdefault("user", {})["full_name"] = text
+            just_set_parent = True
+            logger.info(
+                "Deterministic: set parent_name='%s' (user-provided) for user %s",
+                text, str(user.id),
+            )
+
+    # Step 2 follow-up: user is answering the pet name question
+    # Re-read parent_name since it may have just been set above
+    parent_name = cd.get("user", {}).get("full_name", "")
+    if has_messages and parent_name and not just_set_parent and not pet_name and msg_type == "text" and text:
+        # Store whatever the user typed as the pet name — no LLM judgment
+        cd.setdefault("pet", {})["name"] = text
+        just_set_pet_name = True
+        logger.info(
+            "Deterministic: set pet_name='%s' for user %s",
+            text, str(user.id),
+        )
+
     # --- Inject system context hints for key transitions ---
     # These [System: ...] hints are prepended to the user message so the LLM
-    # knows EXACTLY which tool to call and what to do next. Without these,
-    # GPT-4.1 tends to reply with text only (skipping the tool call), which
-    # leaves session state unchanged and causes infinite re-ask loops.
-    step_hint, forced_tool = _build_step_hint(cd, session)
-
-    # --- First turn after consent: strip the consent word ("y"/"yes") ---
-    # The consent text is NOT a user answer to any onboarding question.
-    # Passing it as "User message: y" confuses the LLM into thinking the
-    # user is already confirming their WhatsApp name. Replace it with a
-    # neutral directive so the LLM starts Step 1 cleanly.
-    _CONSENT_WORDS = {"y", "yes", "yeah", "yep", "ok", "okay", "ha", "haan"}
-    if not session.messages and text and text.lower() in _CONSENT_WORDS:
-        text = ""  # drop consent word — step_hint alone is sufficient
+    # knows EXACTLY which tool to call and what to do next. When data was set
+    # deterministically above, the hint tells the LLM to acknowledge and move
+    # to the next step (no tool call needed).
+    step_hint, forced_tool = _build_step_hint(
+        cd, session,
+        just_set_parent=just_set_parent,
+        just_set_pet_name=just_set_pet_name,
+    )
 
     if injected_context and text:
         user_content = f"{injected_context}\n\nUser message: {text}"
@@ -2302,11 +2394,12 @@ async def handle_agentic_onboarding_step(
     # --- Run the agent loop ---
     logger.info(
         "Agentic onboarding: running agent loop for user %s. "
-        "whatsapp_name='%s', parent_name='%s', current_step='%s', "
-        "forced_tool='%s', user_content='%s'",
+        "whatsapp_name='%s', parent_name='%s', pet_name='%s', "
+        "current_step='%s', forced_tool='%s', user_content='%s'",
         str(user.id),
         cd.get("user", {}).get("whatsapp_name", ""),
         cd.get("user", {}).get("full_name", ""),
+        cd.get("pet", {}).get("name", ""),
         cd.get("current_step", "entry"),
         forced_tool or "none",
         user_content[:100] if user_content else "",
