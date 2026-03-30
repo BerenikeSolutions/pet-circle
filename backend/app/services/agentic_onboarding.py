@@ -34,6 +34,7 @@ IMPORTANT — JSONB mutation tracking:
 import asyncio
 import json
 import logging
+import re
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -74,6 +75,65 @@ _OPENAI_HEALTH_TTL = 300  # seconds — re-check every 5 minutes
 _pending_doc_contexts: dict[str, list[str]] = {}  # key: str(user.id)
 _doc_timers: dict[str, asyncio.Task] = {}          # key: str(user.id)
 _DOC_DEBOUNCE_SECONDS: int = 12
+
+
+def _parse_gender_dob_from_text(text: str) -> tuple[str | None, str | None]:
+    """
+    Try to extract gender and date of birth from a single user message.
+
+    Handles common patterns like:
+        "m, 22 dec 23"
+        "male, 22 december 2024"
+        "female 15/03/2023"
+        "f, 2024-01-10"
+        "boy, 10 jan 2024"
+
+    Returns (gender, dob_str) where dob_str is YYYY-MM-DD, or (None, None)
+    if either field cannot be parsed.
+    """
+    from app.utils.date_utils import parse_date
+
+    if not text or not text.strip():
+        return None, None
+
+    cleaned = text.strip().lower()
+
+    # --- Extract gender ---
+    _MALE_WORDS = {"m", "male", "boy", "he"}
+    _FEMALE_WORDS = {"f", "female", "girl", "she"}
+    gender: str | None = None
+
+    # Split on common delimiters to find gender token
+    tokens = re.split(r"[,;/\s]+", cleaned)
+    for token in tokens:
+        if token in _MALE_WORDS:
+            gender = "male"
+            break
+        if token in _FEMALE_WORDS:
+            gender = "female"
+            break
+
+    if not gender:
+        return None, None
+
+    # --- Extract DOB ---
+    # Remove the gender token from the string to isolate the date part
+    date_part = cleaned
+    for word in (_MALE_WORDS | _FEMALE_WORDS):
+        # Remove the gender word (with optional trailing comma/space)
+        date_part = re.sub(rf"\b{re.escape(word)}\b[,;\s]*", "", date_part, count=1)
+    date_part = date_part.strip().strip(",;").strip()
+
+    if not date_part:
+        return None, None
+
+    try:
+        parsed = parse_date(date_part)
+        return gender, parsed.strftime("%Y-%m-%d")
+    except (ValueError, Exception):
+        pass
+
+    return None, None
 
 
 def is_openai_available() -> bool:
@@ -491,6 +551,7 @@ def _build_step_hint(
     session: "AgentOnboardingSession",
     just_set_parent: bool = False,
     just_set_pet_name: bool = False,
+    just_set_gender_dob: bool = False,
 ) -> tuple[str, str | None]:
     """
     Return a (hint_text, forced_tool_name) tuple.
@@ -542,6 +603,27 @@ def _build_step_hint(
             f"Acknowledge the name warmly (use \"{pet_name}\") and ask: "
             f"\"Do you have a photo of {pet_name} you'd like to share?\" "
             f"(Step 3 — photo request).]"
+        ), None
+
+    # --- Gender/DOB were just set deterministically this turn ---
+    # LLM should acknowledge the details and present path selection (Step 4).
+    if just_set_gender_dob:
+        pet_data = cd.get("pet", {})
+        g = pet_data.get("gender", "")
+        d = pet_data.get("dob", "")
+        s = pet_data.get("species", "")
+        b = pet_data.get("breed", "")
+        return (
+            f"[System: Gender and DOB have been saved deterministically — "
+            f"do NOT call set_pet_info. "
+            f"Pet profile so far: name={pet_name}, species={s}, breed={b}, "
+            f"gender={g}, dob={d}. "
+            f"Acknowledge these details warmly (use the pet's name and "
+            f"correct pronouns now that you know the sex). "
+            f"Then present Step 4 — path selection: "
+            f"Option 1: guided questions (health, nutrition, grooming). "
+            f"Option 2: share vet records and AI extracts details. "
+            f"Ask the user to reply 1 or 2.]"
         ), None
 
     # Step 1 — Name collection
@@ -2424,6 +2506,40 @@ async def handle_agentic_onboarding_step(
         )
         return
 
+    # --- Deterministic parse for gender/DOB after photo ---
+    # When species is already set (from photo AI) and the bot asked for gender
+    # + DOB, the LLM consistently fails to call set_pet_info, causing an
+    # infinite re-ask loop.  Parse gender and DOB deterministically and write
+    # them to collected_data BEFORE the LLM runs, then inject a hint so the
+    # LLM acknowledges and moves to path selection naturally.
+    just_set_gender_dob = False
+    pet_data_now = cd.get("pet", {})
+    pet_name_now = pet_data_now.get("name", "")
+    species_now = pet_data_now.get("species", "")
+    gender_now = pet_data_now.get("gender", "")
+    dob_now = pet_data_now.get("dob", "")
+    path_now = cd.get("path", "")
+
+    if (
+        has_messages
+        and pet_name_now
+        and species_now
+        and (not gender_now or not dob_now)
+        and not path_now
+        and msg_type == "text"
+        and text
+        and not injected_context
+    ):
+        parsed_gender, parsed_dob = _parse_gender_dob_from_text(text)
+        if parsed_gender and parsed_dob:
+            pet_data_now["gender"] = parsed_gender
+            pet_data_now["dob"] = parsed_dob
+            just_set_gender_dob = True
+            logger.info(
+                "Deterministic: set gender='%s', dob='%s' for user %s",
+                parsed_gender, parsed_dob, str(user.id),
+            )
+
     # --- Inject system context hints for key transitions ---
     # These [System: ...] hints are prepended to the user message so the LLM
     # knows EXACTLY which tool to call and what to do next.
@@ -2431,6 +2547,7 @@ async def handle_agentic_onboarding_step(
         cd, session,
         just_set_parent=just_set_parent,
         just_set_pet_name=just_set_pet_name,
+        just_set_gender_dob=just_set_gender_dob,
     )
 
     if injected_context and text:
