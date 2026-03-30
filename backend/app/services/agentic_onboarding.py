@@ -156,9 +156,20 @@ NEVER offer a third path. NEVER mention a "hybrid" option.
 ## COMMON ENTRY SEQUENCE
 
 Step 1 — Confirm parent name:
-  "Thank you for your consent! Let's get you set up. Your WhatsApp name is
-  {whatsapp_name}. Should I use this as your name? Reply yes or enter a
-  different name."
+  If whatsapp_name is available (non-empty in session state):
+    "Thank you for your consent! Let's get you set up. Your WhatsApp name is
+    {whatsapp_name}. Should I use this as your name? Reply yes or enter a
+    different name."
+    → When the user replies "yes"/"y"/"yep" etc., IMMEDIATELY call set_user_info
+      with full_name = the whatsapp_name value from session state. Do NOT ask
+      for the name again.
+    → When the user replies with a different name, call set_user_info with that name.
+  If whatsapp_name is empty or missing:
+    "Thank you for your consent! Let's get you set up.\n\nWhat is your *full name*?"
+    → When the user replies with their name, call set_user_info with that name.
+
+  CRITICAL: After calling set_user_info, the parent_name field in session state
+  will be populated. Do NOT re-ask the name once parent_name is set. Move to Step 2.
 
 Step 2 — Pet name:
   "Thanks, {parent_name}! What is your pet's name?"
@@ -544,6 +555,8 @@ _ONBOARDING_TOOLS = [
             "description": (
                 "Store the user's name and/or pincode. "
                 "Call this as soon as either is mentioned. "
+                "When the user confirms their WhatsApp name with 'yes', "
+                "pass the whatsapp_name from session state as full_name. "
                 "Omit fields that were not provided."
             ),
             "parameters": {
@@ -1785,6 +1798,10 @@ async def _run_agent_loop(
         completion_triggered = False
         dashboard_url = "petcircle.app/dashboard"
         for tc in message.tool_calls:
+            logger.info(
+                "Agentic onboarding: tool call '%s' with args: %s",
+                tc.function.name, tc.function.arguments[:200],
+            )
             result = await _dispatch_tool_call(
                 db, user, session, tc.function.name, tc.function.arguments
             )
@@ -1930,8 +1947,18 @@ async def handle_agentic_onboarding_step(
     cd = session.collected_data
     if not cd.get("user", {}).get("whatsapp_name"):
         profile_name = message_data.get("profile_name") or ""
+        logger.info(
+            "Agentic onboarding: profile_name from webhook for user %s: '%s'",
+            str(user.id), profile_name,
+        )
         if profile_name:
             cd.setdefault("user", {})["whatsapp_name"] = profile_name
+        else:
+            logger.warning(
+                "Agentic onboarding: no profile_name in message_data for user %s. "
+                "Keys present: %s",
+                str(user.id), list(message_data.keys()),
+            )
 
     # --- Path A detection (Gap 2 fix) ---
     # If the user replies "1" and no path is set yet, record Path A immediately
@@ -2047,6 +2074,15 @@ async def handle_agentic_onboarding_step(
         await send_fn(db, mobile, "Give me a moment... ⏳")
 
     # --- Run the agent loop ---
+    logger.info(
+        "Agentic onboarding: running agent loop for user %s. "
+        "whatsapp_name='%s', parent_name='%s', current_step='%s', user_content='%s'",
+        str(user.id),
+        cd.get("user", {}).get("whatsapp_name", ""),
+        cd.get("user", {}).get("full_name", ""),
+        cd.get("current_step", "entry"),
+        user_content[:100] if user_content else "",
+    )
     reply_text: str | None = None
     try:
         reply_text = await _run_agent_loop(db, user, session)
@@ -2077,6 +2113,10 @@ async def handle_agentic_onboarding_step(
 
     # --- Send text reply ---
     if reply_text and mobile:
+        logger.info(
+            "Agentic onboarding: reply for user %s (first 200 chars): %s",
+            str(user.id), reply_text[:200],
+        )
         await send_fn(db, mobile, reply_text)
 
 
