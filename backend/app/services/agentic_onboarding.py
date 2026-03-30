@@ -486,6 +486,119 @@ RESTART → Clear session and start onboarding from Step 1
 """
 
 
+def _build_step_hint(cd: dict, session: "AgentOnboardingSession") -> str:
+    """
+    Return a [System: ...] instruction string that tells the LLM exactly
+    which tool to call for the current step.
+
+    This is injected into the user message content so the LLM cannot miss it.
+    Without these, the LLM tends to reply with text only (skipping tool calls),
+    which leaves session state unchanged and causes infinite re-ask loops.
+    """
+    parent_name = cd.get("user", {}).get("full_name", "")
+    pet_name = cd.get("pet", {}).get("name", "")
+    species = cd.get("pet", {}).get("species", "")
+    path = cd.get("path", "")
+    current_step = cd.get("current_step", "entry")
+    has_messages = bool(session.messages)
+
+    # Step 1 — Name collection
+    if not parent_name:
+        wa_name = cd.get("user", {}).get("whatsapp_name", "")
+        if not has_messages:
+            # First turn after consent
+            if wa_name:
+                return (
+                    f"[System: User just gave consent. Their WhatsApp profile "
+                    f"name is \"{wa_name}\". Start Step 1 — offer this name "
+                    f"and ask if they want to use it. Call set_user_info when "
+                    f"they confirm.]"
+                )
+            return (
+                "[System: User just gave consent. No WhatsApp profile name "
+                "available. Start Step 1 — ask for their full name. Call "
+                "set_user_info when they provide it.]"
+            )
+        # Follow-up — user is answering the name question
+        if wa_name:
+            return (
+                f"[System: You asked for the user's name. Their WhatsApp "
+                f"name is \"{wa_name}\". If they say yes/y, call "
+                f"set_user_info(full_name=\"{wa_name}\"). If they type a "
+                f"different name, call set_user_info with that name. "
+                f"Then move to Step 2 (pet name).]"
+            )
+        return (
+            "[System: You asked for the user's name. Call "
+            "set_user_info(full_name=<their reply>) now, then move "
+            "to Step 2 (pet name).]"
+        )
+
+    # Step 2 — Pet name
+    if not pet_name and has_messages:
+        return (
+            "[System: You asked for the pet's name. Call "
+            "set_pet_info(name=<their reply>) now, then move to Step 3 "
+            "(photo request).]"
+        )
+
+    # Step 3b — Species/breed/gender/DOB (after photo skip or photo analysis)
+    if pet_name and not species and has_messages:
+        return (
+            "[System: You asked for pet details (species, breed, gender, DOB). "
+            "Call set_pet_info with all fields the user provided. Species must "
+            "be 'dog' or 'cat'. Gender must be 'male' or 'female'. DOB must "
+            "be YYYY-MM-DD. Then move to Step 4 (path selection).]"
+        )
+
+    # Step 4 — Path selection (1 or 2)
+    if pet_name and species and not path and has_messages:
+        return (
+            "[System: You asked the user to pick path 1 or 2. If they said 1, "
+            "proceed to Path A (health questions). If they said 2, proceed to "
+            "Path B (ask them to share records). No tool call needed — just "
+            "continue with the correct path.]"
+        )
+
+    # Health step — user providing health data
+    if current_step == "health" or (path and current_step == "entry"):
+        health = cd.get("health", {})
+        has_health = any(health.get(k) for k in ("vaccines", "deworming", "flea_tick", "blood_tests", "allergies_medications"))
+        if not has_health and has_messages:
+            return (
+                "[System: You asked for health information. Call "
+                "add_health_records with the data the user provided. Include "
+                "all fields mentioned: vaccines, deworming, flea_tick, "
+                "blood_tests, allergies_medications. Then say 'All saved!' "
+                "and move to nutrition.]"
+            )
+
+    # Nutrition step
+    if current_step == "nutrition":
+        diet = cd.get("diet", {})
+        has_diet = any(diet.get(k) for k in ("packaged", "homemade", "supplements"))
+        if not has_diet and has_messages:
+            return (
+                "[System: You asked about the pet's diet. Call add_diet_items "
+                "with all food items the user mentioned. type must be "
+                "'packaged', 'homemade', or 'supplement'. Then move to "
+                "grooming questions.]"
+            )
+
+    # Grooming step
+    if current_step == "grooming":
+        grooming = cd.get("grooming", [])
+        if not grooming and has_messages:
+            return (
+                "[System: You asked about grooming. Call add_grooming_items "
+                "with the activities the user mentioned. Each item needs name, "
+                "freq (integer), and unit ('day'/'week'/'month'/'year'). "
+                "Then call complete_onboarding to finish.]"
+            )
+
+    return ""
+
+
 def _build_system_prompt(session: "AgentOnboardingSession") -> str:
     """
     Build the system prompt for the current turn by injecting current session
@@ -2115,50 +2228,11 @@ async def handle_agentic_onboarding_step(
                 return
 
     # --- Inject system context hints for key transitions ---
-    # These hints ensure the LLM calls the right tool and doesn't loop.
-    step_hint = ""
-    parent_name = cd.get("user", {}).get("full_name", "")
-    pet_name = cd.get("pet", {}).get("name", "")
-
-    if not parent_name:
-        wa_name = cd.get("user", {}).get("whatsapp_name", "")
-        if not session.messages:
-            # First turn after consent — tell LLM the WhatsApp name
-            if wa_name:
-                step_hint = (
-                    f"[System: User just gave consent. Their WhatsApp profile "
-                    f"name is \"{wa_name}\". Start Step 1 — offer this name "
-                    f"and ask if they want to use it. Call set_user_info when "
-                    f"they confirm.]"
-                )
-            else:
-                step_hint = (
-                    "[System: User just gave consent. No WhatsApp profile name "
-                    "available. Start Step 1 — ask for their full name. Call "
-                    "set_user_info when they provide it.]"
-                )
-        else:
-            # Follow-up turn — user is answering the name question
-            if wa_name:
-                step_hint = (
-                    f"[System: You asked for the user's name. Their WhatsApp "
-                    f"name is \"{wa_name}\". If they say yes/y, call "
-                    f"set_user_info(full_name=\"{wa_name}\"). If they type a "
-                    f"different name, call set_user_info with that name. "
-                    f"Then move to Step 2 (pet name).]"
-                )
-            else:
-                step_hint = (
-                    "[System: You asked for the user's name. Call "
-                    "set_user_info(full_name=<their reply>) now, then move "
-                    "to Step 2 (pet name).]"
-                )
-    elif not pet_name and session.messages:
-        step_hint = (
-            "[System: You asked for the pet's name. Call "
-            "set_pet_info(name=<their reply>) now, then move to Step 3 "
-            "(photo request).]"
-        )
+    # These [System: ...] hints are prepended to the user message so the LLM
+    # knows EXACTLY which tool to call and what to do next. Without these,
+    # GPT-4.1 tends to reply with text only (skipping the tool call), which
+    # leaves session state unchanged and causes infinite re-ask loops.
+    step_hint = _build_step_hint(cd, session)
 
     if injected_context and text:
         user_content = f"{injected_context}\n\nUser message: {text}"
