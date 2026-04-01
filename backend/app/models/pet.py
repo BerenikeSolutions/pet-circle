@@ -57,6 +57,11 @@ class Pet(Base):
     # Date of birth — used for age-based preventive scheduling.
     dob = Column(Date, nullable=True)
 
+    # User's original age input (e.g. "4 years", "6 months", "puppy").
+    # Stored alongside DOB so services can display age as the user stated it.
+    # DOB is still computed from age_text for date-based scheduling.
+    age_text = Column(String(50), nullable=True)
+
     # Weight in kg — DECIMAL(5,2) allows up to 999.99.
     weight = Column(Numeric(5, 2), nullable=True)
 

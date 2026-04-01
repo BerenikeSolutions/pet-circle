@@ -1,0 +1,114 @@
+WELCOME (hardcoded) Hello [Name]! 👋 Welcome to PetCircle — your pet's personalised care companion, right here on WhatsApp. I'm here to make sure your pet never misses the care they deserve.
+
+Let's start — what's your pet's name?
+
+After Name Love that name! 🐾 What breed is [pet name] and how old are they? an approximate age is fine (eg,. golden retriever, 4) - confirm only if ai is not sure, if age is not given the second time give an approximate, breed
+
+After Breed + Age Got it. What's [pet name]'s gender and approximate weight? Are they neutered or spayed? (eg: male, 22, neutered) - don't ask again
+
+Life stage note (dynamic) [pet name] is a [life stage] — [warm one-liner] 🐾
+
+After Life Stage What does [pet name] usually eat — home food, packaged, or a mix?
+
+After Food Type — contextual
+
+If home food: What does [pet name]'s typical daily diet look like? (e.g., boiled chicken + rice in the morning, dal + roti at night, occasional egg)
+
+If packaged food: What does [pet name]'s typical daily diet look like? (e.g., Royal Canin Adult kibble 50g × 3 times a day, small treat in the evening)
+
+If mix: What does [pet name]'s typical daily diet look like? (e.g., Pedigree kibble in the morning, home-cooked khichdi at night, egg twice a week)
+
+After Meal Details Noted. Is [pet name] on any supplements right now? (e.g., joint support, Omega-3, calcium — or just say None)
+
+After Supplements — progress indicator Thanks for sharing. 🐾 I'll check how [pet name]'s diet is working for their specific needs and build it into the care plan.
+
+One last information and we're done — preventive care.
+
+Preventive Care What do you remember about [pet name]'s vaccines, deworming, flea & tick, and blood tests? (e.g., vaccines last Dec, deworming Jan, flea 2 months ago, no blood test yet — rough is fine). 
+
+ [here if someone has putin half info wait a sec] [ just ask the missing info only one more time with example not again and again]
+
+After Preventive Care Got it, I'll organise this into [pet name]'s care plan and remind you at the right time for each one.
+
+Do you have any health records handy — a vaccination card, vet prescription, or lab report? Share a photo or PDF and I'll pull the details in automatically. No worries if not, we can always add them later.
+
+Transition to Value That's everything. 🐾 Building [pet name]'s personalised care plan now — their health dashboard, care reminders, and nutrition breakdown will be ready in just a moment. 
+
+Life stage warm one-liners for reference
+
+Life Stage	Line
+Puppy (0–1 yr)	still finding their feet and learning fast!
+Junior (1–2 yr)	growing into themselves — curious, energetic, and full of surprises!
+Adult (2–7 yr)	right in their prime and full of energy!
+Senior (7+ yr)	been around long enough to know exactly how to wrap you around their paw. 🐾
+
+Variation 1 — Conditions, food, preventive all shared
+
+Zayn's care plan is ready! 🐾Based on Zayn's health analysis, life stage and current diet.
+
+We noted 2 health conditions — recurring UTI and Anaplasmosis (tick fever). We've included some questions worth raising with your vet.
+
+4 of 5 preventive care items are on track — 2 are due soon and 1 is overdue.
+
+We'd suggest adding Omega-3 and a probiotic — specifically based on his diet, life stage, and to support recovery after deworming.
+
+View Zayn's full care plan here 👇
+
+Variation 2 — No conditions, food and preventive all shared
+
+Zayn's care plan is ready! 🐾 Based on his health analysis, life stage and current diet.
+
+No active health conditions flagged.
+
+4 of 5 preventive care items are on track — 2 are due soon and 1 is overdue.
+
+We'd suggest adding Omega-3 and a probiotic based on his diet and life stage — great for coat health and joint support.
+
+View Zayn's full care plan here 👇
+
+Variation 3 — No conditions, food shared, preventive not shared
+
+Zayn's care plan is ready! 🐾 
+
+No active health conditions flagged.
+
+We don't have Zayn's preventive care details yet — adding these would give us a more complete health picture for him.
+
+We'd suggest adding Omega-3 and a probiotic based on his diet and life stage — great for coat health and joint support.
+
+
+View Zayn's full care plan here 👇
+
+
+
+Variation 4 — No conditions, no food, no preventive shared, but age and breed available
+
+Zayn's care plan is ready! 🐾 
+
+No active health conditions flagged.
+
+We'd suggest adding Omega-3 and a probiotic — based on his age and breed, these support coat health, joint development, and overall immunity.
+
+To make this analysis even more personalised, sharing Zayn's current diet and preventive care routine would give us a much fuller picture for him.
+
+
+View Zayn's full care plan here 👇
+
+Variation 5 — No info shared, only name is there 
+
+To give you a fuller picture, we'd love to know more about Zayn's current diet and preventive care routine — adding these would help us make the analysis much more personalised for him.
+
+
+View Zayn's full care plan example here 👇
+
+
+
+Prompt for msg that generates above.
+
+Open with "[pet name]'s care plan is ready! 🐾"
+Reference only the information that was shared — if vaccines, food shared irrespective of health conditions.
+Always make supplement recommendations based on available data
+For anything not shared, add a one-line nudge that it would make the analysis more personalised
+No health judgements, no headers, no bullet points
+End with "View [pet name]'s full care plan here 👇"
+Warm, conversational, WhatsApp-friendly tone

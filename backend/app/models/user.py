@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 
 from app.database import Base
@@ -98,6 +98,12 @@ class User(Base):
         ForeignKey("reminders.id", ondelete="SET NULL", use_alter=True),
         nullable=True,
     )
+
+    # Transient onboarding metadata (JSONB).
+    # Stores step-local state that doesn't deserve its own column:
+    #   food_type, breed_age_attempts, preventive_attempts, needs_species, etc.
+    # Cleared to None when onboarding completes.
+    onboarding_data = Column(JSONB, nullable=True)
 
     # Soft delete flag — when True, user is treated as deleted.
     # No physical delete is ever performed; this preserves audit trail.

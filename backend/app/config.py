@@ -138,7 +138,7 @@ class Settings(BaseSettings):
     # Set to 'true' to enable AI-driven conversational onboarding.
     # Requires OPENAI_API_KEY. Falls back to deterministic flow if either is absent
     # or if the OpenAI API health check fails.
-    AGENTIC_ONBOARDING_ENABLED: str = "true"
+    AGENTIC_ONBOARDING_ENABLED: str = "false"
 
     # Set to 'true' to enable AI-driven conversational order flow.
     # Requires OPENAI_API_KEY. Falls back to deterministic state machine if either

@@ -243,18 +243,27 @@ async def route_message(db: Session, message_data: dict) -> None:
             # already created this user, it returns the existing record.
             user = create_pending_user(db, from_number)
 
-            # Only send welcome if user is truly new (awaiting_consent).
+            # Only send welcome if user is truly new (welcome state).
             # If race condition returned an existing user mid-onboarding, skip welcome.
-            if user.onboarding_state == "awaiting_consent":
+            if user.onboarding_state == "welcome":
+                # Use WhatsApp profile name for personalised greeting.
+                profile_name = message_data.get("profile_name", "").strip() if message_data else ""
+                if profile_name:
+                    user.full_name = profile_name.title()
+                    try:
+                        db.commit()
+                    except Exception:
+                        try:
+                            db.rollback()
+                        except Exception:
+                            pass
+                greeting_name = profile_name.split()[0] if profile_name else "there"
                 await send_text_message(
                     db, from_number,
-                    f"{APP_WELCOME_HEADING}\n\n"
-                    "I'm your pet's personal health assistant. I help you stay on top of "
-                    "vaccinations, deworming, tick treatments, and all the preventive care "
-                    "your furry friend needs — right here on WhatsApp.\n\n"
-                    "Before we begin, I need your consent to store your pet's health data "
-                    "so I can send you timely reminders and keep everything organized.\n\n"
-                    "Reply *yes* to get started or *no* to opt out.",
+                    f"Hello {greeting_name}! 👋 Welcome to PetCircle — your pet's "
+                    f"personalised care companion, right here on WhatsApp. I'm here "
+                    f"to make sure your pet never misses the care they deserve.\n\n"
+                    f"Let's start — what's your pet's name?",
                 )
                 return
             # Otherwise fall through to handle user as existing.
@@ -284,11 +293,6 @@ async def route_message(db: Session, message_data: dict) -> None:
                 text = (message_data.get("text") or "").strip()
                 if text:
                     await handle_onboarding_step(db, user, text, send_text_message, message_data=message_data)
-                return
-
-            # --- Allow image uploads during pet photo step ---
-            if user.onboarding_state == "awaiting_pet_photo" and msg_type == "image":
-                await handle_onboarding_step(db, user, "", send_text_message, message_data=message_data)
                 return
 
             # --- Agentic onboarding: route all message types to the agent ---
@@ -500,11 +504,12 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
                 f"Maximum is {MAX_PETS_PER_USER}.",
             )
         else:
-            user.onboarding_state = "awaiting_pet_name"
+            user.onboarding_state = "welcome"
+            user.onboarding_data = None
             db.commit()
             await send_text_message(
                 db, from_number,
-                "Let's add another pet! What is your pet's *name*?",
+                "Let's add another pet! What's your pet's name?",
             )
         return
 
