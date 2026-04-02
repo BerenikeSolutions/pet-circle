@@ -105,3 +105,10 @@ class Pet(Base):
 
     # One pet can have many contacts (vets, groomers, etc.).
     contacts = relationship("Contact", back_populates="pet")
+
+    # One pet can have cached life-stage trait payloads (one per life stage).
+    life_stage_traits = relationship(
+        "PetLifeStageTrait",
+        back_populates="pet",
+        passive_deletes=True,
+    )

@@ -35,6 +35,7 @@ from app.models.nutrition_target_cache import NutritionTargetCache
 from app.models.order import Order
 from app.models.order_recommendation import OrderRecommendation
 from app.models.pet import Pet
+from app.models.pet_life_stage_trait import PetLifeStageTrait
 from app.models.pet_preference import PetPreference
 from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
@@ -47,6 +48,7 @@ from app.models.weight_history import WeightHistory
 __all__ = [
     "User",
     "Pet",
+    "PetLifeStageTrait",
     "PreventiveMaster",
     "PreventiveRecord",
     "Reminder",

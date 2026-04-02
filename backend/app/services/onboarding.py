@@ -1031,13 +1031,11 @@ async def _store_preventive_data(db, pet, parsed: dict):
             # Update existing record if the new date is more recent.
             if not existing.last_done_date or parsed_date > existing.last_done_date:
                 existing.last_done_date = parsed_date
-                existing.source = "onboarding"
         else:
             record = PreventiveRecord(
                 pet_id=pet.id,
                 preventive_master_id=master.id,
                 last_done_date=parsed_date,
-                source="onboarding",
             )
             db.add(record)
 
