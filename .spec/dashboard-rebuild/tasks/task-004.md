@@ -1,7 +1,7 @@
 ---
 task: 004
 feature: dashboard-rebuild
-status: pending
+status: complete
 depends_on: [1]
 ---
 
@@ -78,18 +78,29 @@ _Requirements: 3, 18_
 ---
 
 ## Acceptance Criteria
-- [ ] Primary vet correctly identified by mention count
-- [ ] Last visit date derived from most recent document with that vet
-- [ ] Tie-breaking works (most recent document wins)
-- [ ] None returned when no vet contacts exist
-- [ ] All existing tests pass
-- [ ] `/verify` passes
+- [x] Primary vet correctly identified by mention count
+- [x] Last visit date derived from most recent document with that vet
+- [x] Tie-breaking works (most recent document wins)
+- [x] None returned when no vet contacts exist
+- [x] All existing tests pass
+- [x] `/verify` passes
 
 ---
 
 ## Handoff to Next Task
 
-**Files changed:** _(fill via /task-handoff)_
-**Decisions made:** _(fill via /task-handoff)_
-**Context for next task:** _(fill via /task-handoff)_
-**Open questions:** _(fill via /task-handoff)_
+**Files changed:**
+- `backend/app/services/vet_summary_service.py` — new service; exports `VetSummary` dataclass and `get_vet_summary(db, pet_id)` function.
+- `backend/tests/unit/test_vet_summary_service.py` — 6 unit tests covering all acceptance-criteria scenarios.
+
+**Decisions made:**
+- Used a single aggregating SQLAlchemy query (`GROUP BY name`, `COUNT(DISTINCT document_id)`, `MAX(event_date)`) rather than Python-side grouping; the DB does the heavy lifting.
+- `LEFT JOIN` documents so that contacts whose linked document was soft-deleted (SET NULL) still count as mentions.
+- `NULLSLAST` on the tie-break `ORDER BY` so vets without any event dates are deprioritised but still returned when they are the only candidate.
+- `@dataclass` used for `VetSummary` (consistent with existing services like `LifeStageData`).
+
+**Context for next task:**
+- `get_vet_summary(db, pet_id)` is ready to be called from the dashboard service or any dashboard API endpoint that needs primary-vet information.
+- Import: `from app.services.vet_summary_service import VetSummary, get_vet_summary`
+
+**Open questions:** None.
