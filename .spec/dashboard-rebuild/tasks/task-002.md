@@ -159,3 +159,25 @@ _Skills: /python-patterns, /code-writing-software-development, /tdd-workflow_
 **Decisions made:** _(fill via /task-handoff)_
 **Context for next task:** _(fill via /task-handoff)_
 **Open questions:** _(fill via /task-handoff)_
+
+---
+
+## Status
+COMPLETE
+
+## Handoff — What Was Done
+- Created `backend/app/services/care_plan_engine.py` with the full 7-step classification engine
+- Implemented `BreedSize`, `LifeStage`, `Classification` enums; `BREED_SIZE_BOUNDARIES` and `BASELINE_PROTOCOL` constants covering 11 test types × 4 life stages
+- Implemented all helper functions: `_get_breed_size`, `_get_life_stage`, `_get_baseline_protocol`, `_filter_redundant_reports`, `_classify_test` (7 steps + Rx override), `_compute_next_due` (baseline overridden by median gap for PERIODIC), `_days_to_freq_label`, `_status_tag`, `_to_sections`
+- Implemented `compute_care_plan(db, pet)` → `CarePlanV2` TypedDict with Continue / Attend To / Suggested buckets, conflict resolution (ATTEND > CONTINUE > SUGGESTED), next-year exclusion, orderable diet items in Continue
+- Wrote 101 unit tests covering all 7 classification paths + edge cases; all pass
+
+## Handoff — Patterns Learned
+- `ConditionMedication` must be joined through `Condition` to scope by `pet_id` — direct query without join would return all pet medications
+- `DietItem.label` is the display name; `DietItem.type` maps to `"food"|"homemade"|"packaged"|"supplement"` — supplement type gets `test_type="supplement"`, everything else gets `"food"`
+- Items with `next_due > today + 365 days` must be completely excluded from the response, not just flagged — this avoids cluttering the card with far-future items
+- `compute_care_plan` is intentionally synchronous (no `async`) because it does only DB queries via SQLAlchemy Session — no async needed
+
+## Handoff — Files Changed
+- `backend/app/services/care_plan_engine.py` — **CREATED** (classification engine, 520 lines)
+- `backend/tests/unit/test_care_plan_engine.py` — **CREATED** (101 unit tests, ~550 lines)
