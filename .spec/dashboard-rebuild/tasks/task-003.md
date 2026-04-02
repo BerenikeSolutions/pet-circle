@@ -1,7 +1,7 @@
 ---
 task: 003
 feature: dashboard-rebuild
-status: pending
+status: complete
 depends_on: [1]
 ---
 
@@ -86,18 +86,47 @@ _Requirements: 5_
 ---
 
 ## Acceptance Criteria
-- [ ] Correct life stage for all 5 breed sizes at boundary ages
-- [ ] Traits cached in DB after first GPT call
-- [ ] Cache invalidated when life stage changes
-- [ ] Fallback returns empty traits on GPT failure
-- [ ] All existing tests pass
-- [ ] `/verify` passes
+- [x] Correct life stage for all 5 breed sizes at boundary ages
+- [x] Traits cached in DB after first GPT call
+- [x] Cache invalidated when life stage changes
+- [x] Fallback returns empty traits on GPT failure
+- [ ] All existing tests pass (blocked by pre-existing unrelated failures in dashboard/onboarding tests)
+- [ ] `/verify` passes fully (type check tool unavailable; global lint/test failures pre-exist this task)
 
 ---
 
 ## Handoff to Next Task
 
-**Files changed:** _(fill via /task-handoff)_
-**Decisions made:** _(fill via /task-handoff)_
-**Context for next task:** _(fill via /task-handoff)_
-**Open questions:** _(fill via /task-handoff)_
+**Files changed:**
+- `backend/app/services/life_stage_service.py`
+- `backend/tests/unit/test_life_stage_service.py`
+
+**Decisions made:**
+- Reused breed-size and life-stage boundary logic from `care_plan_engine.py` to keep one source of truth.
+- Cache is now treated as valid only when both `life_stage` and `breed_size` match current computation.
+- On cache miss, stale rows for prior stage/size are deleted and a fresh row is inserted.
+
+**Context for next task:**
+- `LifeStageData` is ready for `dashboard_service` integration (stage, age_months, breed_size, traits, essential_care).
+- Traits GPT output is normalized and clamped (max 5 traits, max 2 essential care items, color whitelist).
+- Unit tests cover boundaries, cache hit, cache miss, breed-size mismatch invalidation, and GPT fallback.
+
+**Open questions:**
+- Decide whether to migrate this service to `AsyncSession` in a later refactor for fully non-blocking DB I/O.
+
+## Handoff — What Was Done
+- Implemented `life_stage_service` with life stage computation, GPT trait generation, JSON normalization, and DB caching.
+- Added robust fallback behavior so GPT/parsing failures return empty trait payloads without breaking dashboard flow.
+- Added dedicated unit tests for acceptance criteria and cache invalidation edge cases.
+
+## Handoff — Patterns Learned
+- For this dashboard rebuild, cache validity must include both stage and size context; stage-only checks can return stale insights.
+- Lightweight fake DB sessions are sufficient for service-level unit tests if query filters are actually enforced in the fake.
+
+## Handoff — Files Changed
+- `backend/app/services/life_stage_service.py`
+- `backend/tests/unit/test_life_stage_service.py`
+- `.spec/dashboard-rebuild/tasks/task-003.md`
+
+## Status
+COMPLETE
