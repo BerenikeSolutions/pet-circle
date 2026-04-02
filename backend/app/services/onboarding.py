@@ -31,6 +31,7 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 from openai import AsyncOpenAI
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -1485,7 +1486,32 @@ async def _finalize_onboarding(db, user, send_fn):
         .first()
     )
     token = token_row.token if token_row else None
-    record_count = db.query(PreventiveRecord).filter(PreventiveRecord.pet_id == pet.id).count()
+    # Count only records with an actual date logged for the health-critical
+    # categories: vaccines, blood tests, flea/tick prevention, and deworming.
+    # Seeded empty placeholder rows and unrelated circles (nutrition, hygiene
+    # grooming, etc.) are excluded so the count reflects meaningful health events.
+    record_count = (
+        db.query(PreventiveRecord)
+        .join(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
+        .filter(
+            PreventiveRecord.pet_id == pet.id,
+            PreventiveRecord.last_done_date.isnot(None),
+            or_(
+                PreventiveMaster.item_name.ilike("%vaccine%"),
+                PreventiveMaster.item_name.ilike("%rabies%"),
+                PreventiveMaster.item_name.ilike("%dhpp%"),
+                PreventiveMaster.item_name.ilike("%feline core%"),
+                PreventiveMaster.item_name.ilike("%bordetella%"),
+                PreventiveMaster.item_name.ilike("%kennel cough%"),
+                PreventiveMaster.item_name.ilike("%blood%"),
+                PreventiveMaster.item_name.ilike("%deworming%"),
+                PreventiveMaster.item_name.ilike("%deworm%"),
+                PreventiveMaster.item_name.ilike("%tick%"),
+                PreventiveMaster.item_name.ilike("%flea%"),
+            ),
+        )
+        .count()
+    )
     conditions = (
         db.query(Condition)
         .filter(Condition.pet_id == pet.id, Condition.is_active == True)
@@ -1535,6 +1561,9 @@ async def _finalize_onboarding(db, user, send_fn):
         f"will be ready in just a moment.",
     )
 
+    # Fetch diet items for AI supplement recommendation.
+    diet_items = db.query(DietItem).filter(DietItem.pet_id == pet.id).all()
+
     # Try GPT-generated message, fall back to templates.
     care_plan_msg = await _generate_care_plan_message(
         pet=pet,
@@ -1543,6 +1572,7 @@ async def _finalize_onboarding(db, user, send_fn):
         record_count=record_count,
         docs_uploaded=docs_uploaded,
         conditions=conditions,
+        diet_items=diet_items,
     )
 
     # Append dashboard link.
@@ -1559,13 +1589,86 @@ async def _finalize_onboarding(db, user, send_fn):
     await send_fn(db, mobile, care_plan_msg)
 
 
+async def _ai_supplement_recommendation(
+    pet,
+    diet_items: list | None,
+    conditions: list | None,
+) -> str | None:
+    """
+    Generate a personalised supplement recommendation via gpt-4.1-mini.
+
+    Returns a single conversational sentence (no bullet points, no headers)
+    or None on failure so the caller can use a deterministic fallback.
+    """
+    try:
+        from app.core.constants import OPENAI_QUERY_MODEL
+        client = _get_openai_onboarding_client()
+
+        # Build compact context from available data.
+        name = pet.name
+        species = (pet.species or "dog").lower()
+        breed = pet.breed or "unknown breed"
+        age = pet.age_text or (str(pet.dob) if pet.dob else "unknown age")
+        gender = getattr(pet, "gender", None) or "unknown"
+        weight = getattr(pet, "weight_kg", None)
+        weight_line = f"{weight} kg" if weight else "unknown"
+
+        food_labels = []
+        if diet_items:
+            for item in diet_items:
+                label = getattr(item, "label", None)
+                if label:
+                    food_labels.append(label)
+        food_summary = ", ".join(food_labels) if food_labels else "not provided"
+
+        active_conditions = [c for c in (conditions or []) if getattr(c, "name", None)]
+        condition_names = ", ".join(c.name for c in active_conditions) if active_conditions else "none"
+
+        prompt = (
+            f"Pet profile:\n"
+            f"Name: {name}\n"
+            f"Species: {species}\n"
+            f"Breed: {breed}\n"
+            f"Age: {age}\n"
+            f"Gender: {gender}\n"
+            f"Weight: {weight_line}\n"
+            f"Current diet/food: {food_summary}\n"
+            f"Health conditions: {condition_names}\n\n"
+            f"Write ONE short, warm WhatsApp message sentence (max 25 words) "
+            f"recommending 1-2 specific supplements for this pet based on their "
+            f"profile. Be specific to their breed, age, and diet. "
+            f"No bullet points. No headers. No asterisks. No markdown. "
+            f"Start with 'We'd suggest' or 'Based on [name]'s profile, we'd recommend'."
+        )
+
+        async def _call() -> str:
+            response = await client.chat.completions.create(
+                model=OPENAI_QUERY_MODEL,
+                temperature=0.4,
+                max_tokens=80,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return (response.choices[0].message.content or "").strip()
+
+        result = await retry_openai_call(_call)
+        return result or None
+    except Exception as e:
+        logger.warning("AI supplement recommendation failed: %s", str(e))
+        return None
+
+
 async def _generate_care_plan_message(
     pet, diet_count: int, supplement_count: int,
     record_count: int, docs_uploaded: int,
     conditions: list[Condition] | None = None,
+    diet_items: list | None = None,
 ) -> str:
     """
-    Generate the "care plan ready" message via deterministic templates.
+    Generate the "care plan ready" message.
+
+    Supplement recommendation is AI-generated (gpt-4.1-mini) based on
+    the pet's actual breed, age, diet, and conditions. Falls back to a
+    deterministic sentence if OpenAI is unavailable.
 
     Follows flow.txt prompt rules:
     - Open with "[pet name]'s care plan is ready! 🐾"
@@ -1584,9 +1687,9 @@ async def _generate_care_plan_message(
     has_conditions = len(active_conditions) > 0
     condition_names = ", ".join(c.name for c in active_conditions[:3])
     condition_count = len(active_conditions)
-
-    # --- Hardcoded deterministic templates (5 variations from flow.txt) ---
     name = pet.name
+
+    # Build condition summary line.
     if has_conditions:
         condition_line = (
             f"We noted {condition_count} health condition{'s' if condition_count != 1 else ''}"
@@ -1595,14 +1698,27 @@ async def _generate_care_plan_message(
     else:
         condition_line = "No active health conditions flagged."
 
+    # AI-generated supplement recommendation, with deterministic fallback.
+    supplement_rec = await _ai_supplement_recommendation(pet, diet_items, conditions)
+    if not supplement_rec:
+        if has_food:
+            supplement_rec = (
+                f"We'd suggest adding Omega-3 and a probiotic based on {name}'s "
+                f"diet and life stage."
+            )
+        else:
+            supplement_rec = (
+                f"We'd suggest adding Omega-3 and a probiotic based on {name}'s "
+                f"age and breed for coat health, joint support, and overall immunity."
+            )
+
     if has_conditions and has_food and has_preventive:
         # Variation 1: Conditions + food + preventive shared.
         return (
             f"{name}'s care plan is ready! 🐾 Based on {name}'s health analysis, life stage and current diet.\n\n"
             f"{condition_line}\n\n"
-            f"{record_count} preventive care items are on track.\n\n"
-            f"We'd suggest adding Omega-3 and a probiotic — specifically based on {name}'s diet, "
-            f"life stage, and overall recovery support."
+            f"We've logged {record_count} preventive care record{'s' if record_count != 1 else ''} for {name}.\n\n"
+            f"{supplement_rec}"
         )
     elif has_food and has_preventive:
         # Variation 2: No conditions, food and preventive shared.
@@ -1610,9 +1726,8 @@ async def _generate_care_plan_message(
             f"{name}'s care plan is ready! 🐾 Based on {name}'s health analysis, "
             f"life stage and current diet.\n\n"
             f"{condition_line}\n\n"
-            f"{record_count} preventive care items are on track.\n\n"
-            f"We'd suggest adding Omega-3 and a probiotic based on {name}'s diet "
-            f"and life stage — great for coat health and joint support."
+            f"We've logged {record_count} preventive care record{'s' if record_count != 1 else ''} for {name}.\n\n"
+            f"{supplement_rec}"
         )
     elif has_food and not has_preventive:
         # Variation 3: Food shared, preventive not shared.
@@ -1621,21 +1736,19 @@ async def _generate_care_plan_message(
             f"{condition_line}\n\n"
             f"We don't have {name}'s preventive care details yet — adding these "
             f"would give us a more complete health picture.\n\n"
-            f"We'd suggest adding Omega-3 and a probiotic based on {name}'s diet "
-            f"and life stage — great for coat health and joint support."
+            f"{supplement_rec}"
         )
     elif has_breed and has_age:
         # Variation 4: No food, no preventive, but age and breed available.
         return (
             f"{name}'s care plan is ready! 🐾\n\n"
             f"{condition_line}\n\n"
-            f"We'd suggest adding Omega-3 and a probiotic — based on {name}'s age "
-            f"and breed, these support coat health, joint development, and overall immunity.\n\n"
+            f"{supplement_rec}\n\n"
             f"To make this analysis even more personalised, sharing {name}'s current "
             f"diet and preventive care routine would give us a much fuller picture."
         )
     elif not has_food and not has_preventive:
-        # Variation 5: Minimal data.
+        # Variation 5: Minimal data — no supplement rec since we have too little context.
         return (
             f"{name}'s care plan is ready! 🐾\n\n"
             f"{condition_line}\n\n"

@@ -1696,8 +1696,10 @@ async def _send_deferred_care_plan(
             msg += "\n\nPlease upload documents that belong to this pet only."
             await send_text_message(db, from_number, msg)
 
+        from sqlalchemy import or_
         from app.models.condition import Condition
         from app.models.diet_item import DietItem
+        from app.models.preventive_master import PreventiveMaster
         from app.models.preventive_record import PreventiveRecord
 
         diet_count = db.query(DietItem).filter(DietItem.pet_id == pet.id).count()
@@ -1705,7 +1707,32 @@ async def _send_deferred_care_plan(
             DietItem.pet_id == pet.id,
             DietItem.type == "supplement",
         ).count()
-        record_count = db.query(PreventiveRecord).filter(PreventiveRecord.pet_id == pet.id).count()
+        # Count only records with an actual date logged for the health-critical
+        # categories: vaccines, blood tests, flea/tick prevention, and deworming.
+        # Seeded empty placeholder rows and unrelated circles (nutrition, hygiene
+        # grooming, etc.) are excluded so the count reflects meaningful health events.
+        record_count = (
+            db.query(PreventiveRecord)
+            .join(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
+            .filter(
+                PreventiveRecord.pet_id == pet.id,
+                PreventiveRecord.last_done_date.isnot(None),
+                or_(
+                    PreventiveMaster.item_name.ilike("%vaccine%"),
+                    PreventiveMaster.item_name.ilike("%rabies%"),
+                    PreventiveMaster.item_name.ilike("%dhpp%"),
+                    PreventiveMaster.item_name.ilike("%feline core%"),
+                    PreventiveMaster.item_name.ilike("%bordetella%"),
+                    PreventiveMaster.item_name.ilike("%kennel cough%"),
+                    PreventiveMaster.item_name.ilike("%blood%"),
+                    PreventiveMaster.item_name.ilike("%deworming%"),
+                    PreventiveMaster.item_name.ilike("%deworm%"),
+                    PreventiveMaster.item_name.ilike("%tick%"),
+                    PreventiveMaster.item_name.ilike("%flea%"),
+                ),
+            )
+            .count()
+        )
         docs_uploaded = db.query(Document).filter(Document.pet_id == pet.id).count()
         conditions = (
             db.query(Condition)
@@ -1714,6 +1741,8 @@ async def _send_deferred_care_plan(
             .all()
         )
 
+        diet_items = db.query(DietItem).filter(DietItem.pet_id == pet.id).all()
+
         care_plan_msg = await _generate_care_plan_message(
             pet=pet,
             diet_count=diet_count,
@@ -1721,6 +1750,7 @@ async def _send_deferred_care_plan(
             record_count=record_count,
             docs_uploaded=docs_uploaded,
             conditions=conditions,
+            diet_items=diet_items,
         )
 
         dashboard_link = _get_dashboard_link(db, pet)
