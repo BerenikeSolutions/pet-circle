@@ -100,6 +100,12 @@ _extraction_timers: dict[str, asyncio.Task] = {}
 # Key: str(pet_id), Value: list of Document.id values.
 _batch_document_ids: dict[str, list] = {}
 
+# Tracks whether the active WhatsApp upload burst for a pet originated from
+# onboarding's awaiting_documents state. This is captured at upload time so
+# delayed extraction does not depend on mutable user state later.
+# Key: str(pet_id), Value: True if batch started during awaiting_documents.
+_batch_is_onboarding: dict[str, bool] = {}
+
 # Seconds to wait after the last upload before starting batch extraction.
 # Gives the user time to finish sending all files in a batch.
 _EXTRACTION_DELAY_SECONDS: int = 15
@@ -995,6 +1001,13 @@ async def _handle_media(db: Session, user, message_data: dict) -> None:
         # deferred extractor doesn't accidentally sweep unrelated pending docs.
         _batch_document_ids.setdefault(pet_key, []).append(document.id)
 
+        # Persist onboarding intent for this batch at upload time.
+        # Once True in a batch, keep it True until that batch is drained.
+        if user.onboarding_state == "awaiting_documents":
+            _batch_is_onboarding[pet_key] = True
+        else:
+            _batch_is_onboarding.setdefault(pet_key, False)
+
         # Schedule (or reschedule) a deferred batch extraction.
         # The timer resets with each new upload so extraction only starts
         # after uploads have settled (_EXTRACTION_DELAY_SECONDS of silence).
@@ -1064,6 +1077,7 @@ async def _delayed_batch_extraction(
         # from being included in the current extraction summary.
         batched_doc_ids = list(_batch_document_ids.get(pet_key, []))
         if not batched_doc_ids:
+            _batch_is_onboarding.pop(pet_key, None)
             return
 
         pending_docs = (
@@ -1078,6 +1092,8 @@ async def _delayed_batch_extraction(
         )
 
         if not pending_docs:
+            _batch_document_ids.pop(pet_key, None)
+            _batch_is_onboarding.pop(pet_key, None)
             return
 
         total = len(pending_docs)
@@ -1086,30 +1102,64 @@ async def _delayed_batch_extraction(
             str(pet_id), total,
         )
 
-        # Notify user once per batch with consolidated acknowledgements.
-        doc_names = "\n".join(f"  - {d.document_name or d.file_path.split('/')[-1]}" for d in pending_docs)
+        from app.models.user import User
+
+        user = bg_db.query(User).filter(User.id == user_id).first()
         pet = bg_db.query(Pet).filter(Pet.id == pet_id).first()
-        pet_species = pet.species if pet else "dog"
-        pet_breed = pet.breed if pet else None
-        received_fun_fact = await get_breed_fun_fact(bg_db, user_id, pet_breed, pet_species)
-        saved_fun_fact = await get_breed_fun_fact(bg_db, user_id, pet_breed, pet_species)
-        extracting_fun_fact = await get_breed_fun_fact(bg_db, user_id, pet_breed, pet_species)
-        await send_text_message(
-            bg_db, from_number,
-            f"Got it — I received *{total}* document{'s' if total != 1 else ''} for *{pet_name}*.\n\n"
-            f"🎉 *Fun fact time!*\n✨ {received_fun_fact}",
-        )
-        await send_text_message(
-            bg_db, from_number,
-            f"✅ The below files are saved for *{pet_name}*:\n{doc_names}\n\n"
-            "Will start extracting health data shortly.\n\n"
-            f"🎉 *Fun fact time!*\n✨ {saved_fun_fact}",
-        )
-        await send_text_message(
-            bg_db, from_number,
-            f"🧪 I will now start extracting health data for *{pet_name}*:\n{doc_names}\n\n"
-            f"🎉 *Fun fact time!*\n✨ {extracting_fun_fact}",
-        )
+        if user:
+            user._plaintext_mobile = from_number
+
+        is_onboarding_upload = bool(_batch_is_onboarding.get(pet_key, False))
+
+        # For onboarding document uploads, send the deterministic transition
+        # message first ("That's everything...") and mark extraction as deferred.
+        # This keeps the flow consistent with the no-document branch.
+        if (
+            is_onboarding_upload
+            and user
+            and user.onboarding_state == "awaiting_documents"
+        ):
+            try:
+                from app.services.onboarding import _finalize_onboarding
+                await _finalize_onboarding(bg_db, user, send_text_message)
+            except Exception as e:
+                logger.warning(
+                    "Could not finalize onboarding before extraction for user=%s: %s",
+                    str(user.id),
+                    str(e),
+                )
+                try:
+                    bg_db.rollback()
+                except Exception:
+                    pass
+                # If deterministic finalization couldn't run, fall back to the
+                # regular batch acknowledgements to avoid a silent UX gap.
+                is_onboarding_upload = False
+
+        # Notify user once per batch with consolidated acknowledgements.
+        if not is_onboarding_upload:
+            doc_names = "\n".join(f"  - {d.document_name or d.file_path.split('/')[-1]}" for d in pending_docs)
+            pet_species = pet.species if pet else "dog"
+            pet_breed = pet.breed if pet else None
+            received_fun_fact = await get_breed_fun_fact(bg_db, user_id, pet_breed, pet_species)
+            saved_fun_fact = await get_breed_fun_fact(bg_db, user_id, pet_breed, pet_species)
+            extracting_fun_fact = await get_breed_fun_fact(bg_db, user_id, pet_breed, pet_species)
+            await send_text_message(
+                bg_db, from_number,
+                f"Got it — I received *{total}* document{'s' if total != 1 else ''} for *{pet_name}*.\n\n"
+                f"🎉 *Fun fact time!*\n✨ {received_fun_fact}",
+            )
+            await send_text_message(
+                bg_db, from_number,
+                f"✅ The below files are saved for *{pet_name}*:\n{doc_names}\n\n"
+                "Will start extracting health data shortly.\n\n"
+                f"🎉 *Fun fact time!*\n✨ {saved_fun_fact}",
+            )
+            await send_text_message(
+                bg_db, from_number,
+                f"🧪 I will now start extracting health data for *{pet_name}*:\n{doc_names}\n\n"
+                f"🎉 *Fun fact time!*\n✨ {extracting_fun_fact}",
+            )
 
         success_count = 0
         fail_count = 0
@@ -1207,10 +1257,6 @@ async def _delayed_batch_extraction(
                             pass
 
         # --- Send ONE consolidated summary after all extractions complete ---
-        pet = bg_db.query(Pet).filter(Pet.id == pet_id).first()
-        from app.models.user import User
-        user = bg_db.query(User).filter(User.id == user_id).first()
-
         if user and pet:
             user._plaintext_mobile = from_number
 
@@ -1241,6 +1287,7 @@ async def _delayed_batch_extraction(
         _recent_uploads.pop(pet_key, None)
         _rejection_sent.pop(pet_key, None)
         _batch_document_ids.pop(pet_key, None)
+        _batch_is_onboarding.pop(pet_key, None)
 
     except Exception as e:
         logger.error(
@@ -1261,6 +1308,7 @@ async def _delayed_batch_extraction(
         # Clear batch counter even on failure so user isn't stuck.
         _recent_uploads.pop(pet_key, None)
         _batch_document_ids.pop(pet_key, None)
+        _batch_is_onboarding.pop(pet_key, None)
     finally:
         bg_db.close()
 
