@@ -124,21 +124,12 @@ logger = logging.getLogger(__name__)
 
 def _should_use_agentic_onboarding() -> bool:
     """
-    Return True when AGENTIC_ONBOARDING_ENABLED='true' and the OpenAI API
-    is reachable. Evaluated per-message so the flag can be toggled via env
-    var update + redeploy without code changes.
+    Onboarding is intentionally deterministic in this deployment.
 
-    Falls back to False (deterministic flow) on any error.
+    Always returns False so routing never enters the agentic onboarding path,
+    regardless of environment flags.
     """
-    flag = getattr(settings, "AGENTIC_ONBOARDING_ENABLED", "false")
-    has_key = bool(getattr(settings, "OPENAI_API_KEY", None))
-    if flag.lower() != "true" or not has_key:
-        return False
-    try:
-        from app.services.agentic_onboarding import is_openai_available
-        return is_openai_available()
-    except Exception:
-        return False
+    return False
 
 
 def _should_use_agentic_order() -> bool:
@@ -296,22 +287,17 @@ async def route_message(db: Session, message_data: dict) -> None:
                     await handle_onboarding_step(db, user, text, send_text_message, message_data=message_data)
                 return
 
-            # --- Agentic onboarding: route all message types to the agent ---
+            # --- Legacy agentic state migration ---
+            # Onboarding is deterministic-only. If any existing user is still in
+            # the legacy agentic state, move them back to deterministic onboarding.
             if user.onboarding_state == "agentic_onboarding":
-                from app.services.agentic_onboarding import handle_agentic_onboarding_step
-                await handle_agentic_onboarding_step(db, user, message_data, send_text_message)
-                return
-
-            # --- Transition from deterministic to agentic after consent step ---
-            # When agentic is enabled, _step_consent() sets state=agentic_onboarding
-            # directly and the handler below (after handle_onboarding_step) fires.
-            # This branch is a fallback: if a user is somehow stuck in awaiting_name
-            # (e.g. legacy row), their next text message transitions them to agentic.
-            if user.onboarding_state == "awaiting_name" and _should_use_agentic_onboarding():
-                user.onboarding_state = "agentic_onboarding"
+                user.onboarding_state = "welcome"
                 db.commit()
-                from app.services.agentic_onboarding import handle_agentic_onboarding_step
-                await handle_agentic_onboarding_step(db, user, message_data, send_text_message)
+                await send_text_message(
+                    db,
+                    from_number,
+                    "Let's continue setup. What's your pet's name?",
+                )
                 return
 
             # --- All other onboarding states: block non-text ---
@@ -342,12 +328,6 @@ async def route_message(db: Session, message_data: dict) -> None:
                     )
                 return
             await handle_onboarding_step(db, user, text, send_text_message, message_data=message_data)
-            # _step_consent() may have transitioned directly to agentic_onboarding
-            # without sending a reply. Call the agentic handler now so the LLM
-            # sends Step 1 in the same request (avoids the double "thank you" bug).
-            if user.onboarding_state == "agentic_onboarding":
-                from app.services.agentic_onboarding import handle_agentic_onboarding_step
-                await handle_agentic_onboarding_step(db, user, message_data, send_text_message)
             return
 
         # --- Step 3: User is fully onboarded — route by message type ---
@@ -1453,141 +1433,16 @@ async def _try_agentic_finalization(
     all_results: list[dict], success_count: int, fail_count: int,
 ) -> bool:
     """
-    Attempt to send an LLM-composed finalization message when the dashboard link
-    was deferred during onboarding (user.dashboard_link_pending == True).
+    Deterministic-only finalization guard.
 
-    Returns True if an LLM message was sent (caller should skip _send_batch_summary).
-    Returns False if the flag is unset, the feature is disabled, or LLM fails
-    (caller should proceed with _send_batch_summary and then clear the flag).
-
-    Never raises — all errors are logged and False is returned.
+    Agentic finalization is disabled for this deployment, so this helper always
+    returns False and callers continue through deterministic summary/finalization
+    branches.
     """
-    if not getattr(user, "dashboard_link_pending", False):
-        return False
-
-    try:
-        from app.services.agentic_finalization import (
-            _should_use_agentic_finalization,
-            compose_finalization_message,
-        )
-        if not _should_use_agentic_finalization():
-            return False
-
-        # --- Gather context for the LLM ---
-        from app.models.diet_item import DietItem
-        from app.models.custom_preventive_item import CustomPreventiveItem
-        from app.models.preventive_master import PreventiveMaster
-        from app.models.preventive_record import PreventiveRecord
-
-        records = (
-            db.query(PreventiveRecord, PreventiveMaster)
-            .join(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
-            .filter(
-                PreventiveRecord.pet_id == pet.id,
-                PreventiveRecord.last_done_date.isnot(None),
-            )
-            .order_by(PreventiveRecord.last_done_date.desc())
-            .all()
-        )
-        items_extracted = [
-            {
-                "item_name": master.item_name,
-                "last_done_date": record.last_done_date.strftime("%d/%m/%Y"),
-                "next_due_date": (
-                    record.next_due_date.strftime("%d/%m/%Y")
-                    if record.next_due_date else None
-                ),
-            }
-            for record, master in records
-        ]
-
-        custom_records = (
-            db.query(PreventiveRecord, CustomPreventiveItem)
-            .join(
-                CustomPreventiveItem,
-                PreventiveRecord.custom_preventive_item_id == CustomPreventiveItem.id,
-            )
-            .filter(
-                PreventiveRecord.pet_id == pet.id,
-                PreventiveRecord.last_done_date.isnot(None),
-            )
-            .order_by(PreventiveRecord.last_done_date.desc())
-            .all()
-        )
-        items_extracted.extend(
-            {
-                "item_name": custom_item.item_name,
-                "last_done_date": record.last_done_date.strftime("%d/%m/%Y"),
-                "next_due_date": (
-                    record.next_due_date.strftime("%d/%m/%Y")
-                    if record.next_due_date else None
-                ),
-            }
-            for record, custom_item in custom_records
-        )
-
-        diet_count = db.query(DietItem).filter(DietItem.pet_id == pet.id).count()
-        dashboard_url = _get_dashboard_link(db, pet) or ""
-        fun_fact = await get_breed_fun_fact(
-            db, user.id, getattr(pet, "breed", None), pet.species or "dog"
-        )
-
-        # Count active reminders (mirrors deterministic _finalize_onboarding checklist).
-        reminders_count = 0
-        try:
-            from app.models.reminder import Reminder
-            reminders_count = (
-                db.query(Reminder)
-                .join(PreventiveRecord, Reminder.preventive_record_id == PreventiveRecord.id)
-                .filter(
-                    PreventiveRecord.pet_id == pet.id,
-                    Reminder.status.in_(["pending", "sent"]),
-                )
-                .count()
-            )
-        except Exception as _rem_err:
-            logger.warning("Could not count reminders for finalization: %s", _rem_err)
-
-        composed = await compose_finalization_message(
-            pet_name=pet.name,
-            species=pet.species or "dog",
-            breed=getattr(pet, "breed", None),
-            docs_uploaded=success_count + fail_count,
-            items_extracted=items_extracted,
-            diet_count=diet_count,
-            dashboard_url=dashboard_url,
-            extraction_failed=fail_count > 0,
-            fun_fact=fun_fact,
-            reminders_count=reminders_count,
-        )
-
-        if not composed:
-            return False
-
-        # Clear the pending flag before sending so a crash doesn't re-send.
-        try:
-            user.dashboard_link_pending = False
-            db.commit()
-        except Exception as flag_err:
-            logger.warning("Could not clear dashboard_link_pending: %s", flag_err)
-            try:
-                db.rollback()
-            except Exception:
-                pass
-
-        await send_text_message(db, from_number, composed)
-        logger.info(
-            "agentic_finalization: sent LLM message for pet=%s user=%s",
-            pet.name, str(user.id),
-        )
-        return True
-
-    except Exception as exc:
-        logger.warning(
-            "_try_agentic_finalization failed for user=%s: %s — falling back",
-            str(user.id), exc,
-        )
-        return False
+    # Finalization is intentionally deterministic in this deployment.
+    # Keep this function as a no-op so callers always use deterministic
+    # summary/finalization branches.
+    return False
 
 
 async def _send_batch_summary(
