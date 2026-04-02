@@ -1,3 +1,12 @@
+## Active Feature
+Feature: dashboard-rebuild
+Spec: .spec/dashboard-rebuild/requirements.md, design.md
+Tasks: .spec/dashboard-rebuild/tasks/
+Current task: .spec/dashboard-rebuild/tasks/task-001.md
+Branch: main (no feature branch)
+
+---
+
 # Agent Instructions — PetCircle Phase 1: WhatsApp Preventive Health System
 
 You're working inside the **WAT framework** (Workflows, Agents, Tools). This architecture separates concerns so that probabilistic AI handles reasoning while deterministic code handles execution. That separation ensures reliability at scale.
@@ -240,6 +249,48 @@ Next.js Dashboard (Token-based Access)
 | Backend Hosting | Render |
 | Frontend Hosting | Vercel |
 | Reminder Engine | GitHub Actions Cron |
+
+---
+
+## Skills
+
+| Skill | Purpose |
+|-------|---------|
+| `code-writing-software-development` | Coding standards, read-before-edit discipline, 6-phase verification |
+| `tdd-workflow` | 80%+ test coverage, Red/Green/Refactor, CI gate |
+| `security-review` | OWASP Top 10 checklist for auth/input/secrets/APIs |
+| `autonomous-agents-task-automation` | Parallel execution, model routing, subagent delegation |
+| `continuous-learning` | Knowledge persistence across sessions |
+| `strategic-compact` | Context compaction at phase boundaries |
+| `wrapup` | Session persistence, captures decisions and open threads |
+| `python-patterns` | Python/FastAPI coding patterns |
+| `postgres-patterns` | PostgreSQL query and schema patterns |
+| `database-migrations` | Database migration workflow |
+| `planning-specification-architecture` | Gated requirements → design → tasks workflow |
+| `api-design` | REST API design patterns |
+
+## Agents
+
+| Agent | Purpose |
+|-------|---------|
+| `refactor-cleaner` | Code cleanup and refactoring |
+| `python-reviewer` | Python code review |
+| `database-reviewer` | Database schema and query review |
+| `code-reviewer` | General code review |
+
+## Commands
+
+| Command | Purpose |
+|---------|---------|
+| `plan` | Create implementation plan |
+| `tdd` | Run TDD workflow |
+| `verify` | Verify implementation |
+| `quality-gate` | Run quality checks |
+| `refactor-clean` | Trigger refactor-cleaner agent |
+| `save-session` | Save session state |
+| `resume-session` | Resume previous session |
+| `task-handoff` | Hand off to next task |
+| `python-review` | Python-specific review |
 
 ---
 
