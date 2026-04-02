@@ -1,0 +1,205 @@
+# Implementation Plan: Dashboard Rebuild
+
+- [ ] 1. Database migration — `pet_life_stage_traits` table
+  - Create migration file `backend/migrations/018_pet_life_stage_traits.sql`
+  - Create SQLAlchemy model `backend/app/models/pet_life_stage_trait.py`
+  - Register model in `backend/app/models/__init__.py`
+  - Add relationship to `Pet` model
+  - Run migration against dev database
+  - _Requirements: 5, 9_
+  - _Skills: /database-migrations, /postgres-patterns_
+  - **AC:** Table exists in dev DB. Model imports without errors. `Pet.life_stage_traits` relationship works.
+
+- [ ] 2. Care Plan Classification Engine
+  - Create `backend/app/services/care_plan_engine.py`
+  - Implement breed size classification (5 categories by weight)
+  - Implement life stage classification (breed-size-aware boundaries)
+  - Implement baseline test protocol lookup (Sheet 2+3 matrix)
+  - Implement report redundancy guards (same-day dups, <30 day non-Rx)
+  - Implement 7-step classification algorithm (NO_HISTORY → SINGLE → SPORADIC → PERIODIC → PERIODIC_INSUFFICIENT)
+  - Implement prescription override (ATTEND TO with Rx due date)
+  - Implement conflict resolution (ATTEND TO > CONTINUE > SUGGESTED)
+  - Implement next due date calculation
+  - Implement "due next year" exclusion from response
+  - Implement orderable food/supplement placement in Continue bucket
+  - Write unit tests covering all 7 classification paths + edge cases
+  - _Requirements: 8, 9_
+  - _Skills: /python-patterns, /code-writing-software-development, /tdd-workflow_
+  - **AC:** All 7 classification paths tested. Redundancy guards work. Prescription overrides work. Conflict resolution prevents items in two buckets. Items due next year excluded. Tests pass.
+
+- [ ] 3. Life Stage Service
+  - Create `backend/app/services/life_stage_service.py`
+  - Implement `get_life_stage_data()` — computes stage, age_months, breed_size
+  - Implement GPT trait generation (breed + age specific, max 2 lines of pills)
+  - Implement essential care generation (max 2 items linked to traits)
+  - Implement DB caching in `pet_life_stage_traits` table — regenerate on life stage change
+  - Write unit tests for breed size classification, stage boundaries, cache hit/miss
+  - _Requirements: 5_
+  - _Skills: /python-patterns, /code-writing-software-development_
+  - **AC:** Correct life stage for all breed sizes. Traits are cached after first GPT call. Cache invalidated on life stage change. Fallback works when GPT fails.
+
+- [ ] 4. Vet Summary Service
+  - Create `backend/app/services/vet_summary_service.py`
+  - Query contacts with `role='veterinarian'`, count document_id references per vet
+  - Return primary vet (most mentions) with name + last visit date
+  - Handle no-contacts case (return null)
+  - Write unit tests for mention counting, tie-breaking, empty contacts
+  - _Requirements: 3, 18_
+  - _Skills: /python-patterns, /code-writing-software-development_
+  - **AC:** Primary vet correctly identified by mention count. Last visit date derived from most recent document. Null returned when no vet contacts exist. Tests pass.
+
+- [ ] 5. Extend nutrition_service.py — Diet Summary
+  - Add `get_diet_summary()` method to `nutrition_service.py`
+  - Format existing nutrition analysis as donut data: `{ macros: [...], missing_micros: [...] }`
+  - Apply guardrail thresholds: Calories >100%=amber, others >110%=amber/<80%=red, Omega-3 at 15%=RED
+  - Return max 3 missing micronutrients with icon + name + reason
+  - Write unit tests for threshold logic
+  - _Requirements: 7, 18_
+  - _Skills: /python-patterns, /code-writing-software-development_
+  - **AC:** Donut data has correct thresholds. Omega-3 at 15% returns RED. Green not used for >110%. Max 3 missing micros. Tests pass.
+
+- [ ] 6. Extend ai_insights_service.py — Recognition + Care Plan Reasons
+  - Add `generate_recognition_bullets()` — max 3 bullets from reports, observational tone, ordered: conditions → preventive → diet
+  - Add `generate_care_plan_reasons()` — GPT-generates reason for each orderable item connecting life stage + health + nutrition. Fresh per load (not cached).
+  - Write tests for bullet ordering, reason generation fallback
+  - _Requirements: 4, 8, 18_
+  - _Skills: /python-patterns, /code-writing-software-development_
+  - **AC:** Recognition bullets max 3, correct order, observational tone. Reasons generated for all orderable items. Graceful fallback if GPT fails. Tests pass.
+
+- [ ] 7. Health Trends Service
+  - Create `backend/app/services/health_trends_service.py`
+  - Implement `get_health_trends()` assembling:
+    - `ask_vet`: per-condition cards with GPT questions (use existing `pet_ai_insight` 7-day cache), chart data from `diagnostic_test_results`, timeline data from conditions
+    - `signals`: blood panel from latest diagnostics, weight trend from `weight_history`, metabolic tiles from organ markers
+    - `cadence`: vaccine/flea-tick/deworming timelines from `preventive_records`
+  - Write tests for data assembly, empty-data handling
+  - _Requirements: 12, 13, 14, 19_
+  - _Skills: /python-patterns, /code-writing-software-development_
+  - **AC:** Ask-vet questions cached 7 days. Blood panel sorted by groups. Weight trend has latest 5 entries. Cadence timelines correctly ordered (vaccines, flea-tick, deworming). Empty data returns null sections. Tests pass.
+
+- [ ] 8. Records Service
+  - Create `backend/app/services/records_service.py`
+  - Implement `get_records()` structuring documents by type:
+    - `vet_visits`: enriched with medications from conditions, Rx summary, notes
+    - `records`: lab reports, imaging, whatsapp channel items
+  - Write tests for type grouping, medication enrichment
+  - _Requirements: 17, 20_
+  - _Skills: /python-patterns, /code-writing-software-development_
+  - **AC:** Vet visits include medications and Rx summary. Records grouped by type. Correct tag colors. Tests pass.
+
+- [ ] 9. Backend API — Enrich dashboard endpoint + new endpoints
+  - Extend `GET /dashboard/{token}` in `dashboard.py` to call all new services and include `vet_summary`, `life_stage`, `health_conditions_summary`, `care_plan_v2`, `diet_summary`, `recognition` in response
+  - Use `asyncio.gather` to parallelize service calls
+  - Add `GET /dashboard/{token}/health-trends-v2` endpoint
+  - Add `GET /dashboard/{token}/records-v2` endpoint
+  - Update Pydantic response models
+  - Isolate failures — each section returns empty/null on error, does not crash dashboard
+  - Write integration tests for enriched response, new endpoints
+  - _Requirements: 18, 19, 20_
+  - _Skills: /python-patterns, /api-design, /code-writing-software-development_
+  - **AC:** Enriched dashboard response includes all 6 new fields. Health trends endpoint returns structured data. Records endpoint returns structured data. Individual service failures don't crash the response. Integration tests pass.
+
+- [ ] 10. Frontend — Design system update + TypeScript types
+  - Update `frontend/src/app/globals.css` with new CSS variables (--orange, --amber, --green, --red, --bg, --warm, --border, tints, text colors, radii)
+  - Add new TypeScript types to `frontend/src/lib/api.ts`: `DashboardDataV2`, `VetSummary`, `LifeStageData`, `HealthConditionSummary`, `CarePlanV2`, `CarePlanSection`, `CarePlanItem`, `DietSummary`, `Recognition`, `HealthTrendsV2`, `AskVetData`, `SignalsData`, `CadenceData`, `RecordsV2`, `VetVisit`, `RecordItem`
+  - Add API fetch functions for new endpoints
+  - _Requirements: 1_
+  - _Skills: /code-writing-software-development_
+  - **AC:** CSS variables match JSX reference. All types compile. API fetch functions work. Build passes.
+
+- [ ] 11. Frontend — Shared SVG chart components
+  - Create `frontend/src/components/charts/Donut.tsx` — SVG ring 64px, % center text, color by status
+  - Create `frontend/src/components/charts/LineChart.tsx` — weight trend, N points, gradient fill, reference line, final point red
+  - Create `frontend/src/components/charts/BarChart.tsx` — pus cell bars, color by threshold (red >5, amber 1-5, green nil)
+  - Create `frontend/src/components/charts/TimelineSVG.tsx` — vaccination/deworming node timeline (done=green solid, upcoming=dashed grey, missed=red dashed, now=amber dashed)
+  - Create `frontend/src/components/charts/DotPlotSVG.tsx` — tick/flea doses with gap annotations, color by gap length
+  - Match JSX reference pixel-for-pixel
+  - _Requirements: 7, 13, 14_
+  - _Skills: /code-writing-software-development_
+  - **AC:** All 5 chart components render correctly. Donut matches JSX. Line chart has gradient fill + red final point. Bar chart uses correct thresholds. Timeline/dot-plot match JSX reference. Build passes.
+
+- [ ] 12. Frontend — Dashboard cards (Page 1)
+  - Create `frontend/src/components/dashboard/ProfileBanner.tsx` — gradient, brand, bell, avatar, pet info, vet row
+  - Create `frontend/src/components/dashboard/RecognitionCard.tsx` — report count, bullets, "View all reports" link
+  - Create `frontend/src/components/dashboard/LifeStageCard.tsx` — 4-stage bar, marker, caption, trait pills, essential care tiles
+  - Create `frontend/src/components/dashboard/HealthConditionsCard.tsx` — conditions with insights, "Discuss with vet" CTA
+  - Create `frontend/src/components/dashboard/DietAnalysisCard.tsx` — 4 donut grid, missing micros pills
+  - Create `frontend/src/components/dashboard/CarePlanCard.tsx` — 3 buckets, sections, items, order buttons with "Added" animation
+  - Create `frontend/src/components/dashboard/HealthRecordsNav.tsx` — tappable nav card
+  - Create `frontend/src/components/dashboard/CartFloater.tsx` — IntersectionObserver, show on first order-btn scroll
+  - Compose all cards into `DashboardView` wrapper
+  - Match JSX reference pixel-for-pixel, enforce all guardrails
+  - _Requirements: 2, 3, 4, 5, 6, 7, 8, 10, 11_
+  - _Skills: /code-writing-software-development_
+  - **AC:** All 8 cards render correctly at 430px. Banner has correct gradient, no health status/scores. Recognition max 3 bullets, 1 line each. Life stage marker positioned by ageMonths. Conditions show ALL ongoing. Diet donuts use correct thresholds. Care plan 3 buckets in order, no item in two buckets. Order button → "Added" → "Order Again". Cart floater appears on first order-btn scroll. Build passes.
+
+- [ ] 13. Frontend — Health Trends view (Page 2)
+  - Create `frontend/src/components/trends/HealthTrendsView.tsx` — sticky header, scroll-synced pill tabs
+  - Create `frontend/src/components/trends/AskVetSection.tsx` — share banner, condition cards
+  - Create `frontend/src/components/trends/AskVetConditionCard.tsx` — condition tag, headline, questions, charts, timelines
+  - Create `frontend/src/components/trends/SignalsSection.tsx` — wrapper
+  - Create `frontend/src/components/trends/BloodPanelTable.tsx` — marker table, binary green/red status
+  - Create `frontend/src/components/trends/WeightTrendCard.tsx` — line chart, headline, recommendation
+  - Create `frontend/src/components/trends/MetabolicCard.tsx` — 2x2 green tiles, reassuring headline
+  - Create `frontend/src/components/trends/CareCadenceSection.tsx` — wrapper
+  - Create `frontend/src/components/charts/VaccinationCadence.tsx` — SVG timeline with gap labels
+  - Create `frontend/src/components/charts/TickFleaCadence.tsx` — SVG dot-plot with gap annotations
+  - Create `frontend/src/components/charts/DewormingCadence.tsx` — SVG timeline with done/missed/now states
+  - Implement IntersectionObserver scroll-sync with `rootMargin: '-40% 0px -55% 0px'`
+  - Fetch data from `/health-trends-v2` on navigation
+  - _Requirements: 12, 13, 14_
+  - _Skills: /code-writing-software-development_
+  - **AC:** Sticky header with scroll-synced tabs. Ask-vet section has share banner, max 2-3 questions per condition. Blood panel binary green/red. Weight chart has red final point. Metabolic appears after blood panel + weight. Cadence order: vaccines → flea-tick → deworming. All guardrails enforced. Build passes.
+
+- [ ] 14. Frontend — Reminders view (Page 3)
+  - Create `frontend/src/components/reminders/RemindersView.tsx`
+  - Items grouped by care plan section
+  - Edit mode: frequency dropdown, date input, auto-computed next due
+  - Delete with confirmation row
+  - Filter out daily-frequency items
+  - Home floater (black circle, 🏠)
+  - Match JSX reference
+  - _Requirements: 15_
+  - _Skills: /code-writing-software-development_
+  - **AC:** Items grouped by section. Edit saves frequency + date. Delete shows confirmation. Daily items filtered. Home floater navigates to dashboard. Build passes.
+
+- [ ] 15. Frontend — Cart, Checkout, Confirm (Page 4)
+  - Simplify existing `CartView.tsx` to match JSX reference — icon tiles, SKU, section, qty controls
+  - Create `frontend/src/components/cart/CheckoutView.tsx` — delivery details, payment radios, place order
+  - Create `frontend/src/components/cart/ConfirmView.tsx` — success state, order summary, back to dashboard
+  - Delivery logic: ₹49 or free if >=₹599
+  - _Requirements: 16_
+  - _Skills: /code-writing-software-development_
+  - **AC:** Cart shows items with qty controls. Free delivery nudge appears. Checkout has delivery + payment fields. Confirm shows order summary. Build passes.
+
+- [ ] 16. Frontend — Records view (Page 5)
+  - Create `frontend/src/components/records/RecordsView.tsx` — tab pills (Vet Visits | Lab Reports | Imaging | WhatsApp Channel)
+  - Create `frontend/src/components/records/VetVisitCard.tsx` — collapsible, Rx summary, medications table, notes
+  - Latest vet visit open by default, rest collapsed
+  - Other tabs: card per record with icon + title + date + tag + "View →"
+  - Home floater at bottom-right
+  - Fetch data from `/records-v2` on navigation
+  - _Requirements: 17_
+  - _Skills: /code-writing-software-development_
+  - **AC:** 4 tab pills in correct order. Vet visit cards collapse/expand. Latest visit open. Other tabs show record cards. Home floater works. Build passes.
+
+- [ ] 17. Frontend — DashboardClient.tsx rewrite (Orchestrator)
+  - Rewrite `DashboardClient.tsx` with view-switching state (`dashboard | trends | reminders | cart | checkout | confirm | records`)
+  - Remove tab bar, `visitedTabs`, `activeTab`, nudges state
+  - Wire all navigation: bell→reminders, CTA→trends, records nav→records, cart floater→cart, back buttons→dashboard
+  - Preserve: offline-first, stale data recovery, localStorage cache, auto-retry with exponential backoff
+  - Preserve: error boundary wrapping
+  - Manage cart state (add, update qty, remove)
+  - _Requirements: 2_
+  - _Skills: /code-writing-software-development_
+  - **AC:** All 7 view transitions work. Offline/stale handling preserved. Cart state persists across views. Error boundaries wrap all views. Build passes.
+
+- [ ] 18. Cleanup — Remove old components
+  - Remove old tab components: `OverviewTab.tsx`, `HealthTab.tsx`, `HygieneTab.tsx`, `NutritionTab.tsx`, `ConditionsTab.tsx`
+  - Remove `DashboardTabBar.tsx`, `DashboardHeader.tsx`
+  - Remove unused components: `PetProfileCard`, `ActivityRings`, `PreventiveRecordsTable`, `HealthScoreRing`, `BloodUrineSection`, `HealthTrendsSection`, `DocumentsSection`, `MedicinesSection`, `RemindersSection`
+  - Remove `NudgesView.tsx`
+  - Verify no remaining imports reference deleted files
+  - _Requirements: (cleanup)_
+  - _Skills: /code-writing-software-development_
+  - **AC:** All listed files deleted. No broken imports. Build passes. No runtime errors.

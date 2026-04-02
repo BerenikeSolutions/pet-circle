@@ -23,6 +23,7 @@ Rules:
 import asyncio
 import logging
 import time
+from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
@@ -94,6 +95,11 @@ _UPLOAD_BATCH_WINDOW_SECONDS: int = 120
 # Key: str(pet_id), Value: asyncio.Task that waits then extracts.
 _extraction_timers: dict[str, asyncio.Task] = {}
 
+# Deadline timers for onboarding document window per user.
+# Key: str(user_id), Value: asyncio.Task that waits until upload deadline
+# and auto-finalizes onboarding if no document was uploaded.
+_document_window_timers: dict[str, asyncio.Task] = {}
+
 # Tracks document IDs uploaded in the active WhatsApp batch per pet.
 # Ensures the extractor only processes files from the current user upload burst,
 # and avoids including unrelated pending documents from other channels.
@@ -136,6 +142,79 @@ def _should_use_agentic_onboarding() -> bool:
     regardless of environment flags.
     """
     return False
+
+
+def _cancel_document_window_timer(user_id) -> None:
+    """Cancel the pending no-upload auto-finalization timer for a user."""
+    user_key = str(user_id)
+    existing = _document_window_timers.get(user_key)
+    if existing and not existing.done():
+        existing.cancel()
+
+
+def _schedule_document_window_timer(user_id, from_number, deadline) -> None:
+    """
+    Schedule (or reschedule) auto-finalization at the upload deadline.
+
+    This guarantees onboarding continues after the 5-minute document window
+    even if the user sends no additional messages.
+    """
+    user_key = str(user_id)
+
+    _cancel_document_window_timer(user_id)
+
+    if not deadline:
+        return
+
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=UTC)
+
+    wait_seconds = max(0.0, (deadline - datetime.now(UTC)).total_seconds())
+    _document_window_timers[user_key] = asyncio.create_task(
+        _auto_finalize_onboarding_after_deadline(user_id, from_number, wait_seconds)
+    )
+
+
+async def _auto_finalize_onboarding_after_deadline(user_id, from_number, wait_seconds: float) -> None:
+    """Finalize onboarding once the document upload window expires."""
+    user_key = str(user_id)
+
+    try:
+        await asyncio.sleep(wait_seconds)
+
+        from app.database import get_fresh_session
+        from app.models.user import User
+        from app.services.onboarding import _finalize_onboarding
+
+        bg_db = get_fresh_session()
+        try:
+            user = bg_db.query(User).filter(User.id == user_id).first()
+            if not user:
+                return
+            if user.onboarding_state != "awaiting_documents":
+                return
+            if not is_doc_upload_deadline_expired(user.doc_upload_deadline):
+                return
+
+            user._plaintext_mobile = from_number
+            await _finalize_onboarding(bg_db, user, send_text_message)
+        finally:
+            bg_db.close()
+    except asyncio.CancelledError:
+        return
+    except Exception as e:
+        logger.warning(
+            "Document-window auto-finalization failed for user %s: %s",
+            str(user_id),
+            str(e),
+        )
+    finally:
+        # Only clear the timer entry if this exact task is still the active
+        # one for this user. Prevents older canceled tasks from removing a
+        # newer timer scheduled later.
+        current_task = asyncio.current_task()
+        if _document_window_timers.get(user_key) is current_task:
+            _document_window_timers.pop(user_key, None)
 
 
 def _should_use_agentic_order() -> bool:
@@ -281,6 +360,7 @@ async def route_message(db: Session, message_data: dict) -> None:
                 # Check deadline expiry on any incoming message.
                 if is_doc_upload_deadline_expired(user.doc_upload_deadline):
                     from app.services.onboarding import _finalize_onboarding
+                    _cancel_document_window_timer(user.id)
                     await _finalize_onboarding(db, user, send_text_message)
                     return
                 # Allow document/image uploads during this state.
@@ -291,6 +371,12 @@ async def route_message(db: Session, message_data: dict) -> None:
                 text = (message_data.get("text") or "").strip()
                 if text:
                     await handle_onboarding_step(db, user, text, send_text_message, message_data=message_data)
+                    if user.onboarding_state == "awaiting_documents":
+                        _schedule_document_window_timer(
+                            user_id=user.id,
+                            from_number=from_number,
+                            deadline=user.doc_upload_deadline,
+                        )
                 return
 
             # --- Legacy agentic state migration ---
@@ -334,6 +420,12 @@ async def route_message(db: Session, message_data: dict) -> None:
                     )
                 return
             await handle_onboarding_step(db, user, text, send_text_message, message_data=message_data)
+            if user.onboarding_state == "awaiting_documents":
+                _schedule_document_window_timer(
+                    user_id=user.id,
+                    from_number=from_number,
+                    deadline=user.doc_upload_deadline,
+                )
             return
 
         # --- Step 3: User is fully onboarded — route by message type ---
@@ -1005,6 +1097,7 @@ async def _handle_media(db: Session, user, message_data: dict) -> None:
         # Once True in a batch, keep it True until that batch is drained.
         if user.onboarding_state == "awaiting_documents":
             _batch_is_onboarding[pet_key] = True
+            _cancel_document_window_timer(user.id)
         else:
             _batch_is_onboarding.setdefault(pet_key, False)
 

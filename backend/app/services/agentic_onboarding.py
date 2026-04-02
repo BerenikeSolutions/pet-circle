@@ -445,16 +445,6 @@ Step 5 — Grooming (go straight in, no permission gate):
      trims, dental, ear cleaning — whatever matters to you)"
   → Call add_grooming_items when user responds.
 
-Step 5a — No-response nudge:
-  If no reply after a long pause, send this message ONCE:
-  "Still here! 🐾 Just waiting on <pet_name>'s grooming details — take
-  your time. Reply SKIP if you'd like to finish here and add this later."
-
-  CRITICAL: Send the nudge ONCE only. Never repeat it. The nudge_sent
-  flag in the session state tracks whether it has been sent. If user
-  replies SKIP, proceed to Closing Sequence with collected data.
-
-
 ## CLOSING SEQUENCE — ALL PATHS
 
 Send this after all sections are complete (or after SKIP).
@@ -795,7 +785,6 @@ def _build_session_state_for_prompt(session: "AgentOnboardingSession") -> dict:
         },
         "grooming": grooming,
         "records_shared": cd.get("records_shared", False),
-        "nudge_sent": cd.get("nudge_sent", False),
         "onboarding_complete": cd.get("onboarding_complete", False),
     }
 
@@ -1086,7 +1075,6 @@ _EMPTY_COLLECTED_DATA = {
     "diet": {"packaged": [], "homemade": [], "supplements": []},
     "grooming": [],
     "records_shared": False,
-    "nudge_sent": False,
     "onboarding_complete": False,
 }
 
@@ -2620,102 +2608,3 @@ async def handle_agentic_onboarding_step(
         await send_fn(db, mobile, reply_text)
 
 
-# ---------------------------------------------------------------------------
-# Grooming nudge runner (Gap 4)
-# ---------------------------------------------------------------------------
-
-
-async def run_grooming_nudges(db: Session) -> dict:
-    """
-    Find onboarding sessions that have been stuck at the grooming step for
-    30+ minutes with no nudge sent yet, and dispatch one nudge per session.
-
-    Called by POST /internal/run-grooming-nudges (GitHub Actions cron,
-    every 15 minutes). Safe to call repeatedly — the nudge_sent flag
-    prevents duplicates.
-
-    Returns:
-        Dict with keys: checked, nudges_sent, errors.
-    """
-    from datetime import timedelta
-
-    from sqlalchemy import text as sa_text
-
-    from app.core.encryption import decrypt_field
-    from app.models.user import User
-    from app.services.whatsapp_sender import send_text_message
-
-    NUDGE_AFTER_MINUTES = 30
-    cutoff = datetime.utcnow() - timedelta(minutes=NUDGE_AFTER_MINUTES)
-
-    checked = 0
-    nudges_sent = 0
-    errors = 0
-
-    try:
-        sessions = (
-            db.query(AgentOnboardingSession)
-            .filter(
-                AgentOnboardingSession.is_complete == False,  # noqa: E712
-                sa_text("collected_data->>'current_step' = 'grooming'"),
-                # nudge_sent absent (NULL) or explicitly false — either way, not yet sent
-                sa_text(
-                    "(collected_data->>'nudge_sent') IS NULL "
-                    "OR (collected_data->>'nudge_sent') = 'false'"
-                ),
-                AgentOnboardingSession.updated_at < cutoff,
-            )
-            .all()
-        )
-    except Exception as e:
-        logger.error("Grooming nudge query failed: %s", str(e))
-        return {"checked": 0, "nudges_sent": 0, "errors": 1}
-
-    for session in sessions:
-        checked += 1
-        try:
-            user = db.query(User).filter(User.id == session.user_id).first()
-            if not user or user.is_deleted:
-                continue
-
-            mobile = decrypt_field(user.mobile)
-            if not mobile:
-                logger.warning(
-                    "Grooming nudge: could not decrypt mobile for user_id=%s", str(user.id)
-                )
-                continue
-
-            pet_name = session.collected_data.get("pet", {}).get("name") or "your pet"
-            nudge_text = (
-                f"Still here! 🐾 Just waiting on {pet_name}'s grooming details — "
-                f"take your time. Reply SKIP if you'd like to finish here and add this later."
-            )
-
-            await send_text_message(db, mobile, nudge_text)
-
-            # Mark nudge as sent so it is never repeated
-            session.collected_data["nudge_sent"] = True
-            flag_modified(session, "collected_data")
-            db.commit()
-
-            nudges_sent += 1
-            logger.info(
-                "Grooming nudge sent: user_id=%s, pet=%s", str(user.id), pet_name
-            )
-
-        except Exception as e:
-            errors += 1
-            logger.error(
-                "Grooming nudge failed for session_id=%s: %s",
-                str(session.id), str(e),
-            )
-            try:
-                db.rollback()
-            except Exception:
-                pass
-
-    logger.info(
-        "Grooming nudge run complete: checked=%d, sent=%d, errors=%d",
-        checked, nudges_sent, errors,
-    )
-    return {"checked": checked, "nudges_sent": nudges_sent, "errors": errors}

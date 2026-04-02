@@ -1441,12 +1441,39 @@ async def _finalize_onboarding(db, user, send_fn):
     pet = _get_pending_pet(db, user.id)
 
     # --- Mark onboarding complete and clear deadline ---
+    # Guard with a conditional UPDATE so only one concurrent caller can
+    # transition awaiting_documents -> complete and send final messages.
     try:
+        from datetime import datetime as _dt
+
+        rows_updated = (
+            db.query(User)
+            .filter(
+                User.id == user.id,
+                User.onboarding_state == "awaiting_documents",
+            )
+            .update(
+                {
+                    User.onboarding_state: "complete",
+                    User.doc_upload_deadline: None,
+                    User.onboarding_data: None,
+                    User.onboarding_completed_at: _dt.utcnow(),
+                },
+                synchronize_session=False,
+            )
+        )
+
+        if rows_updated == 0:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return
+
         user.onboarding_state = "complete"
         user.doc_upload_deadline = None
         user.onboarding_data = None
         if not user.onboarding_completed_at:
-            from datetime import datetime as _dt
             user.onboarding_completed_at = _dt.utcnow()
         db.commit()
     except Exception as e:
