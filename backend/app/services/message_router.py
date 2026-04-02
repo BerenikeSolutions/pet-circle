@@ -108,6 +108,7 @@ from app.models.document import Document
 from app.models.pet import Pet
 from app.models.reminder import Reminder
 from app.services.onboarding import (
+    _generate_care_plan_message,
     create_pending_user,
     get_or_create_user,
     handle_onboarding_step,
@@ -1242,25 +1243,19 @@ async def _delayed_batch_extraction(
             )
 
             if not agentic_sent:
-                await _send_batch_summary(
-                    bg_db, user, pet, from_number,
-                    all_results, success_count, fail_count, failed_doc_names,
-                )
-                # Regular summary already includes the dashboard link.
-                # If finalization had deferred it, clear the flag now.
                 if getattr(user, "dashboard_link_pending", False):
-                    try:
-                        user.dashboard_link_pending = False
-                        bg_db.commit()
-                    except Exception as flag_err:
-                        logger.warning(
-                            "Could not clear dashboard_link_pending for user=%s: %s",
-                            str(user_id), flag_err,
-                        )
-                        try:
-                            bg_db.rollback()
-                        except Exception:
-                            pass
+                    await _send_deferred_care_plan(
+                        bg_db, user, pet, from_number,
+                        all_results=all_results,
+                        success_count=success_count,
+                        fail_count=fail_count,
+                        failed_doc_names=failed_doc_names,
+                    )
+                else:
+                    await _send_batch_summary(
+                        bg_db, user, pet, from_number,
+                        all_results, success_count, fail_count, failed_doc_names,
+                    )
 
         # Clear the batch counter and rejection flag so user can upload again.
         _recent_uploads.pop(pet_key, None)
@@ -1480,6 +1475,7 @@ async def _try_agentic_finalization(
 
         # --- Gather context for the LLM ---
         from app.models.diet_item import DietItem
+        from app.models.custom_preventive_item import CustomPreventiveItem
         from app.models.preventive_master import PreventiveMaster
         from app.models.preventive_record import PreventiveRecord
 
@@ -1504,6 +1500,31 @@ async def _try_agentic_finalization(
             }
             for record, master in records
         ]
+
+        custom_records = (
+            db.query(PreventiveRecord, CustomPreventiveItem)
+            .join(
+                CustomPreventiveItem,
+                PreventiveRecord.custom_preventive_item_id == CustomPreventiveItem.id,
+            )
+            .filter(
+                PreventiveRecord.pet_id == pet.id,
+                PreventiveRecord.last_done_date.isnot(None),
+            )
+            .order_by(PreventiveRecord.last_done_date.desc())
+            .all()
+        )
+        items_extracted.extend(
+            {
+                "item_name": custom_item.item_name,
+                "last_done_date": record.last_done_date.strftime("%d/%m/%Y"),
+                "next_due_date": (
+                    record.next_due_date.strftime("%d/%m/%Y")
+                    if record.next_due_date else None
+                ),
+            }
+            for record, custom_item in custom_records
+        )
 
         diet_count = db.query(DietItem).filter(DietItem.pet_id == pet.id).count()
         dashboard_url = _get_dashboard_link(db, pet) or ""
@@ -1634,8 +1655,15 @@ async def _send_batch_summary(
     # Aggregate results from all successful extractions.
     total_extracted = sum(r.get("items_extracted", 0) for r in all_results)
     total_processed = sum(r.get("items_processed", 0) for r in all_results)
+    total_extra_vaccines = sum(len(r.get("extra_vaccines", []) or []) for r in all_results)
+    total_extra_vaccines_saved = sum(int(r.get("extra_vaccines_saved", 0) or 0) for r in all_results)
 
-    if total_extracted == 0 and success_count > 0:
+    if (
+        total_extracted == 0
+        and total_extra_vaccines == 0
+        and total_extra_vaccines_saved == 0
+        and success_count > 0
+    ):
         # All docs processed successfully but no preventive items found.
         dashboard_link = _get_dashboard_link(db, pet)
         msg = (
@@ -1662,13 +1690,35 @@ async def _send_batch_summary(
     # Pick the last successful result with items for the detailed view.
     best_result = None
     for r in reversed(all_results):
-        if r.get("items_processed", 0) > 0:
+        if (
+            r.get("items_processed", 0) > 0
+            or (r.get("extra_vaccines") or [])
+            or int(r.get("extra_vaccines_saved", 0) or 0) > 0
+        ):
             best_result = r
             break
 
     if best_result:
-        await _send_extraction_summary(db, user, pet, best_result,
-                                        total_processed, fail_count, failed_doc_names)
+        merged_extra_vaccines: list[dict] = []
+        for r in all_results:
+            for detail in (r.get("extra_vaccines") or []):
+                if isinstance(detail, dict):
+                    merged_extra_vaccines.append(detail)
+
+        summary_result = dict(best_result)
+        if merged_extra_vaccines:
+            summary_result["extra_vaccines"] = merged_extra_vaccines
+        summary_result["extra_vaccines_saved"] = total_extra_vaccines_saved
+
+        await _send_extraction_summary(
+            db,
+            user,
+            pet,
+            summary_result,
+            total_processed,
+            fail_count,
+            failed_doc_names,
+        )
     else:
         dashboard_link = _get_dashboard_link(db, pet)
         msg = f"Extraction complete for *{pet.name}*: {success_count} processed, {fail_count} failed."
@@ -1680,6 +1730,143 @@ async def _send_batch_summary(
         )
         msg += "\n\nType *add pet* to register another pet."
         await send_text_message(db, from_number, msg)
+
+
+async def _send_deferred_care_plan(
+    db: Session,
+    user,
+    pet,
+    from_number: str,
+    all_results: list[dict],
+    success_count: int,
+    fail_count: int,
+    failed_doc_names: list[str],
+) -> None:
+    """
+    Send the deterministic care-plan finalization message after document
+    extraction completes for onboarding users whose dashboard link was deferred.
+    """
+    try:
+        # If everything failed, keep the explicit extraction-failure summary.
+        # _send_batch_summary already emits rejection warnings, so return early
+        # to avoid duplicate warning messages.
+        if success_count == 0 and fail_count > 0:
+            await _send_batch_summary(
+                db, user, pet, from_number,
+                all_results=all_results,
+                success_count=success_count,
+                fail_count=fail_count,
+                failed_doc_names=failed_doc_names,
+            )
+            if getattr(user, "dashboard_link_pending", False):
+                try:
+                    user.dashboard_link_pending = False
+                    db.commit()
+                except Exception:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+            return
+
+        # Always surface incorrect-document rejections before care-plan finalization.
+        not_pet_results = [r for r in all_results if r.get("document_type") == "not_pet_related"]
+        mismatch_results = [r for r in all_results if r.get("document_type") == "pet_name_mismatch"]
+
+        if not_pet_results:
+            await send_text_message(
+                db, from_number,
+                "⚠️ One or more documents you sent don't appear to be pet or veterinary records "
+                "(e.g. a human medical report, invoice, or unrelated photo). "
+                "Please only upload vet records, vaccination certificates, lab reports, or prescriptions. "
+                "These documents have been removed from the dashboard."
+            )
+
+        if mismatch_results:
+            reason = (mismatch_results[0].get("errors") or [""])[0]
+            msg = (
+                f"⚠️ A document you uploaded could not be added to *{mismatch_results[0].get('pet_name', 'your pet')}*'s records "
+                f"because it appears to belong to a different pet."
+            )
+            if reason:
+                msg += f"\n\n_{reason}_"
+            msg += "\n\nPlease upload documents that belong to this pet only."
+            await send_text_message(db, from_number, msg)
+
+        from app.models.condition import Condition
+        from app.models.diet_item import DietItem
+        from app.models.preventive_record import PreventiveRecord
+
+        diet_count = db.query(DietItem).filter(DietItem.pet_id == pet.id).count()
+        supplement_count = db.query(DietItem).filter(
+            DietItem.pet_id == pet.id,
+            DietItem.type == "supplement",
+        ).count()
+        record_count = db.query(PreventiveRecord).filter(PreventiveRecord.pet_id == pet.id).count()
+        docs_uploaded = db.query(Document).filter(Document.pet_id == pet.id).count()
+        conditions = (
+            db.query(Condition)
+            .filter(Condition.pet_id == pet.id, Condition.is_active == True)
+            .order_by(Condition.created_at.asc())
+            .all()
+        )
+
+        care_plan_msg = await _generate_care_plan_message(
+            pet=pet,
+            diet_count=diet_count,
+            supplement_count=supplement_count,
+            record_count=record_count,
+            docs_uploaded=docs_uploaded,
+            conditions=conditions,
+        )
+
+        dashboard_link = _get_dashboard_link(db, pet)
+        if fail_count > 0:
+            care_plan_msg += (
+                f"\n\nWe couldn't fully read {fail_count} uploaded document"
+                f"{'s' if fail_count != 1 else ''}. You can still update those details in the dashboard."
+            )
+        if dashboard_link:
+            care_plan_msg += f"\n\nView {pet.name}'s full care plan here 👇\n{dashboard_link}"
+        else:
+            care_plan_msg += f"\n\nSend *dashboard* anytime to get {pet.name}'s care plan link."
+
+        # Clear pending flag before sending to avoid duplicate sends on retries.
+        try:
+            user.dashboard_link_pending = False
+            db.commit()
+        except Exception as flag_err:
+            logger.warning(
+                "Could not clear dashboard_link_pending for user=%s: %s",
+                str(user.id), flag_err,
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+        await send_text_message(db, from_number, care_plan_msg)
+    except Exception as exc:
+        logger.warning(
+            "Deferred care-plan send failed for user=%s pet=%s: %s",
+            str(user.id), str(pet.id), exc,
+        )
+        await _send_batch_summary(
+            db, user, pet, from_number,
+            all_results=all_results,
+            success_count=success_count,
+            fail_count=fail_count,
+            failed_doc_names=failed_doc_names,
+        )
+        if getattr(user, "dashboard_link_pending", False):
+            try:
+                user.dashboard_link_pending = False
+                db.commit()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
 
 
 async def _send_extraction_summary(
@@ -1702,6 +1889,8 @@ async def _send_extraction_summary(
     errors = result.get("errors", [])
     status = result.get("status", "failed")
     vaccination_details = result.get("vaccination_details", [])
+    extra_vaccines = result.get("extra_vaccines", [])
+    extra_vaccines_saved = result.get("extra_vaccines_saved", 0)
 
     if status == "failed":
         # Check for pet name mismatch — show a specific, clear message.
@@ -1725,7 +1914,7 @@ async def _send_extraction_summary(
         await send_text_message(db, from_number, msg)
         return
 
-    if extracted == 0:
+    if extracted == 0 and not extra_vaccines and not extra_vaccines_saved:
         await send_text_message(
             db, from_number,
             f"No preventive health items were found in {pet.name}'s document.\n\n"
@@ -1780,6 +1969,20 @@ async def _send_extraction_summary(
             if batch:
                 parts.append(f"batch {batch}")
             msg += "  • " + ", ".join(parts) + "\n"
+
+    if extra_vaccines:
+        msg += "\n*Extra Vaccines (unmapped):*\n"
+        for detail in extra_vaccines[:5]:
+            if not isinstance(detail, dict):
+                continue
+            vaccine_name = detail.get("vaccine_name") or "Vaccine"
+            done_date = detail.get("date")
+            parts = [str(vaccine_name)]
+            if done_date:
+                parts.append(f"date {done_date}")
+            msg += "  • " + ", ".join(parts) + "\n"
+        if extra_vaccines_saved:
+            msg += f"Saved {extra_vaccines_saved} extra vaccine entr{'y' if extra_vaccines_saved == 1 else 'ies'} for this pet.\n"
 
     if errors:
         unmatched = [e.replace("No match for item: ", "") for e in errors if "No match" in e]

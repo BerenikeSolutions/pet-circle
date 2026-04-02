@@ -25,6 +25,7 @@ Rules:
 
 import json
 import logging
+import re
 import secrets
 from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
@@ -45,6 +46,7 @@ from app.core.constants import (
 from app.core.encryption import decrypt_field, encrypt_field, hash_field
 from app.core.log_sanitizer import mask_phone
 from app.models.dashboard_token import DashboardToken
+from app.models.condition import Condition
 from app.models.document import Document
 from app.models.pet import Pet
 from app.models.preventive_master import PreventiveMaster
@@ -107,6 +109,38 @@ _NO_INPUTS = frozenset({
 })
 # Accepted variations for skip across all onboarding steps.
 _SKIP_INPUTS = frozenset({"skip", "s"})
+_DOC_SKIP_PHRASES = (
+    "not uploading",
+    "not uploading now",
+    "no documents",
+    "no document",
+    "no docs",
+    "no records",
+    "no health records",
+    "nothing to upload",
+    "don't have",
+    "dont have",
+)
+_DOC_UPLOAD_INTENT_WORDS = ("upload", "sending", "send", "attach", "attached")
+
+
+def _is_doc_skip_intent(text_lower: str) -> bool:
+    """Return True when the user indicates they are skipping document upload."""
+    normalized = (text_lower or "").strip()
+    if normalized in _SKIP_INPUTS:
+        return True
+    # Avoid false positives such as: "I don't have card, uploading report now".
+    if any(word in normalized for word in _DOC_UPLOAD_INTENT_WORDS):
+        return False
+
+    collapsed = re.sub(r"\s+", " ", normalized)
+    for phrase in _DOC_SKIP_PHRASES:
+        if collapsed == phrase:
+            return True
+        if re.fullmatch(rf"{re.escape(phrase)}[.!?]*", collapsed):
+            return True
+
+    return False
 
 
 def get_or_create_user(db: Session, mobile_number: str) -> tuple[User | None, bool]:
@@ -1347,7 +1381,7 @@ async def _step_awaiting_documents(db, user, text_lower, send_fn):
         return
 
     # "skip" exits the upload window immediately.
-    if text_lower in _SKIP_INPUTS:
+    if _is_doc_skip_intent(text_lower):
         await _finalize_onboarding(db, user, send_fn)
         return
 
@@ -1452,6 +1486,12 @@ async def _finalize_onboarding(db, user, send_fn):
     )
     token = token_row.token if token_row else None
     record_count = db.query(PreventiveRecord).filter(PreventiveRecord.pet_id == pet.id).count()
+    conditions = (
+        db.query(Condition)
+        .filter(Condition.pet_id == pet.id, Condition.is_active == True)
+        .order_by(Condition.created_at.asc())
+        .all()
+    )
     diet_count = db.query(DietItem).filter(DietItem.pet_id == pet.id).count()
     supplement_count = db.query(DietItem).filter(
         DietItem.pet_id == pet.id, DietItem.type == "supplement"
@@ -1482,9 +1522,7 @@ async def _finalize_onboarding(db, user, send_fn):
             db, mobile,
             f"That's everything. 🐾 Building {pet.name}'s personalised care plan now "
             f"— their health dashboard, care reminders, and nutrition breakdown "
-            f"will be ready in just a moment.\n\n"
-            f"Your documents are being processed — I'll send {pet.name}'s "
-            f"dashboard link as soon as they're done! 🔍",
+            f"will be ready in just a moment.",
         )
         return
 
@@ -1504,6 +1542,7 @@ async def _finalize_onboarding(db, user, send_fn):
         supplement_count=supplement_count,
         record_count=record_count,
         docs_uploaded=docs_uploaded,
+        conditions=conditions,
     )
 
     # Append dashboard link.
@@ -1523,9 +1562,10 @@ async def _finalize_onboarding(db, user, send_fn):
 async def _generate_care_plan_message(
     pet, diet_count: int, supplement_count: int,
     record_count: int, docs_uploaded: int,
+    conditions: list[Condition] | None = None,
 ) -> str:
     """
-    Generate the "care plan ready" message via GPT, with hardcoded fallback.
+    Generate the "care plan ready" message via deterministic templates.
 
     Follows flow.txt prompt rules:
     - Open with "[pet name]'s care plan is ready! 🐾"
@@ -1535,67 +1575,41 @@ async def _generate_care_plan_message(
     - No health judgements, no headers, no bullet points
     - Warm, conversational, WhatsApp-friendly tone
     """
-    # Build context for GPT.
+    # Build flags for deterministic variation selection.
     has_food = diet_count > 0
-    has_supplements = supplement_count > 0
     has_preventive = record_count > 0
     has_breed = bool(pet.breed)
     has_age = bool(pet.age_text or pet.dob)
+    active_conditions = [c for c in (conditions or []) if getattr(c, "name", None)]
+    has_conditions = len(active_conditions) > 0
+    condition_names = ", ".join(c.name for c in active_conditions[:3])
+    condition_count = len(active_conditions)
 
-    # Try GPT first.
-    try:
-        client = _get_openai_onboarding_client()
-        context_parts = [
-            f"Pet name: {pet.name}",
-            f"Species: {pet.species}" if pet.species and pet.species != "_pending" else None,
-            f"Breed: {pet.breed}" if pet.breed else None,
-            f"Age: {pet.age_text}" if pet.age_text else None,
-            f"Diet items recorded: {diet_count}" if has_food else "Diet: not shared",
-            f"Supplements recorded: {supplement_count}" if has_supplements else "Supplements: not shared",
-            f"Preventive records: {record_count}" if has_preventive else "Preventive care: not shared",
-            f"Documents uploaded: {docs_uploaded}" if docs_uploaded > 0 else "Documents: none uploaded",
-        ]
-        context = "\n".join(p for p in context_parts if p)
-
-        prompt = (
-            f"Generate a WhatsApp message for a pet parent whose care plan is ready.\n\n"
-            f"Pet data:\n{context}\n\n"
-            f"Rules:\n"
-            f'- Open with "{pet.name}\'s care plan is ready! 🐾"\n'
-            f"- Reference only information that was shared — if diet was shared, mention it; "
-            f"if preventive was shared, mention it\n"
-            f"- Always make supplement recommendations based on available data "
-            f"(breed, age, diet, life stage)\n"
-            f"- For anything not shared, add a one-line nudge that it would make "
-            f"the analysis more personalised\n"
-            f"- No health judgements, no headers, no bullet points\n"
-            f'- Do NOT include "View care plan here" or dashboard link — that\'s added separately\n'
-            f"- Warm, conversational, WhatsApp-friendly tone\n"
-            f"- Keep it under 200 words"
-        )
-
-        response = await retry_openai_call(
-            client.chat.completions.create,
-            model="gpt-4.1-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=400,
-        )
-        gpt_msg = response.choices[0].message.content.strip()
-        if gpt_msg and len(gpt_msg) > 20:
-            return gpt_msg
-    except Exception as e:
-        logger.warning("Care plan GPT generation failed, using fallback: %s", str(e))
-
-    # --- Hardcoded fallback templates (5 variations from flow.txt) ---
+    # --- Hardcoded deterministic templates (5 variations from flow.txt) ---
     name = pet.name
+    if has_conditions:
+        condition_line = (
+            f"We noted {condition_count} health condition{'s' if condition_count != 1 else ''}"
+            f" — {condition_names}. We've included some questions worth raising with your vet."
+        )
+    else:
+        condition_line = "No active health conditions flagged."
 
-    if has_food and has_preventive:
+    if has_conditions and has_food and has_preventive:
+        # Variation 1: Conditions + food + preventive shared.
+        return (
+            f"{name}'s care plan is ready! 🐾 Based on {name}'s health analysis, life stage and current diet.\n\n"
+            f"{condition_line}\n\n"
+            f"{record_count} preventive care items are on track.\n\n"
+            f"We'd suggest adding Omega-3 and a probiotic — specifically based on {name}'s diet, "
+            f"life stage, and overall recovery support."
+        )
+    elif has_food and has_preventive:
         # Variation 2: No conditions, food and preventive shared.
         return (
             f"{name}'s care plan is ready! 🐾 Based on {name}'s health analysis, "
             f"life stage and current diet.\n\n"
-            f"No active health conditions flagged.\n\n"
+            f"{condition_line}\n\n"
             f"{record_count} preventive care items are on track.\n\n"
             f"We'd suggest adding Omega-3 and a probiotic based on {name}'s diet "
             f"and life stage — great for coat health and joint support."
@@ -1604,7 +1618,7 @@ async def _generate_care_plan_message(
         # Variation 3: Food shared, preventive not shared.
         return (
             f"{name}'s care plan is ready! 🐾\n\n"
-            f"No active health conditions flagged.\n\n"
+            f"{condition_line}\n\n"
             f"We don't have {name}'s preventive care details yet — adding these "
             f"would give us a more complete health picture.\n\n"
             f"We'd suggest adding Omega-3 and a probiotic based on {name}'s diet "
@@ -1614,7 +1628,7 @@ async def _generate_care_plan_message(
         # Variation 4: No food, no preventive, but age and breed available.
         return (
             f"{name}'s care plan is ready! 🐾\n\n"
-            f"No active health conditions flagged.\n\n"
+            f"{condition_line}\n\n"
             f"We'd suggest adding Omega-3 and a probiotic — based on {name}'s age "
             f"and breed, these support coat health, joint development, and overall immunity.\n\n"
             f"To make this analysis even more personalised, sharing {name}'s current "
@@ -1623,6 +1637,8 @@ async def _generate_care_plan_message(
     elif not has_food and not has_preventive:
         # Variation 5: Minimal data.
         return (
+            f"{name}'s care plan is ready! 🐾\n\n"
+            f"{condition_line}\n\n"
             f"To give you a fuller picture, we'd love to know more about {name}'s "
             f"current diet and preventive care routine — adding these would help us "
             f"make the analysis much more personalised for {name}."

@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import re
+from contextlib import nullcontext
 from datetime import datetime
 from uuid import UUID
 
@@ -50,10 +51,12 @@ from app.models.condition import Condition
 from app.models.condition_medication import ConditionMedication
 from app.models.condition_monitoring import ConditionMonitoring
 from app.models.contact import Contact
+from app.models.custom_preventive_item import CustomPreventiveItem
 from app.models.diagnostic_test_result import DiagnosticTestResult
 from app.models.document import Document
 from app.models.pet import Pet
 from app.models.preventive_master import PreventiveMaster
+from app.models.preventive_record import PreventiveRecord
 from app.utils.date_utils import format_date_for_db, parse_date
 from app.utils.retry import retry_openai_call
 
@@ -771,6 +774,7 @@ def _validate_extraction_json(raw_json: str) -> tuple[list[dict], str | None, st
         "doctor_name": None,
         "clinic_name": None,
         "vaccination_details": [],
+        "extra_vaccines": [],
         "conditions": [],
         "contacts": [],
     }
@@ -892,26 +896,41 @@ def _validate_extraction_json(raw_json: str) -> tuple[list[dict], str | None, st
 
     # Derive tracked items from vaccination_details when GPT populated
     # vaccine details but did not include matching entries in the items array.
-    validated = _derive_items_from_vaccination_details(validated, normalized_vaccination_details)
+    validated, extra_vaccines = _derive_items_from_vaccination_details(
+        validated,
+        normalized_vaccination_details,
+    )
+    metadata["extra_vaccines"] = extra_vaccines
 
     return validated, document_name, extracted_pet_name, metadata
 
 
 # Mapping from common vaccine names in vaccination_details to tracked item names.
 _VACCINE_DETAIL_TO_ITEM: dict[str, str] = {
-    "rabies": "Rabies Vaccine",
-    "dhpp": "Core Vaccine",
-    "dhppi": "Core Vaccine",
-    "da2pp": "Core Vaccine",
-    "da2ppl": "Core Vaccine",
-    "5 in 1": "Core Vaccine",
-    "7 in 1": "Core Vaccine",
-    "9 in 1": "Core Vaccine",
-    "canine distemper": "Core Vaccine",
+    "rabies": "Rabies (Nobivac RL)",
+    "nobivac rl": "Rabies (Nobivac RL)",
+    "dhpp": "DHPPi",
+    "dhppi": "DHPPi",
+    "dhppi+l": "DHPPi",
+    "dhppil": "DHPPi",
+    "nobivac dhppi": "DHPPi",
+    "da2pp": "DHPPi",
+    "da2ppl": "DHPPi",
+    "5 in 1": "DHPPi",
+    "7 in 1": "DHPPi",
+    "9 in 1": "DHPPi",
+    "canine distemper": "DHPPi",
+    "kennel cough": "Kennel Cough (Nobivac KC)",
+    "bordetella": "Kennel Cough (Nobivac KC)",
+    "nobivac kc": "Kennel Cough (Nobivac KC)",
+    "canine coronavirus": "Canine Coronavirus (CCoV)",
+    "ccov": "Canine Coronavirus (CCoV)",
     "fvrcp": "Feline Core",
     "feline core": "Feline Core",
     "tricat": "Feline Core",
     "felocell": "Feline Core",
+    # Keep this generic; species-aware resolution happens later in
+    # _match_preventive_master_from_list via aliases + available masters.
     "core vaccine": "Core Vaccine",
 }
 
@@ -919,7 +938,7 @@ _VACCINE_DETAIL_TO_ITEM: dict[str, str] = {
 def _derive_items_from_vaccination_details(
     existing_items: list[dict],
     vaccination_details: list[dict],
-) -> list[dict]:
+) -> tuple[list[dict], list[dict]]:
     """
     Convert vaccination_details entries into tracked preventive items
     when they are not already represented in the items array.
@@ -928,7 +947,7 @@ def _derive_items_from_vaccination_details(
     the corresponding entry from the items array. This bridges that gap.
     """
     if not vaccination_details:
-        return existing_items
+        return existing_items, []
 
     # Track which item names are already present (normalized).
     existing_names = {
@@ -937,6 +956,7 @@ def _derive_items_from_vaccination_details(
     }
 
     derived: list[dict] = []
+    extra_vaccines: list[dict] = []
     for detail in vaccination_details:
         if not isinstance(detail, dict):
             continue
@@ -954,6 +974,17 @@ def _derive_items_from_vaccination_details(
                 break
 
         if not mapped_item:
+            # Preserve vaccine rows that don't map to tracked preventive items.
+            # These can be shown as separate extra vaccines to the pet parent.
+            extra_vaccines.append(
+                {
+                    "vaccine_name": vaccine_name,
+                    "date": detail.get("date") or detail.get("administered_date") or detail.get("last_done_date"),
+                    "next_due_date": detail.get("next_due_date"),
+                    "dose": detail.get("dose"),
+                    "batch_number": detail.get("batch_number"),
+                }
+            )
             continue
 
         # Skip if already present in items.
@@ -977,7 +1008,195 @@ def _derive_items_from_vaccination_details(
         derived.append({"item_name": mapped_item, "last_done_date": parsed})
         existing_names.add(_normalize_preventive_item_name(mapped_item))
 
-    return existing_items + derived
+    return existing_items + derived, extra_vaccines
+
+
+def _normalize_extra_vaccine_name(value: str | None) -> str:
+    """Normalize vaccine names before storing custom preventive entries."""
+    name = re.sub(r"\s+", " ", (value or "").strip())
+    return name[:120]
+
+
+def _upsert_custom_item_for_extra_vaccine(
+    db: Session,
+    *,
+    user_id,
+    species: str,
+    vaccine_name: str,
+) -> CustomPreventiveItem:
+    """Get or create a custom preventive item for an unmapped vaccine."""
+    existing = (
+        db.query(CustomPreventiveItem)
+        .filter(
+            CustomPreventiveItem.user_id == user_id,
+            CustomPreventiveItem.item_name == vaccine_name,
+            CustomPreventiveItem.species == species,
+        )
+        .first()
+    )
+    if existing:
+        return existing
+
+    custom_item = CustomPreventiveItem(
+        user_id=user_id,
+        item_name=vaccine_name,
+        category="complete",
+        circle="health",
+        species=species,
+        recurrence_days=365,
+        medicine_dependent=False,
+        reminder_before_days=30,
+        overdue_after_days=14,
+    )
+    db.add(custom_item)
+    db.flush()
+    return custom_item
+
+
+def _upsert_custom_preventive_record_for_pet(
+    db: Session,
+    *,
+    pet_id,
+    custom_item: CustomPreventiveItem,
+    last_done_date,
+) -> None:
+    """Create or update a pet-level preventive record for a custom vaccine item."""
+    from app.services.preventive_calculator import compute_next_due_date, compute_status
+
+    if last_done_date is None:
+        placeholder = (
+            db.query(PreventiveRecord)
+            .filter(
+                PreventiveRecord.pet_id == pet_id,
+                PreventiveRecord.custom_preventive_item_id == custom_item.id,
+                PreventiveRecord.last_done_date.is_(None),
+                PreventiveRecord.status != "cancelled",
+            )
+            .first()
+        )
+        if placeholder:
+            return
+        db.add(
+            PreventiveRecord(
+                pet_id=pet_id,
+                custom_preventive_item_id=custom_item.id,
+                last_done_date=None,
+                next_due_date=None,
+                status="upcoming",
+            )
+        )
+        db.flush()
+        return
+
+    next_due = compute_next_due_date(last_done_date, custom_item.recurrence_days)
+    status = compute_status(next_due, custom_item.reminder_before_days)
+
+    existing = (
+        db.query(PreventiveRecord)
+        .filter(
+            PreventiveRecord.pet_id == pet_id,
+            PreventiveRecord.custom_preventive_item_id == custom_item.id,
+            PreventiveRecord.last_done_date == last_done_date,
+        )
+        .first()
+    )
+    if existing:
+        existing.next_due_date = next_due
+        existing.status = status
+        db.flush()
+        return
+
+    placeholder = (
+        db.query(PreventiveRecord)
+        .filter(
+            PreventiveRecord.pet_id == pet_id,
+            PreventiveRecord.custom_preventive_item_id == custom_item.id,
+            PreventiveRecord.last_done_date.is_(None),
+            PreventiveRecord.status != "cancelled",
+        )
+        .order_by(PreventiveRecord.created_at.asc())
+        .first()
+    )
+    if placeholder:
+        placeholder.last_done_date = last_done_date
+        placeholder.next_due_date = next_due
+        placeholder.status = status
+        db.flush()
+        return
+
+    db.add(
+        PreventiveRecord(
+            pet_id=pet_id,
+            custom_preventive_item_id=custom_item.id,
+            last_done_date=last_done_date,
+            next_due_date=next_due,
+            status=status,
+        )
+    )
+    db.flush()
+
+
+def _persist_extra_vaccines_for_pet(
+    db: Session,
+    *,
+    pet: Pet,
+    extra_vaccines: list[dict],
+) -> tuple[int, list[str]]:
+    """Persist unmapped vaccines as custom preventive records for the specific pet."""
+    if not extra_vaccines:
+        return 0, []
+
+    saved = 0
+    errors: list[str] = []
+    seen_keys: set[tuple[str, str | None]] = set()
+
+    for detail in extra_vaccines:
+        if not isinstance(detail, dict):
+            continue
+
+        vaccine_name = _normalize_extra_vaccine_name(detail.get("vaccine_name"))
+        if not vaccine_name:
+            continue
+
+        date_input = detail.get("date")
+        normalized_date = str(date_input).strip() if date_input is not None else None
+        try:
+            done_date = parse_date(normalized_date) if normalized_date else None
+        except ValueError:
+            done_date = None
+
+        canonical_date = done_date.isoformat() if done_date else normalized_date
+        dedupe_key = (vaccine_name.lower(), canonical_date)
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+
+        try:
+            scope = db.begin_nested() if hasattr(db, "begin_nested") else nullcontext()
+            with scope:
+                custom_item = _upsert_custom_item_for_extra_vaccine(
+                    db,
+                    user_id=pet.user_id,
+                    species=pet.species,
+                    vaccine_name=vaccine_name,
+                )
+                _upsert_custom_preventive_record_for_pet(
+                    db,
+                    pet_id=pet.id,
+                    custom_item=custom_item,
+                    last_done_date=done_date,
+                )
+                saved += 1
+        except Exception as exc:
+            logger.warning(
+                "Could not persist extra vaccine '%s' for pet %s: %s",
+                vaccine_name,
+                str(pet.id),
+                exc,
+            )
+            errors.append(f"Could not save extra vaccine: {vaccine_name}")
+
+    return saved, errors
 
 
 def _load_species_masters(db: Session, species: str) -> list[PreventiveMaster]:
@@ -1016,11 +1235,41 @@ def _match_preventive_master_from_list(
     """Match an extracted item name to a preventive_master record."""
     item_normalized = _normalize_preventive_item_name(item_name)
 
+    master_names = {
+        _normalize_preventive_item_name(master.item_name)
+        for master in masters
+    }
+
     aliases = {
-        "core vaccine dhpp": "core vaccine",
-        "core vaccine dhppi": "core vaccine",
-        "dhpp": "core vaccine",
-        "dhppi": "core vaccine",
+        "core vaccine dhpp": "dhppi",
+        "core vaccine dhppi": "dhppi",
+        "core vaccine": "dhppi" if "dhppi" in master_names else "feline core",
+        "dhpp": "dhppi",
+        "dhppi": "dhppi",
+        "dhppil": "dhppi",
+        "nobivac dhppi": "dhppi",
+        "7 in 1": "dhppi",
+        "9 in 1": "dhppi",
+        "rabies": (
+            "rabies nobivac rl"
+            if "rabies nobivac rl" in master_names
+            else "rabies vaccine"
+        ),
+        "rabies vaccine": (
+            "rabies nobivac rl"
+            if "rabies nobivac rl" in master_names
+            else "rabies vaccine"
+        ),
+        "nobivac rl": (
+            "rabies nobivac rl"
+            if "rabies nobivac rl" in master_names
+            else "rabies vaccine"
+        ),
+        "kennel cough": "kennel cough nobivac kc",
+        "nobivac kc": "kennel cough nobivac kc",
+        "bordetella": "kennel cough nobivac kc",
+        "canine coronavirus": "canine coronavirus ccov",
+        "ccov": "canine coronavirus ccov",
         "feline core fvrcp": "feline core",
         "fvrcp": "feline core",
     }
@@ -1180,6 +1429,7 @@ async def extract_and_process_document(
         results["doctor_name"] = metadata["doctor_name"]
         results["clinic_name"] = metadata["clinic_name"]
         results["vaccination_details"] = metadata["vaccination_details"]
+        results["extra_vaccines"] = metadata.get("extra_vaccines", [])
 
         inferred_category = _infer_document_category(
             document_name=document_name or document.document_name,
@@ -1575,7 +1825,8 @@ async def extract_and_process_document(
                 results["errors"].append(reason)
                 return results
 
-        if not extracted_items:
+        extra_vaccines = results.get("extra_vaccines", [])
+        if not extracted_items and not extra_vaccines:
             logger.info(
                 "No preventive items extracted from document: %s",
                 str(document_id),
@@ -1668,6 +1919,17 @@ async def extract_and_process_document(
                 results["errors"].append(
                     f"Error processing {item.get('item_name', 'unknown')}: {str(e)}"
                 )
+
+        # Persist unmapped vaccines as custom preventive records for this pet only.
+        if extra_vaccines:
+            saved_count, save_errors = _persist_extra_vaccines_for_pet(
+                db,
+                pet=pet,
+                extra_vaccines=extra_vaccines,
+            )
+            results["extra_vaccines_saved"] = saved_count
+            if save_errors:
+                results["errors"].extend(save_errors)
 
         # --- Step 5: Update extraction status ---
         document.extraction_status = "success"
