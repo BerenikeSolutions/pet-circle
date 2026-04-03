@@ -1,0 +1,172 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import type { VetVisit } from "@/lib/api";
+
+interface VetVisitCardProps {
+  visit: VetVisit;
+  defaultOpen: boolean;
+}
+
+function formatDate(value: string | null): string {
+  if (!value) return "Date unavailable";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Date unavailable";
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  }).format(date);
+}
+
+export default function VetVisitCard({ visit, defaultOpen }: VetVisitCardProps) {
+  const [open, setOpen] = useState(defaultOpen);
+  const buttonId = `visit-toggle-${visit.id}`;
+  const panelId = `visit-panel-${visit.id}`;
+
+  useEffect(() => {
+    setOpen(defaultOpen);
+  }, [defaultOpen, visit.id]);
+
+  return (
+    <article className="card" style={{ padding: 14 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+        <div
+          aria-hidden="true"
+          style={{
+            width: 40,
+            height: 40,
+            borderRadius: 10,
+            background: "var(--to)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 18,
+            flexShrink: 0,
+          }}
+        >
+          🩺
+        </div>
+
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--t1)" }}>{visit.title}</div>
+              <div style={{ fontSize: 12, color: "var(--t3)", marginTop: 2 }}>{formatDate(visit.date)}</div>
+            </div>
+            <span
+              style={{
+                fontSize: 11,
+                fontWeight: 700,
+                color: visit.tag_color,
+                background: visit.tag_bg,
+                borderRadius: 999,
+                padding: "4px 10px",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {visit.tag}
+            </span>
+            <button
+              id={buttonId}
+              type="button"
+              onClick={() => setOpen((prev) => !prev)}
+              aria-label={open ? "Collapse vet visit" : "Expand vet visit"}
+              aria-expanded={open}
+              aria-controls={panelId}
+              style={{
+                width: 24,
+                height: 24,
+                border: "none",
+                borderRadius: 999,
+                background: "transparent",
+                color: "var(--t2)",
+                cursor: "pointer",
+                padding: 0,
+                fontSize: 16,
+                lineHeight: "24px",
+                transform: open ? "rotate(180deg)" : "rotate(0deg)",
+                transition: "transform 0.2s ease",
+              }}
+            >
+              ▾
+            </button>
+          </div>
+
+          {open && (
+            <div
+              id={panelId}
+              role="region"
+              aria-labelledby={buttonId}
+              style={{ marginTop: 12, borderTop: "1px solid var(--border)", paddingTop: 12 }}
+            >
+              <div
+                style={{
+                  borderRadius: 10,
+                  background: "#FFF3EE",
+                  border: "1px solid #FFD5C2",
+                  padding: "10px 12px",
+                  marginBottom: 12,
+                }}
+              >
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#B45309", marginBottom: 3 }}>
+                  RX SUMMARY
+                </div>
+                <div style={{ fontSize: 13, color: "var(--t1)", lineHeight: 1.35 }}>{visit.rx || "Not available"}</div>
+              </div>
+
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--t3)", marginBottom: 8 }}>
+                  MEDICATIONS
+                </div>
+                {visit.medications.length > 0 ? (
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                    <thead>
+                      <tr style={{ color: "var(--t3)", textAlign: "left" }}>
+                        <th style={{ padding: "6px 6px 6px 0", fontWeight: 600 }}>Name</th>
+                        <th style={{ padding: "6px", fontWeight: 600 }}>Dose</th>
+                        <th style={{ padding: "6px 0 6px 6px", fontWeight: 600 }}>Duration</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {visit.medications.map((medication, index) => (
+                        <tr key={`${visit.id}-med-${index}`} style={{ borderTop: "1px solid var(--border)" }}>
+                          <td style={{ padding: "7px 6px 7px 0", color: "var(--t1)", fontWeight: 600 }}>
+                            {medication.name}
+                          </td>
+                          <td style={{ padding: "7px 6px", color: "var(--t2)" }}>{medication.dose || "-"}</td>
+                          <td style={{ padding: "7px 0 7px 6px", color: "var(--t2)" }}>
+                            {medication.duration || "-"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <div
+                    style={{
+                      border: "1px solid var(--border)",
+                      borderRadius: 10,
+                      padding: "8px 10px",
+                      fontSize: 12,
+                      color: "var(--t3)",
+                    }}
+                  >
+                    No medications listed for this visit.
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--t3)", marginBottom: 6 }}>NOTES</div>
+                <div style={{ fontSize: 12, color: "var(--t2)", lineHeight: 1.4 }}>
+                  {visit.notes || "No additional notes recorded."}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </article>
+  );
+}
