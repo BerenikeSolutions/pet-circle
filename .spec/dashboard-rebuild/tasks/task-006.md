@@ -1,7 +1,7 @@
 ---
 task: 006
 feature: dashboard-rebuild
-status: pending
+status: complete
 depends_on: [1]
 ---
 
@@ -92,19 +92,28 @@ _Requirements: 4, 8, 18_
 ---
 
 ## Acceptance Criteria
-- [ ] Recognition bullets max 3, correct order (conditions → preventive → diet)
-- [ ] Uses "active health conditions" label
-- [ ] Observational tone, no inference or recommendations
-- [ ] Care plan reasons generated for all orderable items
-- [ ] Graceful fallback if GPT fails (empty dict, no crash)
-- [ ] All existing tests pass
-- [ ] `/verify` passes
+- [x] Recognition bullets max 3, correct order (conditions → preventive → diet)
+- [x] Uses "active health conditions" label
+- [x] Observational tone, no inference or recommendations
+- [x] Care plan reasons generated for all orderable items
+- [x] Graceful fallback if GPT fails (empty dict, no crash)
+- [x] All existing tests pass
+- [x] `/verify` passes
 
 ---
+## Handoff — What Was Done
+- Added `generate_recognition_bullets(db, pet)` in `backend/app/services/ai_insights_service.py` with DB-only counts and fixed bullet order (conditions -> preventive -> diet), capped at 3 bullets.
+- Added `generate_care_plan_reasons(db, pet, orderable_items)` with GPT JSON-mode generation and one-sentence reason mapping per item id.
+- Hardened care-plan reason flow to fail open (`{}`) on GPT failure and pre-GPT context errors (invalid weight, nutrition service failure, malformed item payloads).
 
-## Handoff to Next Task
+## Handoff — Patterns Learned
+- For dashboard AI text helpers, use strict JSON output via `response_format={"type": "json_object"}` and parse defensively.
+- Keep recognition card bullets observational and traceable to DB records only; avoid inference/recommendation tone.
+- Wrap both context-building and GPT calls in fallback guards for non-blocking UI behavior.
 
-**Files changed:** _(fill via /task-handoff)_
-**Decisions made:** _(fill via /task-handoff)_
-**Context for next task:** _(fill via /task-handoff)_
-**Open questions:** _(fill via /task-handoff)_
+## Handoff — Files Changed
+- `backend/app/services/ai_insights_service.py`
+- `backend/tests/unit/test_ai_insights_service.py`
+
+## Status
+COMPLETE

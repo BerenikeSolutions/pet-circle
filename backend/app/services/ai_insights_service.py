@@ -622,6 +622,8 @@ async def generate_recognition_bullets(db: Session, pet: Pet) -> list[Bullet]:
 
 def _extract_orderable_item_key_and_name(item: dict[str, Any]) -> tuple[str, str] | None:
     """Extract a stable id and display name from an orderable item payload."""
+    if not isinstance(item, dict):
+        return None
     item_id = item.get("item_id") or item.get("id") or item.get("name")
     item_name = item.get("name") or item.get("label") or item_id
     if not item_id or not item_name:
@@ -651,37 +653,46 @@ async def generate_care_plan_reasons(
     if not pet or not orderable_items:
         return {}
 
-    item_map: dict[str, str] = {}
-    for item in orderable_items:
-        extracted = _extract_orderable_item_key_and_name(item)
-        if extracted:
-            item_id, item_name = extracted
-            item_map[item_id] = item_name
+    try:
+        item_map: dict[str, str] = {}
+        for item in orderable_items:
+            extracted = _extract_orderable_item_key_and_name(item)
+            if extracted:
+                item_id, item_name = extracted
+                item_map[item_id] = item_name
 
-    if not item_map:
-        return {}
+        if not item_map:
+            return {}
 
-    active_conditions = (
-        db.query(Condition.name)
-        .filter(
-            Condition.pet_id == pet.id,
-            Condition.is_active.is_(True),
+        active_conditions = (
+            db.query(Condition.name)
+            .filter(
+                Condition.pet_id == pet.id,
+                Condition.is_active.is_(True),
+            )
+            .all()
         )
-        .all()
-    )
-    condition_names = [row[0] for row in active_conditions if row and row[0]]
+        condition_names = [row[0] for row in active_conditions if row and row[0]]
 
-    age_months = _get_pet_age_months(pet)
-    breed_size = _get_breed_size(float(pet.weight) if pet.weight is not None else None, pet.breed)
-    life_stage = _get_life_stage(age_months, breed_size).value
+        age_months = _get_pet_age_months(pet)
+        try:
+            weight_kg = float(pet.weight) if pet.weight is not None else None
+        except (TypeError, ValueError):
+            weight_kg = None
 
-    nutrition_summary = await get_diet_summary(db, pet)
-    missing_micros = nutrition_summary.get("missing_micros", [])
-    nutrition_gap_names = [
-        str(gap.get("name"))
-        for gap in missing_micros
-        if isinstance(gap, dict) and gap.get("name")
-    ]
+        breed_size = _get_breed_size(weight_kg, pet.breed)
+        life_stage = _get_life_stage(age_months, breed_size).value
+
+        nutrition_summary = await get_diet_summary(db, pet)
+        missing_micros = nutrition_summary.get("missing_micros", [])
+        nutrition_gap_names = [
+            str(gap.get("name"))
+            for gap in missing_micros
+            if isinstance(gap, dict) and gap.get("name")
+        ]
+    except Exception as exc:
+        logger.warning("care_plan_reasons context build failed for pet %s: %s", pet.id, exc)
+        return {}
 
     conditions_text = ", ".join(condition_names) if condition_names else "none"
     nutrition_gaps_text = ", ".join(nutrition_gap_names) if nutrition_gap_names else "none identified"

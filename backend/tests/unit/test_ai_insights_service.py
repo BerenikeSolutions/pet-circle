@@ -1,17 +1,18 @@
-import os
 import json
+import os
 from types import SimpleNamespace
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
 
 os.environ.setdefault("APP_ENV", "test")
 
-from app.services.care_plan_engine import BreedSize, LifeStage
 from app.services.ai_insights_service import (
     generate_care_plan_reasons,
     generate_recognition_bullets,
 )
+from app.services.care_plan_engine import BreedSize, LifeStage
 
 
 class _ScalarQuery:
@@ -54,7 +55,7 @@ async def test_generate_recognition_bullets_orders_conditions_preventive_diet():
     db = _FakeSession(scalar_values=[4, 2, 3, 1])
     pet = SimpleNamespace(id=uuid4())
 
-    bullets = await generate_recognition_bullets(db, pet)
+    bullets = await generate_recognition_bullets(cast(Any, db), cast(Any, pet))
 
     assert len(bullets) == 3
     assert bullets[0]["icon"] == "🩺"
@@ -95,8 +96,8 @@ async def test_generate_care_plan_reasons_maps_reasons_per_item(monkeypatch):
     monkeypatch.setattr("app.services.ai_insights_service.retry_openai_call", fake_retry)
 
     reasons = await generate_care_plan_reasons(
-        db,
-        pet,
+        cast(Any, db),
+        cast(Any, pet),
         [
             {"item_id": "food-1", "name": "Joint Care Food"},
             {"item_id": "supp-2", "name": "Omega Supplement"},
@@ -134,9 +135,73 @@ async def test_generate_care_plan_reasons_returns_empty_dict_on_gpt_failure(monk
     monkeypatch.setattr("app.services.ai_insights_service.retry_openai_call", broken_retry)
 
     reasons = await generate_care_plan_reasons(
-        db,
-        pet,
+        cast(Any, db),
+        cast(Any, pet),
         [{"item_id": "food-1", "name": "Joint Care Food"}],
     )
 
     assert reasons == {}
+
+
+@pytest.mark.asyncio
+async def test_generate_care_plan_reasons_returns_empty_dict_on_diet_summary_failure(monkeypatch):
+    db = _FakeSession(all_rows=[[("Dermatitis",)]])
+    pet = SimpleNamespace(
+        id=uuid4(),
+        name="Milo",
+        species="dog",
+        breed="Indie",
+        weight=18,
+    )
+
+    monkeypatch.setattr("app.services.ai_insights_service._get_openai_client", lambda: object())
+    monkeypatch.setattr("app.services.ai_insights_service._get_pet_age_months", lambda _pet: 36)
+    monkeypatch.setattr("app.services.ai_insights_service._get_breed_size", lambda _w, _b: BreedSize.MEDIUM)
+    monkeypatch.setattr("app.services.ai_insights_service._get_life_stage", lambda _age, _size: LifeStage.ADULT)
+
+    async def broken_diet_summary(_db, _pet):
+        raise RuntimeError("nutrition service unavailable")
+
+    monkeypatch.setattr("app.services.ai_insights_service.get_diet_summary", broken_diet_summary)
+
+    reasons = await generate_care_plan_reasons(
+        cast(Any, db),
+        cast(Any, pet),
+        [{"item_id": "food-1", "name": "Joint Care Food"}],
+    )
+
+    assert reasons == {}
+
+
+@pytest.mark.asyncio
+async def test_generate_care_plan_reasons_handles_invalid_weight(monkeypatch):
+    db = _FakeSession(all_rows=[[("Arthritis",)]])
+    pet = SimpleNamespace(
+        id=uuid4(),
+        name="Bruno",
+        species="dog",
+        breed="Labrador",
+        weight="not-a-number",
+    )
+
+    monkeypatch.setattr("app.services.ai_insights_service._get_openai_client", lambda: object())
+    monkeypatch.setattr("app.services.ai_insights_service._get_pet_age_months", lambda _pet: 48)
+    monkeypatch.setattr("app.services.ai_insights_service._get_breed_size", lambda _w, _b: BreedSize.LARGE)
+    monkeypatch.setattr("app.services.ai_insights_service._get_life_stage", lambda _age, _size: LifeStage.ADULT)
+
+    async def fake_get_diet_summary(_db, _pet):
+        return {"missing_micros": []}
+
+    async def fake_retry(_call):
+        return json.dumps({"food-1": "Supports ongoing adult-stage care context"})
+
+    monkeypatch.setattr("app.services.ai_insights_service.get_diet_summary", fake_get_diet_summary)
+    monkeypatch.setattr("app.services.ai_insights_service.retry_openai_call", fake_retry)
+
+    reasons = await generate_care_plan_reasons(
+        cast(Any, db),
+        cast(Any, pet),
+        [{"item_id": "food-1", "name": "Joint Care Food"}],
+    )
+
+    assert reasons == {"food-1": "Supports ongoing adult-stage care context."}
