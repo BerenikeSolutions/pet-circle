@@ -1,13 +1,11 @@
-'use client';
+"use client";
 
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import type { DashboardData, CartItemData, CartRecommendation, PlaceOrderResponse, VerifyPaymentResponse } from '@/lib/api';
-import {
-  getCart, toggleCartItem, updateCartQuantity, addToCart,
-  getCartRecommendations, applyCoupon, placeOrder,
-  createPayment, verifyPayment,
-} from '@/lib/api';
-import { PAYMENT_METHODS, NET_BANKS, FREE_DELIVERY_THRESHOLD, DELIVERY_FEE } from '@/lib/dashboard-utils';
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CartItemData, DashboardData, PlaceOrderResponse } from "@/lib/api";
+import { getCart, placeOrder, toggleCartItem, updateCartQuantity } from "@/lib/api";
+import CheckoutView from "./cart/CheckoutView";
+import type { CheckoutDetails } from "./cart/CheckoutView";
+import ConfirmView from "./cart/ConfirmView";
 
 interface CartViewProps {
   data: DashboardData;
@@ -16,893 +14,231 @@ interface CartViewProps {
   onBack: () => void;
 }
 
-interface AddressData {
-  id: string;
-  name: string;
-  line: string;
-  tag: string;
-  selected: boolean;
-}
+type CartScreen = "cart" | "checkout" | "confirm";
 
-interface AddressSheetState {
-  mode: 'edit' | 'add';
-  id?: string;
-}
-
-type Screen = 'cart' | 'payment' | 'success';
+const DELIVERY_FEE = 49;
+const FREE_THRESHOLD = 599;
 
 export default function CartView({ data, token, pinnedItemId, onBack }: CartViewProps) {
-  const petName = data.pet.name || 'Your Pet';
-
-  const [screen, setScreen] = useState<Screen>('cart');
+  const [screen, setScreen] = useState<CartScreen>("cart");
   const [items, setItems] = useState<CartItemData[]>([]);
-  const [recommendations, setRecommendations] = useState<CartRecommendation[]>([]);
   const [loading, setLoading] = useState(true);
-  const [recsLoading, setRecsLoading] = useState(true);
-  const [coupon, setCoupon] = useState('');
-  const [couponApplied, setCouponApplied] = useState(false);
-  const [couponError, setCouponError] = useState(false);
-  const [discountPercent, setDiscountPercent] = useState(0);
-  const [payMethod, setPayMethod] = useState('upi');
-  const [upiId, setUpiId] = useState('');
-  const [cardNum, setCardNum] = useState('');
-  const [cardName, setCardName] = useState('');
-  const [cardExp, setCardExp] = useState('');
-  const [cardCvv, setCardCvv] = useState('');
-  const [netBank, setNetBank] = useState('');
-  const [orderResult, setOrderResult] = useState<PlaceOrderResponse | VerifyPaymentResponse | null>(null);
-  const [placing, setPlacing] = useState(false);
+  const [error, setError] = useState("");
+  const [orderResult, setOrderResult] = useState<PlaceOrderResponse | null>(null);
+  const pinHandledRef = useRef(false);
 
-  // Address state
-  const [addresses, setAddresses] = useState<AddressData[]>([
-    { id: 'a1', name: data.owner.full_name || '', line: '', tag: 'Home', selected: true },
-  ]);
-  const [addressSheet, setAddressSheet] = useState<AddressSheetState | null>(null);
-  const [addrForm, setAddrForm] = useState({ name: '', line: '', tag: 'Home' });
-
-  const selectedAddr = addresses.find(a => a.selected) || addresses[0];
-  const pinnedHandled = useRef(false);
-
-  // Load cart items from API
   const loadCart = useCallback(async () => {
+    setLoading(true);
+    setError("");
     try {
-      setLoading(true);
-      const cartData = await getCart(token);
-      setItems(cartData.items);
-    } catch (e) {
-      console.error('Failed to load cart:', e);
+      const response = await getCart(token);
+      setItems(response.items);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load cart.");
     } finally {
       setLoading(false);
     }
   }, [token]);
 
-  // Load recommendations from API
-  const loadRecommendations = useCallback(async () => {
+  const ensurePinnedItem = useCallback(async () => {
+    if (!pinnedItemId || pinHandledRef.current || loading) return;
+    pinHandledRef.current = true;
+    const alreadyPresent = items.some((item) => item.product_id === pinnedItemId && item.in_cart);
+    if (alreadyPresent) return;
     try {
-      setRecsLoading(true);
-      const recs = await getCartRecommendations(token);
-      setRecommendations(recs);
-    } catch (e) {
-      console.error('Failed to load recommendations:', e);
-    } finally {
-      setRecsLoading(false);
+      const updatedItem = await toggleCartItem(token, pinnedItemId);
+      setItems((prev) => {
+        const idx = prev.findIndex((entry) => entry.product_id === updatedItem.product_id);
+        if (idx === -1) return [...prev, updatedItem];
+        const next = [...prev];
+        next[idx] = updatedItem;
+        return next;
+      });
+    } catch {
+      // Keep flow non-blocking if pin add fails.
     }
-  }, [token]);
+  }, [items, loading, pinnedItemId, token]);
 
   useEffect(() => {
     loadCart();
-    loadRecommendations();
-  }, [loadCart, loadRecommendations]);
+  }, [loadCart]);
 
-  const handleToggle = useCallback(async (productId: string) => {
-    try {
-      const updated = await toggleCartItem(token, productId);
-      setItems(prev => {
-        const exists = prev.find(i => i.product_id === productId);
-        if (exists) {
-          return prev.map(i => i.product_id === productId ? updated : i);
-        }
-        return [...prev, updated];
-      });
-      // Remove from recommendations if added
-      if (updated.in_cart) {
-        setRecommendations(prev => prev.filter(r => r.product_id !== productId));
-      }
-    } catch (e) {
-      console.error('Toggle failed:', e);
-    }
-  }, [token]);
-
-  // Auto-add pinned item once after initial cart load completes
   useEffect(() => {
-    if (!pinnedItemId || loading || pinnedHandled.current) return;
-    pinnedHandled.current = true;
-    const alreadyInCart = items.find(i => i.product_id === pinnedItemId && i.in_cart);
-    if (!alreadyInCart) {
-      handleToggle(pinnedItemId);
-    }
-  }, [pinnedItemId, loading, items, handleToggle]);
+    ensurePinnedItem();
+  }, [ensurePinnedItem]);
 
-  const handleAddRecommendation = useCallback(async (rec: CartRecommendation) => {
+  const inCartItems = useMemo(() => items.filter((item) => item.in_cart), [items]);
+
+  const subtotal = useMemo(() => {
+    return inCartItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
+  }, [inCartItems]);
+
+  const deliveryFee = subtotal >= FREE_THRESHOLD ? 0 : DELIVERY_FEE;
+  const total = subtotal + deliveryFee;
+  const amountForFreeDelivery = Math.max(0, FREE_THRESHOLD - subtotal);
+
+  const changeQuantity = async (productId: string, nextQty: number) => {
+    const quantity = Math.max(1, nextQty);
+    setItems((prev) => prev.map((item) => (item.product_id === productId ? { ...item, quantity } : item)));
     try {
-      const added = await addToCart(token, {
-        product_id: rec.product_id,
-        name: rec.name,
-        price: rec.price,
-        icon: rec.icon,
-        sub: rec.sub,
-        tag: rec.tag || undefined,
-        tag_color: rec.tag_color || undefined,
-      });
-      setItems(prev => [...prev, added]);
-      setRecommendations(prev => prev.filter(r => r.product_id !== rec.product_id));
-    } catch (e) {
-      console.error('Add to cart failed:', e);
+      const updated = await updateCartQuantity(token, productId, quantity);
+      setItems((prev) => prev.map((item) => (item.product_id === productId ? updated : item)));
+    } catch {
+      loadCart();
     }
-  }, [token]);
+  };
 
-  const handleQtyChange = useCallback(async (productId: string, newQty: number) => {
-    const qty = Math.max(1, newQty);
-    // Optimistic update
-    setItems(prev => prev.map(i => i.product_id === productId ? { ...i, quantity: qty } : i));
-    try {
-      await updateCartQuantity(token, productId, qty);
-    } catch (e) {
-      console.error('Quantity update failed:', e);
-      loadCart(); // Revert on failure
-    }
-  }, [token, loadCart]);
-
-  const handleApplyCoupon = useCallback(async () => {
-    if (!coupon) return;
-    setCouponError(false);
-    try {
-      const result = await applyCoupon(token, coupon);
-      if (result.valid) {
-        setCouponApplied(true);
-        setCouponError(false);
-        setDiscountPercent(result.discount_percent);
-      } else {
-        setCouponApplied(false);
-        setCouponError(true);
-        setDiscountPercent(0);
-      }
-    } catch (e) {
-      console.error('Coupon failed:', e);
-      setCouponError(true);
-    }
-  }, [token, coupon]);
-
-  const handlePlaceOrder = useCallback(async () => {
-    setPlacing(true);
-    const method = payMethod === 'net' ? 'netbanking' : payMethod;
-    const addrPayload = selectedAddr ? { name: selectedAddr.name, line: selectedAddr.line, tag: selectedAddr.tag } : undefined;
-
-    try {
-      if (method === 'cod') {
-        // COD — no Razorpay, place directly
-        const result = await placeOrder(token, {
-          payment_method: 'cod',
-          address: addrPayload,
-          coupon: couponApplied ? coupon : undefined,
-        });
-        setOrderResult(result);
-        setScreen('success');
-        return;
-      }
-
-      // UPI / card / netbanking — use Razorpay checkout
-      const paymentData = await createPayment(token, {
-        payment_method: method,
-        address: addrPayload,
-        coupon: couponApplied ? coupon : undefined,
-        coupon_discount_percent: couponApplied ? discountPercent : 0,
-      });
-
-      // Load Razorpay checkout.js if not already loaded
-      await new Promise<void>((resolve, reject) => {
-        if ((window as any).Razorpay) { resolve(); return; }
-        const script = document.createElement('script');
-        script.src = 'https://checkout.razorpay.com/v1/checkout.js';
-        script.onload = () => resolve();
-        script.onerror = () => reject(new Error('Failed to load Razorpay checkout'));
-        document.body.appendChild(script);
-      });
-
-      await new Promise<void>((resolve, reject) => {
-        const rzp = new (window as any).Razorpay({
-          key: paymentData.key_id,
-          amount: paymentData.amount,
-          currency: paymentData.currency,
-          order_id: paymentData.razorpay_order_id,
-          name: 'PetCircle',
-          description: `Order for ${petName}`,
-          image: 'https://pet-circle-chi.vercel.app/favicon.ico',
-          prefill: { name: selectedAddr?.name || '' },
-          theme: { color: '#D44800' },
-          handler: async (response: any) => {
-            try {
-              const verified = await verifyPayment(token, {
-                order_db_id: paymentData.order_db_id,
-                razorpay_order_id: response.razorpay_order_id,
-                razorpay_payment_id: response.razorpay_payment_id,
-                razorpay_signature: response.razorpay_signature,
-              });
-              setOrderResult(verified);
-              setScreen('success');
-              resolve();
-            } catch (err) {
-              reject(err);
-            }
-          },
-          modal: {
-            ondismiss: () => reject(new Error('Payment cancelled')),
-          },
-        });
-        rzp.open();
-      });
-    } catch (e: any) {
-      if (e?.message === 'Payment cancelled') {
-        // User closed the modal — don't show error
-      } else {
-        console.error('Order failed:', e);
-        alert(e?.message || 'Failed to place order. Please try again.');
-      }
-    } finally {
-      setPlacing(false);
-    }
-  }, [token, payMethod, selectedAddr, couponApplied, coupon, discountPercent, petName]);
-
-  // Derived values
-  const inCartItems = useMemo(() => items.filter(i => i.in_cart), [items]);
-  const notInCartItems = useMemo(() => items.filter(i => !i.in_cart), [items]);
-  const subtotal = useMemo(() => inCartItems.reduce((s, i) => s + i.price * i.quantity, 0), [inCartItems]);
-  const discount = useMemo(() => couponApplied ? Math.round(subtotal * discountPercent / 100) : 0, [subtotal, couponApplied, discountPercent]);
-  const delivery = subtotal >= FREE_DELIVERY_THRESHOLD ? 0 : DELIVERY_FEE;
-  const total = subtotal - discount + delivery;
-
-  // Sort pinned item first
-  const sortWithPin = useCallback((arr: CartItemData[]) => {
-    if (!pinnedItemId) return arr;
-    return [...arr].sort((a, b) => {
-      if (a.product_id === pinnedItemId) return -1;
-      if (b.product_id === pinnedItemId) return 1;
-      return 0;
+  const handlePlaceOrder = async (details: CheckoutDetails) => {
+    const addressLine = `${details.address}, ${details.pincode}`;
+    const result = await placeOrder(token, {
+      payment_method: details.paymentMethod,
+      address: {
+        name: details.name,
+        line: addressLine,
+        tag: "Home",
+      },
     });
-  }, [pinnedItemId]);
-
-  const openEditAddress = () => {
-    setAddrForm({ name: selectedAddr.name, line: selectedAddr.line, tag: selectedAddr.tag });
-    setAddressSheet({ mode: 'edit', id: selectedAddr.id });
-  };
-  const openAddAddress = () => {
-    setAddrForm({ name: '', line: '', tag: 'Home' });
-    setAddressSheet({ mode: 'add' });
-  };
-  const saveAddress = () => {
-    if (!addrForm.name || !addrForm.line) return;
-    if (addressSheet?.mode === 'edit' && addressSheet.id) {
-      setAddresses(prev => prev.map(a => a.id === addressSheet.id ? { ...a, ...addrForm } : a));
-    } else {
-      const newId = 'a' + (addresses.length + 1);
-      setAddresses(prev => [...prev.map(a => ({ ...a, selected: false })), { id: newId, ...addrForm, selected: true }]);
-    }
-    setAddressSheet(null);
+    setOrderResult(result);
+    setScreen("confirm");
   };
 
-  // ─── LOADING ──────────────────────────────────────────────
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background: 'var(--bg-app)' }}>
-        <div className="text-center">
-          <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-t-transparent" style={{ borderColor: '#FFD5C2', borderTopColor: '#D44800' }} />
-          <p className="text-gray-500 text-sm">Loading cart...</p>
+      <div className="min-h-screen" style={{ background: "var(--bg-app)" }}>
+        <div className="app">
+          <div className="card" style={{ textAlign: "center", color: "var(--t3)" }}>Loading cart...</div>
         </div>
       </div>
     );
   }
 
-  // ─── SUCCESS SCREEN ──────────────────────────────────────────
-  if (screen === 'success' && orderResult) {
+  if (error) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center px-6" style={{ background: 'var(--bg-app)' }}>
-        <div className="max-w-[430px] w-full text-center animate-fadeIn">
-          <span className="text-6xl mb-4 block">🎉</span>
-          <h1 className="font-display text-2xl font-bold text-gray-900 mb-2">Order Confirmed!</h1>
-          <p className="text-sm text-gray-500 mb-6">Order ID: {orderResult.order_id}</p>
-
-          <div className="bg-white rounded-2xl shadow-sm p-4 mb-4 text-left" style={{ border: '1.5px solid rgba(52,199,89,0.2)' }}>
-            {orderResult.items.map(i => (
-              <div key={i.product_id} className="flex justify-between items-center py-1.5" style={{ borderBottom: '1px solid #F5F2EE' }}>
-                <span className="text-[13px]">{i.icon} {i.name}</span>
-                <span className="text-[13px] font-bold" style={{ color: '#D44800' }}>
-                  ₹{i.total.toLocaleString('en-IN')}
-                </span>
-              </div>
-            ))}
-            <div className="flex justify-between pt-2 mt-0.5">
-              <span className="font-bold text-sm">Total paid</span>
-              <span className="font-extrabold text-[15px]" style={{ color: '#D44800' }}>
-                ₹{orderResult.total.toLocaleString('en-IN')}
-              </span>
-            </div>
+      <div className="min-h-screen" style={{ background: "var(--bg-app)" }}>
+        <div className="app">
+          <div className="card" style={{ textAlign: "center" }}>
+            <p style={{ color: "var(--red)", marginBottom: 10 }}>{error}</p>
+            <button type="button" className="btn btn-or" onClick={loadCart}>Retry</button>
           </div>
-
-          <div className="rounded-xl px-3.5 py-2.5 mb-5 text-left text-xs" style={{ background: '#F0FFF4', color: '#1A6B2A' }}>
-            ✅ Payment received · Estimated delivery 1–2 business days<br />
-            🏠 Home vet visit & grooming scheduled for confirmed slots
-          </div>
-
-          <button
-            onClick={onBack}
-            className="w-full py-3.5 rounded-2xl text-white font-semibold text-sm"
-            style={{ background: 'var(--brand-gradient)' }}
-          >
-            ← Back to Dashboard
-          </button>
         </div>
       </div>
     );
   }
 
-  // ─── PAYMENT SCREEN ──────────────────────────────────────────
-  if (screen === 'payment') {
+  if (screen === "checkout") {
     return (
-      <div className="min-h-screen" style={{ background: 'var(--bg-app)' }}>
-        <div className="max-w-[430px] mx-auto">
-          <div className="flex items-center gap-3 px-4 py-4 bg-white border-b border-gray-100">
-            <button onClick={() => setScreen('cart')} className="text-gray-600 text-lg">←</button>
-            <h2 className="font-display font-bold text-lg">Payment</h2>
-          </div>
-
-          <div className="p-4 space-y-3 pb-32">
-            <div className="bg-white rounded-xl px-4 py-3 flex justify-between items-center" style={{ border: '1px solid #E8E4DF' }}>
-              <span className="text-[13px] text-gray-600">{inCartItems.length} items for {petName}</span>
-              <span className="font-extrabold text-base" style={{ color: '#D44800' }}>₹{total.toLocaleString('en-IN')}</span>
-            </div>
-
-            {/* Deliver To */}
-            <div className="bg-white rounded-xl p-3.5" style={{ border: '1px solid #E8E4DF' }}>
-              <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2">Deliver to</p>
-              {addresses.map(addr => (
-                <div
-                  key={addr.id}
-                  onClick={() => setAddresses(prev => prev.map(a => ({ ...a, selected: a.id === addr.id })))}
-                  className="flex items-center gap-2.5 py-2 cursor-pointer"
-                  style={{ borderBottom: '1px solid #F5F2EE' }}
-                >
-                  <div
-                    className="w-[18px] h-[18px] rounded-full flex items-center justify-center shrink-0"
-                    style={{ border: `2px solid ${addr.selected ? '#D44800' : '#C7C7CC'}`, background: addr.selected ? '#D44800' : 'white' }}
-                  >
-                    {addr.selected && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
-                  </div>
-                  <span className="text-lg">📍</span>
-                  <div className="flex-1 min-w-0">
-                    <p className="font-semibold text-[13px]">{addr.name}</p>
-                    <p className="text-xs text-gray-500">{addr.line} · {addr.tag}</p>
-                  </div>
-                  {addr.selected && (
-                    <button
-                      onClick={e => { e.stopPropagation(); openEditAddress(); }}
-                      className="text-xs font-bold px-1.5 py-0.5"
-                      style={{ color: '#D44800', background: 'none', border: 'none' }}
-                    >
-                      Edit
-                    </button>
-                  )}
-                </div>
-              ))}
-              <button
-                onClick={openAddAddress}
-                className="mt-2 flex items-center gap-2 w-full rounded-xl py-2.5 px-3 text-[13px] font-semibold"
-                style={{ border: '1.5px dashed rgba(212,72,0,0.4)', color: '#D44800', background: 'none' }}
-              >
-                <span className="text-base">＋</span> Add new address
-              </button>
-            </div>
-
-            {/* Payment Methods */}
-            <div className="bg-white rounded-xl p-3.5" style={{ border: '1px solid #E8E4DF' }}>
-              <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2.5">Payment method</p>
-              {PAYMENT_METHODS.map(pm => (
-                <div key={pm.id}>
-                  <div
-                    onClick={() => setPayMethod(pm.id)}
-                    className="flex items-center gap-3 py-2.5 cursor-pointer"
-                    style={{ borderBottom: (payMethod === pm.id && ['upi', 'card', 'net'].includes(pm.id)) ? 'none' : '1px solid #F5F2EE' }}
-                  >
-                    <div
-                      className="w-[18px] h-[18px] rounded-full flex items-center justify-center shrink-0"
-                      style={{ border: `2px solid ${payMethod === pm.id ? '#D44800' : '#C7C7CC'}`, background: payMethod === pm.id ? '#D44800' : 'white' }}
-                    >
-                      {payMethod === pm.id && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
-                    </div>
-                    <span className="text-xl">{pm.icon}</span>
-                    <div className="flex-1">
-                      <p className="font-semibold text-[13px]">{pm.label}</p>
-                      <p className="text-[11px] text-gray-500">{pm.sub}</p>
-                    </div>
-                  </div>
-
-                  {payMethod === 'upi' && pm.id === 'upi' && (
-                    <div className="py-2.5 pb-3.5" style={{ borderBottom: '1px solid #F5F2EE' }}>
-                      <input
-                        value={upiId} onChange={e => setUpiId(e.target.value)}
-                        placeholder="Enter UPI ID (e.g. name@upi)"
-                        className="w-full px-3.5 py-2.5 rounded-xl text-[13px] focus:outline-none"
-                        style={{ border: '1.5px solid #E8E4DF' }}
-                      />
-                    </div>
-                  )}
-
-                  {payMethod === 'card' && pm.id === 'card' && (
-                    <div className="py-2.5 pb-3.5 space-y-2" style={{ borderBottom: '1px solid #F5F2EE' }}>
-                      <input
-                        value={cardNum}
-                        onChange={e => setCardNum(e.target.value.replace(/\D/g, '').slice(0, 16).replace(/(.{4})/g, '$1 ').trim())}
-                        placeholder="Card number" maxLength={19}
-                        className="w-full px-3.5 py-2.5 rounded-xl text-[13px] focus:outline-none"
-                        style={{ border: '1.5px solid #E8E4DF' }}
-                      />
-                      <input
-                        value={cardName} onChange={e => setCardName(e.target.value)}
-                        placeholder="Name on card"
-                        className="w-full px-3.5 py-2.5 rounded-xl text-[13px] focus:outline-none"
-                        style={{ border: '1.5px solid #E8E4DF' }}
-                      />
-                      <div className="flex gap-2">
-                        <input
-                          value={cardExp}
-                          onChange={e => {
-                            let v = e.target.value.replace(/\D/g, '');
-                            if (v.length >= 2) v = v.slice(0, 2) + '/' + v.slice(2, 4);
-                            setCardExp(v);
-                          }}
-                          placeholder="MM/YY" maxLength={5}
-                          className="flex-1 px-3.5 py-2.5 rounded-xl text-[13px] focus:outline-none"
-                          style={{ border: '1.5px solid #E8E4DF' }}
-                        />
-                        <input
-                          value={cardCvv}
-                          onChange={e => setCardCvv(e.target.value.replace(/\D/g, '').slice(0, 4))}
-                          placeholder="CVV" maxLength={4} type="password"
-                          className="flex-1 px-3.5 py-2.5 rounded-xl text-[13px] focus:outline-none"
-                          style={{ border: '1.5px solid #E8E4DF' }}
-                        />
-                      </div>
-                    </div>
-                  )}
-
-                  {payMethod === 'net' && pm.id === 'net' && (
-                    <div className="py-2.5 pb-3.5" style={{ borderBottom: '1px solid #F5F2EE' }}>
-                      <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2">Select your bank</p>
-                      <div className="flex flex-wrap gap-1.5">
-                        {NET_BANKS.map(bank => (
-                          <button
-                            key={bank} onClick={() => setNetBank(bank)}
-                            className="px-3 py-1.5 rounded-full text-xs font-medium"
-                            style={{
-                              border: `1.5px solid ${netBank === bank ? '#D44800' : '#E8E4DF'}`,
-                              background: netBank === bank ? '#FFF3EE' : 'white',
-                              color: netBank === bank ? '#D44800' : '#555',
-                              fontWeight: netBank === bank ? 700 : 500,
-                            }}
-                          >
-                            {bank}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-
-            {/* Bill Summary */}
-            <div className="bg-white rounded-xl p-3.5" style={{ border: '1px solid #E8E4DF' }}>
-              <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2.5">Bill summary</p>
-              <div className="space-y-1 text-[13px]">
-                <div className="flex justify-between py-1" style={{ borderBottom: '1px solid #F5F2EE' }}>
-                  <span className="text-gray-600">Subtotal</span>
-                  <span className="font-semibold">₹{subtotal.toLocaleString('en-IN')}</span>
-                </div>
-                {couponApplied && (
-                  <div className="flex justify-between py-1 text-green-600" style={{ borderBottom: '1px solid #F5F2EE' }}>
-                    <span>Discount ({discountPercent}%)</span>
-                    <span className="font-semibold">-₹{discount.toLocaleString('en-IN')}</span>
-                  </div>
-                )}
-                <div className="flex justify-between py-1" style={{ borderBottom: '1px solid #F5F2EE' }}>
-                  <span className="text-gray-600">Delivery</span>
-                  <span className={`font-semibold ${delivery === 0 ? 'text-green-600' : ''}`}>{delivery === 0 ? 'FREE' : `₹${delivery}`}</span>
-                </div>
-                <div className="flex justify-between pt-2.5 mt-0.5">
-                  <span className="font-bold text-sm">Total</span>
-                  <span className="font-extrabold text-base" style={{ color: '#D44800' }}>₹{total.toLocaleString('en-IN')}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Sticky Pay Button */}
-          <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-100 p-4 shadow-lg" style={{ zIndex: 100 }}>
-            <div className="max-w-[430px] mx-auto">
-              {!selectedAddr?.line && (
-                <p className="text-xs text-center text-orange-600 font-medium mb-2">
-                  Add a delivery address to continue
-                </p>
-              )}
-              <button
-                onClick={handlePlaceOrder}
-                disabled={placing || !selectedAddr?.line}
-                className="w-full py-3.5 rounded-2xl text-white font-bold text-[15px] disabled:opacity-50"
-                style={{ background: '#D44800' }}
-              >
-                {placing ? 'Processing...' : `Pay ₹${total.toLocaleString('en-IN')} →`}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Address Bottom Sheet */}
-        {addressSheet && (
-          <div
-            className="fixed inset-0 flex items-end justify-center"
-            style={{ background: 'rgba(0,0,0,0.45)', zIndex: 300 }}
-            onClick={() => setAddressSheet(null)}
-          >
-            <div
-              onClick={e => e.stopPropagation()}
-              className="bg-white w-full max-w-[430px] p-6"
-              style={{ borderRadius: '20px 20px 0 0' }}
-            >
-              <div className="w-10 h-1 bg-gray-300 rounded-full mx-auto mb-5" />
-              <h3 className="font-bold text-base mb-1">
-                {addressSheet.mode === 'edit' ? 'Edit address' : 'Add new address'}
-              </h3>
-              <p className="text-xs text-gray-500 mb-5">Delivery details for {petName}&apos;s order</p>
-
-              <div className="space-y-2.5">
-                <div>
-                  <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1.5">Full name</p>
-                  <input
-                    value={addrForm.name} onChange={e => setAddrForm(f => ({ ...f, name: e.target.value }))}
-                    placeholder="e.g. Priya Sharma"
-                    className="w-full px-3.5 py-2.5 rounded-xl text-[13px] focus:outline-none"
-                    style={{ border: '1.5px solid #E8E4DF' }}
-                  />
-                </div>
-                <div>
-                  <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1.5">Address & pincode</p>
-                  <input
-                    value={addrForm.line} onChange={e => setAddrForm(f => ({ ...f, line: e.target.value }))}
-                    placeholder="e.g. Mumbai 400001"
-                    className="w-full px-3.5 py-2.5 rounded-xl text-[13px] focus:outline-none"
-                    style={{ border: '1.5px solid #E8E4DF' }}
-                  />
-                </div>
-                <div>
-                  <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-1.5">Tag</p>
-                  <div className="flex gap-2">
-                    {['Home', 'Work', 'Other'].map(tag => (
-                      <button
-                        key={tag} onClick={() => setAddrForm(f => ({ ...f, tag }))}
-                        className="flex-1 py-2 rounded-full text-[13px] font-semibold border-none"
-                        style={{
-                          background: addrForm.tag === tag ? '#D44800' : '#F2EDE8',
-                          color: addrForm.tag === tag ? 'white' : '#555',
-                        }}
-                      >
-                        {tag}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              <button
-                onClick={saveAddress}
-                className="w-full mt-5 py-3 rounded-xl text-white text-sm font-bold border-none"
-                style={{ background: addrForm.name && addrForm.line ? '#D44800' : '#D1D1D6', cursor: addrForm.name && addrForm.line ? 'pointer' : 'default' }}
-              >
-                Save Address
-              </button>
-              <button
-                onClick={() => setAddressSheet(null)}
-                className="w-full py-2.5 text-[13px] text-gray-500 mt-1 bg-transparent border-none"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
+      <CheckoutView
+        total={total}
+        initialName={data.owner.full_name || ""}
+        onBack={() => setScreen("cart")}
+        onPlaceOrder={handlePlaceOrder}
+      />
     );
   }
 
-  // ─── CART SCREEN ─────────────────────────────────────────────
-  const sortedInCart = sortWithPin(inCartItems);
-  const hasItems = items.length > 0 || recommendations.length > 0;
+  if (screen === "confirm") {
+    const confirmedItems = orderResult?.items?.map((item) => ({
+      id: item.product_id,
+      product_id: item.product_id,
+      icon: item.icon,
+      name: item.name,
+      sub: null,
+      price: item.price,
+      tag: null,
+      tag_color: null,
+      in_cart: true,
+      quantity: item.quantity,
+    })) || inCartItems;
+
+    return (
+      <ConfirmView
+        items={confirmedItems}
+        totalPaid={orderResult?.total ?? total}
+        onBackToDashboard={onBack}
+      />
+    );
+  }
 
   return (
-    <div className="min-h-screen" style={{ background: 'var(--bg-app)' }}>
-      <div className="max-w-[430px] mx-auto">
-        {/* Header */}
-        <div className="flex items-center gap-3 px-4 py-4 bg-white border-b border-gray-100">
-          <button onClick={onBack} className="text-gray-600 text-lg">←</button>
-          <h2 className="font-display font-bold text-lg">{petName}&apos;s Care Orders</h2>
-          {inCartItems.length > 0 && (
-            <div
-              className="ml-auto rounded-full px-2.5 py-0.5 text-xs font-bold text-white"
-              style={{ background: '#FF3B30' }}
-            >
-              {inCartItems.length} items
-            </div>
-          )}
+    <div className="min-h-screen" style={{ background: "var(--bg-app)" }}>
+      <div className="app">
+        <div className="vh">
+          <button className="back-btn" onClick={onBack} type="button" aria-label="Back to dashboard">
+            Back
+          </button>
+          <div className="vh-title">Your Cart</div>
         </div>
 
-        <div className="p-4 space-y-2 pb-40">
-          {/* Pinned item banner */}
-          {pinnedItemId && (() => {
-            const pinned = items.find(i => i.product_id === pinnedItemId);
-            return pinned ? (
-              <div
-                className="flex items-center gap-2.5 rounded-xl px-3.5 py-2.5 mb-0.5"
-                style={{ background: '#FFF6ED', border: '1.5px solid rgba(255,149,0,0.33)' }}
-              >
-                <span className="text-base">{pinned.icon}</span>
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs font-bold" style={{ color: '#B86000' }}>Added from your dashboard</p>
-                  <p className="text-[11px]" style={{ color: '#8E5A00' }}>{pinned.name} is at the top of your order</p>
+        <div className="card" style={{ marginBottom: 12 }}>
+          {inCartItems.length === 0 && (
+            <div style={{ textAlign: "center", color: "var(--t3)" }}>No items in cart yet.</div>
+          )}
+
+          {inCartItems.map((item) => {
+            const sku = item.product_id;
+            const section = item.tag || item.sub || "Care";
+            return (
+              <div className="cart-row" key={item.product_id}>
+                <div className="cart-icon" style={{ background: "var(--to)" }}>{item.icon || "PKG"}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "var(--t1)" }}>{item.name}</div>
+                  <div style={{ fontSize: 11, color: "var(--t3)" }}>SKU: {sku}</div>
+                  <div style={{ fontSize: 11, color: "var(--t3)" }}>Section: {section}</div>
+                  <div style={{ marginTop: 4, fontSize: 13, fontWeight: 700, color: "var(--orange)" }}>
+                    Rs {item.price.toLocaleString("en-IN")}
+                  </div>
+                </div>
+                <div className="qty">
+                  <button className="qty-btn" type="button" onClick={() => changeQuantity(item.product_id, item.quantity - 1)}>
+                    -
+                  </button>
+                  <strong style={{ minWidth: 14, textAlign: "center" }}>{item.quantity}</strong>
+                  <button className="qty-btn" type="button" onClick={() => changeQuantity(item.product_id, item.quantity + 1)}>
+                    +
+                  </button>
                 </div>
               </div>
-            ) : null;
-          })()}
-
-          {/* Empty state */}
-          {!hasItems && !recsLoading && (
-            <div className="text-center py-12">
-              <span className="text-4xl block mb-3">🛒</span>
-              <p className="text-gray-500 text-sm">No items in your cart yet.</p>
-              <p className="text-gray-400 text-xs mt-1">Recommendations will appear as we analyze {petName}&apos;s needs.</p>
-            </div>
-          )}
-
-          {/* In-cart items */}
-          {sortedInCart.length > 0 && (
-            <>
-              <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mt-1 mb-0.5 pl-0.5">
-                🛒 In Cart
-              </p>
-              {sortedInCart.map(item => (
-                <CartItemRow
-                  key={item.product_id} item={item}
-                  inCart={true} qty={item.quantity}
-                  onToggle={() => handleToggle(item.product_id)}
-                  onQtyChange={v => handleQtyChange(item.product_id, v)}
-                />
-              ))}
-            </>
-          )}
-
-          {/* Items removed from cart */}
-          {notInCartItems.length > 0 && (
-            <>
-              <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mt-2 mb-0.5 pl-0.5">
-                Previously Added
-              </p>
-              {notInCartItems.map(item => (
-                <CartItemRow
-                  key={item.product_id} item={item}
-                  inCart={false} qty={item.quantity}
-                  onToggle={() => handleToggle(item.product_id)}
-                  onQtyChange={v => handleQtyChange(item.product_id, v)}
-                />
-              ))}
-            </>
-          )}
-
-          {/* Recommendations section */}
-          {recommendations.length > 0 && (
-            <>
-              <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mt-3 mb-0.5 pl-0.5">
-                ✨ Recommended for {petName}
-              </p>
-              {recommendations.map(rec => (
-                <RecommendationRow key={rec.product_id} rec={rec} onAdd={() => handleAddRecommendation(rec)} />
-              ))}
-            </>
-          )}
-
-          {recsLoading && (
-            <div className="text-center py-4">
-              <div className="mx-auto h-6 w-6 animate-spin rounded-full border-2 border-t-transparent" style={{ borderColor: '#FFD5C2', borderTopColor: '#D44800' }} />
-              <p className="text-gray-400 text-xs mt-2">Finding recommendations...</p>
-            </div>
-          )}
+            );
+          })}
         </div>
 
-        {/* Sticky Footer */}
-        <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-100 shadow-lg" style={{ zIndex: 100 }}>
-          <div className="max-w-[430px] mx-auto px-4 py-2.5 pb-5">
-            <div className="flex gap-2 mb-1">
-              <input
-                value={coupon}
-                onChange={e => { setCoupon(e.target.value); setCouponError(false); }}
-                placeholder="Coupon code"
-                className="flex-1 px-3 py-1.5 rounded-xl text-xs focus:outline-none"
-                style={{ border: `1px solid ${couponError ? '#FF3B30' : '#E0E0E0'}` }}
-              />
-              <button
-                onClick={handleApplyCoupon}
-                className="px-3.5 py-1.5 rounded-xl text-xs font-bold border-none whitespace-nowrap"
-                style={{
-                  background: couponApplied ? '#34C759' : couponError ? '#FFF0F0' : '#F2EDE8',
-                  color: couponApplied ? 'white' : couponError ? '#FF3B30' : '#555',
-                }}
-              >
-                {couponApplied ? '✓ Applied' : couponError ? '✗ Invalid' : 'Apply'}
-              </button>
+        <div className="card">
+          <div style={{ display: "grid", gap: 8, fontSize: 13 }}>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: "var(--t2)" }}>Subtotal</span>
+              <strong>Rs {subtotal.toLocaleString("en-IN")}</strong>
             </div>
-            {couponError && (
-              <p className="text-[11px] text-red-500 mb-1.5 pl-1">Invalid coupon code. Try PETCIRCLE10.</p>
-            )}
-
-            <div className="flex justify-between items-center mb-2">
-              <div className="text-xs text-gray-600">
-                {inCartItems.length} items · {delivery === 0
-                  ? <span className="text-green-600 font-semibold">Free delivery</span>
-                  : `₹${delivery} delivery`}
-                {couponApplied && <span className="text-green-600 font-semibold"> · −₹{discount} off</span>}
-              </div>
-              <div className="text-[17px] font-extrabold" style={{ color: '#D44800' }}>
-                ₹{total.toLocaleString('en-IN')}
-              </div>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: "var(--t2)" }}>Delivery</span>
+              <strong style={{ color: deliveryFee === 0 ? "var(--green)" : "var(--t1)" }}>
+                {deliveryFee === 0 ? "Free" : `Rs ${DELIVERY_FEE}`}
+              </strong>
             </div>
-
-            <button
-              onClick={() => setScreen('payment')}
-              disabled={inCartItems.length === 0}
-              className="w-full py-3.5 rounded-2xl text-white font-bold text-[15px] disabled:opacity-50"
-              style={{ background: inCartItems.length ? '#D44800' : '#D1D1D6' }}
-            >
-              Proceed to Payment →
-            </button>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15 }}>
+              <span>Total</span>
+              <strong style={{ color: "var(--orange)" }}>Rs {total.toLocaleString("en-IN")}</strong>
+            </div>
           </div>
-        </div>
-      </div>
-    </div>
-  );
-}
 
-// ─── Cart Item Row Component ───────────────────────────────────
+          {inCartItems.length > 0 && subtotal < FREE_THRESHOLD && (
+            <div style={{ marginTop: 10, fontSize: 12, color: "var(--amber)" }}>
+              Add Rs {amountForFreeDelivery.toLocaleString("en-IN")} more to unlock free delivery.
+            </div>
+          )}
 
-interface CartItemRowProps {
-  item: CartItemData;
-  inCart: boolean;
-  qty: number;
-  onToggle: () => void;
-  onQtyChange: (v: number) => void;
-}
+          {inCartItems.length > 0 && subtotal >= FREE_THRESHOLD && (
+            <div style={{ marginTop: 10, fontSize: 12, color: "var(--green)", fontWeight: 600 }}>
+              Free delivery unlocked.
+            </div>
+          )}
 
-function CartItemRow({ item, inCart, qty, onToggle, onQtyChange }: CartItemRowProps) {
-  const tagColor = item.tag_color || '#FF9500';
-  return (
-    <div
-      className="bg-white rounded-xl transition-all"
-      style={{
-        border: `1.5px solid ${inCart ? tagColor + '55' : '#EBEBEB'}`,
-        opacity: inCart ? 1 : 0.6,
-      }}
-    >
-      <div className="flex items-center gap-2.5 px-3 py-2.5">
-        <div
-          className="w-[38px] h-[38px] rounded-[10px] flex items-center justify-center text-[19px] shrink-0"
-          style={{ background: tagColor + '15' }}
-        >
-          {item.icon || '📦'}
-        </div>
-
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1.5 mb-0.5">
-            <span className="font-bold text-[13px] text-gray-900">{item.name}</span>
-            {item.tag && (
-              <span
-                className="text-[9px] font-extrabold px-1.5 py-0.5 rounded shrink-0"
-                style={{ background: tagColor + '18', color: tagColor, letterSpacing: '0.3px' }}
-              >
-                {item.tag}
-              </span>
-            )}
-          </div>
-          <p className="text-[11px] text-gray-400 truncate">{item.sub}</p>
-        </div>
-
-        <div className="flex items-center gap-2 shrink-0">
-          <span className="text-sm font-extrabold" style={{ color: '#D44800' }}>₹{item.price}</span>
           <button
-            onClick={onToggle}
-            className="w-[26px] h-[26px] rounded-full border-none flex items-center justify-center text-[13px] font-bold shrink-0"
-            style={{
-              background: inCart ? '#D44800' : '#F2EDE8',
-              color: inCart ? 'white' : '#777',
-            }}
+            className="btn btn-or"
+            type="button"
+            disabled={inCartItems.length === 0}
+            onClick={() => setScreen("checkout")}
           >
-            {inCart ? '✓' : '＋'}
-          </button>
-        </div>
-      </div>
-
-      {inCart && (
-        <div className="flex items-center justify-end gap-1.5 px-3 py-1.5" style={{ borderTop: '1px solid #F5F2EE' }}>
-          <button
-            onClick={() => onQtyChange(qty - 1)}
-            className="w-6 h-6 rounded-[7px] flex items-center justify-center text-[13px] text-gray-700"
-            style={{ border: '1px solid #E0E0E0', background: 'white' }}
-          >
-            −
-          </button>
-          <span className="font-bold text-[13px] min-w-[14px] text-center">{qty}</span>
-          <button
-            onClick={() => onQtyChange(qty + 1)}
-            className="w-6 h-6 rounded-[7px] flex items-center justify-center text-[13px] text-gray-700"
-            style={{ border: '1px solid #E0E0E0', background: 'white' }}
-          >
-            +
-          </button>
-          <span className="text-xs font-bold ml-1" style={{ color: '#D44800' }}>
-            ₹{(item.price * qty).toLocaleString('en-IN')}
-          </span>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Recommendation Row Component ──────────────────────────────
-
-interface RecommendationRowProps {
-  rec: CartRecommendation;
-  onAdd: () => void;
-}
-
-function RecommendationRow({ rec, onAdd }: RecommendationRowProps) {
-  const tagColor = rec.tag_color || '#007AFF';
-  return (
-    <div className="bg-white rounded-xl" style={{ border: '1.5px solid #EBEBEB' }}>
-      <div className="flex items-center gap-2.5 px-3 py-2.5">
-        <div
-          className="w-[38px] h-[38px] rounded-[10px] flex items-center justify-center text-[19px] shrink-0"
-          style={{ background: tagColor + '15' }}
-        >
-          {rec.icon}
-        </div>
-
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-1.5 mb-0.5">
-            <span className="font-bold text-[13px] text-gray-900">{rec.name}</span>
-            {rec.tag && (
-              <span
-                className="text-[9px] font-extrabold px-1.5 py-0.5 rounded shrink-0"
-                style={{ background: tagColor + '18', color: tagColor, letterSpacing: '0.3px' }}
-              >
-                {rec.tag}
-              </span>
-            )}
-          </div>
-          <p className="text-[11px] text-gray-400 truncate">{rec.sub}</p>
-          <p className="text-[10px] mt-0.5" style={{ color: '#D44800' }}>{rec.reason}</p>
-        </div>
-
-        <div className="flex items-center gap-2 shrink-0">
-          {rec.price > 0 && <span className="text-sm font-extrabold" style={{ color: '#D44800' }}>₹{rec.price}</span>}
-          <button
-            onClick={onAdd}
-            className="w-[26px] h-[26px] rounded-full border-none flex items-center justify-center text-[13px] font-bold shrink-0"
-            style={{ background: '#F2EDE8', color: '#777' }}
-          >
-            ＋
+            Proceed to Checkout
           </button>
         </div>
       </div>

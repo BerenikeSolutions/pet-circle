@@ -2,7 +2,7 @@
 Feature: dashboard-rebuild
 Spec: .spec/dashboard-rebuild/requirements.md, design.md
 Tasks: .spec/dashboard-rebuild/tasks/
-Current task: .spec/dashboard-rebuild/tasks/task-013.md
+Current task: .spec/dashboard-rebuild/tasks/task-016.md
 Branch: main (no feature branch)
 
 ---
