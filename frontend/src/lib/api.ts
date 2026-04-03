@@ -227,6 +227,258 @@ export interface HealthTrendsData {
   };
 }
 
+export interface VetSummary {
+  name: string;
+  last_visit: string | null;
+}
+
+export interface LifeStageTrait {
+  label: string;
+  color: "green" | "yellow" | "red" | "neutral";
+}
+
+export interface LifeStageEssentialCare {
+  icon: string;
+  title: string;
+  detail: string;
+}
+
+export interface LifeStageData {
+  stage: "puppy" | "junior" | "adult" | "senior";
+  age_months: number;
+  breed_size: "mini_toy" | "small" | "medium" | "large" | "extra_large";
+  traits: LifeStageTrait[];
+  essential_care: LifeStageEssentialCare[];
+}
+
+export interface HealthConditionSummary {
+  id: string;
+  icon: string;
+  title: string;
+  severity: string;
+  trend_label: string;
+  insight: string;
+}
+
+export interface CarePlanItem {
+  name: string;
+  test_type: string;
+  freq: string;
+  next_due: string | null;
+  status_tag: string;
+  classification: string;
+  reason: string | null;
+  orderable: boolean;
+}
+
+export interface CarePlanSection {
+  icon: string;
+  title: string;
+  items: CarePlanItem[];
+}
+
+export interface CarePlanV2 {
+  continue: CarePlanSection[];
+  attend: CarePlanSection[];
+  add: CarePlanSection[];
+}
+
+export interface DietMacroSummary {
+  name: string;
+  pct_of_need: number;
+  color: string;
+  note: string;
+}
+
+export interface MissingMicronutrient {
+  icon: string;
+  name: string;
+  reason: string;
+}
+
+export interface DietSummary {
+  macros: DietMacroSummary[];
+  missing_micros: MissingMicronutrient[];
+}
+
+export interface RecognitionBullet {
+  icon: string;
+  label: string;
+}
+
+export interface Recognition {
+  report_count: number;
+  bullets: RecognitionBullet[];
+}
+
+export interface AskVetChartPoint {
+  date: string;
+  value: number;
+  marker: string;
+  status: string;
+}
+
+export interface AskVetChartData {
+  points: AskVetChartPoint[];
+}
+
+export interface AskVetTimelineNode {
+  label: string;
+  date: string | null;
+  icon: string;
+}
+
+export interface AskVetCondition {
+  id: string;
+  icon: string;
+  label: string;
+  condition_tag: string;
+  headline: string;
+  trend: string;
+  questions: string[];
+  chart_data: AskVetChartData | null;
+  timeline_data: AskVetTimelineNode[];
+}
+
+export interface AskVetData {
+  conditions: AskVetCondition[];
+}
+
+export interface BloodPanelRow {
+  marker: string;
+  range: string;
+  value: string;
+  status: string;
+}
+
+export interface BloodPanelData {
+  label: string;
+  date: string | null;
+  headline: string;
+  rows: BloodPanelRow[];
+}
+
+export interface WeightSignalPoint {
+  date: string;
+  value: number;
+}
+
+export interface WeightSignalData {
+  points: WeightSignalPoint[];
+  headline: string;
+  recommendation: string;
+}
+
+export interface MetabolicStat {
+  value: string;
+  label: string;
+}
+
+export interface MetabolicData {
+  headline: string;
+  sub: string;
+  stats: MetabolicStat[];
+}
+
+export interface SignalsData {
+  blood_panel: BloodPanelData | null;
+  weight: WeightSignalData | null;
+  metabolic: MetabolicData | null;
+}
+
+export interface CadenceFooter {
+  text: string;
+  color: string;
+  bg: string;
+}
+
+export interface VaccineRound {
+  id: string;
+  label: string;
+  vaccines: string;
+  done: boolean;
+  date: string | null;
+}
+
+export interface VaccineCadence {
+  headline: string;
+  rounds: VaccineRound[];
+  gaps: string[];
+  footer: CadenceFooter;
+}
+
+export interface FleaTickDose {
+  num: number;
+  label: string;
+  gap: string | null;
+  status: string;
+  gap_alert: boolean;
+  date: string | null;
+}
+
+export interface FleaTickCadence {
+  headline: string;
+  doses: FleaTickDose[];
+  footer: CadenceFooter;
+}
+
+export interface DewormingNode {
+  label: string;
+  state: string;
+  date: string | null;
+}
+
+export interface DewormingCadence {
+  headline: string;
+  nodes: DewormingNode[];
+}
+
+export interface CadenceData {
+  vaccines: VaccineCadence | null;
+  flea_tick: FleaTickCadence | null;
+  deworming: DewormingCadence | null;
+}
+
+export interface HealthTrendsV2 {
+  ask_vet: AskVetData | null;
+  signals: SignalsData | null;
+  cadence: CadenceData | null;
+}
+
+export interface VetVisitMedication {
+  name: string;
+  dose: string | null;
+  duration: string | null;
+}
+
+export interface VetVisit {
+  id: string;
+  title: string;
+  date: string | null;
+  tag: string;
+  tag_color: string;
+  tag_bg: string;
+  rx: string;
+  medications: VetVisitMedication[];
+  notes: string | null;
+}
+
+export interface RecordItem {
+  id: string;
+  icon: string;
+  type: string;
+  title: string;
+  date: string | null;
+  tag: string;
+  tag_color: string;
+  tag_bg: string;
+}
+
+export interface RecordsV2 {
+  vet_visits: VetVisit[];
+  records: RecordItem[];
+}
+
 export interface DashboardData {
   pet: PetProfile;
   owner: OwnerInfo;
@@ -237,6 +489,12 @@ export interface DashboardData {
   conditions: ConditionItem[];
   contacts: ContactItem[];
   health_score: HealthScore;
+  vet_summary?: VetSummary | null;
+  life_stage?: LifeStageData | null;
+  health_conditions_summary?: HealthConditionSummary[];
+  care_plan_v2?: CarePlanV2;
+  diet_summary?: DietSummary;
+  recognition?: Recognition;
 }
 
 // --- Admin Types ---
@@ -716,7 +974,7 @@ export async function deleteDocument(
   }
 }
 
-export async function fetchHealthTrends(token: string): Promise<HealthTrendsData> {
+export async function fetchLegacyHealthTrends(token: string): Promise<HealthTrendsData> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 15000);
   try {
@@ -726,6 +984,52 @@ export async function fetchHealthTrends(token: string): Promise<HealthTrendsData
     });
     if (!res.ok) {
       throw new Error(`Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") {
+      throw new Error("Request timed out. Please try again.");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export async function fetchHealthTrends(token: string): Promise<HealthTrendsV2> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/health-trends-v2`, {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
+    }
+    return res.json();
+  } catch (e: any) {
+    if (e.name === "AbortError") {
+      throw new Error("Request timed out. Please try again.");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+export async function fetchRecords(token: string): Promise<RecordsV2> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}/records-v2`, {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.detail || `Request failed: ${res.status}`);
     }
     return res.json();
   } catch (e: any) {

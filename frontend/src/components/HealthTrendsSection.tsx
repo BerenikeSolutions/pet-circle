@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { HealthTrendsData } from "@/lib/api";
-import { fetchHealthTrends } from "@/lib/api";
+import { fetchLegacyHealthTrends } from "@/lib/api";
 
 /** Format "2024-03" to "Mar 2024" for display. */
 function formatMonth(m: string): string {
@@ -254,7 +254,7 @@ export default function HealthTrendsSection({ token }: Props) {
     async function load() {
       try {
         setLoading(true);
-        const data = await fetchHealthTrends(token);
+        const data = await fetchLegacyHealthTrends(token);
         if (!cancelled) setTrends(data);
       } catch (e: any) {
         if (!cancelled) setError(e.message || "Failed to load trends.");
