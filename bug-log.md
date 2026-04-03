@@ -15,3 +15,9 @@ What broke: `dashboard_service` expected `care_plan_v2` keys `continue/attend/ad
 Root cause: Service integration assumed normalized keys without adapter logic between engine and API response contract.
 Fix: Added care plan shape normalization in dashboard service and applied reason enrichment after normalization.
 File(s): backend/app/services/dashboard_service.py
+
+## [2026-04-03] Dashboard globals duplicated class blocks
+What broke: Task-012 dashboard styles were duplicated in `globals.css`, creating maintainability risk and inconsistent overrides.
+Root cause: A repeated style insertion left two full blocks for shared dashboard classes.
+Fix: Removed the duplicate block and kept a single canonical dashboard style definition.
+File(s): frontend/src/app/globals.css

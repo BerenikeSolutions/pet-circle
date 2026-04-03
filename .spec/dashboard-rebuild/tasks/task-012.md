@@ -1,7 +1,7 @@
 ---
 task: 012
 feature: dashboard-rebuild
-status: pending
+status: complete
 depends_on: [11]
 ---
 
@@ -138,9 +138,32 @@ _Requirements: 2, 3, 4, 5, 6, 7, 8, 10, 11_
 
 ---
 
-## Handoff to Next Task
+## Handoff — What Was Done
 
-**Files changed:** _(fill via /task-handoff)_
-**Decisions made:** _(fill via /task-handoff)_
-**Context for next task:** _(fill via /task-handoff)_
-**Open questions:** _(fill via /task-handoff)_
+- Added all Page-1 dashboard card components in `frontend/src/components/dashboard/` and composed them in `DashboardView.tsx`.
+- Implemented guardrails in component logic: recognition capped to 3 bullets, conditions fallback to active-only summary, care-plan dedup across buckets, and no order buttons in the attend bucket.
+- Added the required dashboard CSS class set to `frontend/src/app/globals.css` and removed an accidental duplicate style block to keep one canonical definition.
+
+## Handoff — Patterns Learned
+
+- Keep dashboard cards data-driven from `DashboardData` optional v2 fields, with safe fallbacks when backend rollout is partial.
+- For the cart floater unlock behavior, scope `IntersectionObserver` to the dashboard container instead of global document queries.
+- Use semantic clickable elements (`button`) for nav and links to avoid accessibility/lint regressions.
+
+## Handoff — Files Changed
+
+- `frontend/src/app/globals.css`
+- `frontend/src/components/dashboard/dashboard-utils.ts`
+- `frontend/src/components/dashboard/ProfileBanner.tsx`
+- `frontend/src/components/dashboard/RecognitionCard.tsx`
+- `frontend/src/components/dashboard/LifeStageCard.tsx`
+- `frontend/src/components/dashboard/HealthConditionsCard.tsx`
+- `frontend/src/components/dashboard/DietAnalysisCard.tsx`
+- `frontend/src/components/dashboard/CarePlanCard.tsx`
+- `frontend/src/components/dashboard/HealthRecordsNav.tsx`
+- `frontend/src/components/dashboard/CartFloater.tsx`
+- `frontend/src/components/dashboard/DashboardView.tsx`
+
+## Status
+
+COMPLETE
