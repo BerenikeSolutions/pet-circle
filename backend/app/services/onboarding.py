@@ -46,6 +46,7 @@ from app.core.constants import (
 from app.core.encryption import decrypt_field, encrypt_field, hash_field
 from app.core.log_sanitizer import mask_phone
 from app.models.dashboard_token import DashboardToken
+from app.models.deferred_care_plan_pending import DeferredCarePlanPending
 from app.models.condition import Condition
 from app.models.document import Document
 from app.models.pet import Pet
@@ -1079,7 +1080,7 @@ async def _transition_to_documents(db, user, pet, send_fn):
 
     # Generate dashboard token.
     try:
-        generate_dashboard_token(db, pet.id)
+        get_or_create_active_dashboard_token(db, pet.id)
     except Exception as e:
         logger.error("Dashboard token generation failed for pet %s: %s", str(pet.id), str(e), exc_info=True)
         try:
@@ -1445,6 +1446,9 @@ async def _finalize_onboarding(db, user, send_fn):
     mobile = user._plaintext_mobile
     pet = _get_pending_pet(db, user.id)
 
+    if pet:
+        _recover_transition_failures(db, pet)
+
     # --- Mark onboarding complete and clear deadline ---
     # Guard with a conditional UPDATE so only one concurrent caller can
     # transition awaiting_documents -> complete and send final messages.
@@ -1511,13 +1515,9 @@ async def _finalize_onboarding(db, user, send_fn):
     from app.models.diet_item import DietItem
 
     docs_uploaded = db.query(Document).filter(Document.pet_id == pet.id).count()
-    token_row = (
-        db.query(DashboardToken)
-        .filter(DashboardToken.pet_id == pet.id, DashboardToken.revoked == False)
-        .order_by(DashboardToken.created_at.desc())
-        .first()
-    )
-    token = token_row.token if token_row else None
+    # Always resolve token through active-token helper so expired historical
+    # tokens are never sent in the final onboarding dashboard link.
+    token = _recover_dashboard_token_for_finalize(db, pet.id)
     # Count preventive records with an actual date logged across health
     # and hygiene circles (hygiene includes Tick/Flea which is clinically
     # a health item). Nutrition items are excluded. The last_done_date
@@ -1554,15 +1554,7 @@ async def _finalize_onboarding(db, user, send_fn):
 
     # --- If extractions are still in-flight, defer the dashboard link ---
     if docs_uploaded > 0 and pending_extractions > 0:
-        try:
-            user.dashboard_link_pending = True
-            db.commit()
-        except Exception as e:
-            logger.warning("Could not set dashboard_link_pending: %s", str(e))
-            try:
-                db.rollback()
-            except Exception:
-                pass
+        _persist_deferred_marker_with_fallback(db, user, pet)
 
         await send_fn(
             db, mobile,
@@ -2024,13 +2016,129 @@ def generate_dashboard_token(db: Session, pet_id: UUID) -> str:
         pet_id=pet_id,
         token=token,
         revoked=False,
-        expires_at=datetime.utcnow() + timedelta(days=DASHBOARD_TOKEN_EXPIRY_DAYS),
+        expires_at=datetime.now(UTC) + timedelta(days=DASHBOARD_TOKEN_EXPIRY_DAYS),
     )
     db.add(dashboard_token)
     db.commit()
 
     logger.info("Dashboard token generated for pet_id=%s", str(pet_id))
     return token
+
+
+def get_or_create_active_dashboard_token(db: Session, pet_id: UUID) -> str:
+    """Return latest active token for a pet, creating one only when needed."""
+    now_utc = datetime.now(UTC)
+    token_row = (
+        db.query(DashboardToken)
+        .filter(
+            DashboardToken.pet_id == pet_id,
+            DashboardToken.revoked == False,
+            DashboardToken.expires_at.isnot(None),
+            DashboardToken.expires_at > now_utc,
+        )
+        .order_by(DashboardToken.created_at.desc())
+        .first()
+    )
+    if token_row:
+        return token_row.token
+    return generate_dashboard_token(db, pet_id)
+
+
+def _recover_dashboard_token_for_finalize(db: Session, pet_id: UUID) -> str | None:
+    """Best-effort token recovery before sending final onboarding links."""
+    try:
+        return get_or_create_active_dashboard_token(db, pet_id)
+    except Exception as e:
+        logger.warning(
+            "Could not recover dashboard token during finalization for pet %s: %s",
+            str(pet_id),
+            str(e),
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return None
+
+
+def _mark_deferred_care_plan_pending(db: Session, user_id: UUID, pet_id: UUID) -> None:
+    """Create or refresh an active per-pet deferred finalization marker."""
+    marker = (
+        db.query(DeferredCarePlanPending)
+        .filter(
+            DeferredCarePlanPending.pet_id == pet_id,
+            DeferredCarePlanPending.is_cleared == False,
+        )
+        .first()
+    )
+    if marker:
+        marker.user_id = user_id
+        marker.reason = "pending_extractions"
+        marker.cleared_at = None
+        return
+
+    db.add(
+        DeferredCarePlanPending(
+            user_id=user_id,
+            pet_id=pet_id,
+            reason="pending_extractions",
+            is_cleared=False,
+            cleared_at=None,
+        )
+    )
+
+
+def _persist_deferred_marker_with_fallback(db: Session, user: User, pet: Pet) -> None:
+    """Persist per-pet deferred marker with legacy user-flag fallback on failure."""
+    try:
+        _mark_deferred_care_plan_pending(db, user.id, pet.id)
+        db.commit()
+        return
+    except Exception as e:
+        logger.warning("Could not persist deferred care-plan marker: %s", str(e))
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    # Keep backward-compatible durability if per-pet marker persistence fails.
+    if hasattr(user, "dashboard_link_pending"):
+        try:
+            user.dashboard_link_pending = True
+            db.commit()
+            logger.warning(
+                "Fell back to legacy dashboard_link_pending for user %s pet %s",
+                str(user.id),
+                str(pet.id),
+            )
+        except Exception as e:
+            logger.error(
+                "Legacy deferred fallback persistence failed for user %s pet %s: %s",
+                str(user.id),
+                str(pet.id),
+                str(e),
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+
+def _recover_transition_failures(db: Session, pet: Pet) -> None:
+    """Best-effort recovery for setup failures from transition-to-documents."""
+    try:
+        if pet.species in ("dog", "cat"):
+            # Always run idempotent missing-only seeding so partial failures
+            # from transition-to-documents are healed at finalization time.
+            seed_preventive_records_for_pet(db, pet)
+    except Exception as e:
+        logger.warning("Preventive recovery failed for pet %s: %s", str(pet.id), str(e))
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    _recover_dashboard_token_for_finalize(db, pet.id)
 
 
 def refresh_dashboard_token(db: Session, pet_id: UUID) -> str:
@@ -2084,8 +2192,26 @@ def seed_preventive_records_for_pet(db: Session, pet: Pet) -> int:
         .all()
     )
 
+    # Seed only missing master items. This avoids duplicates when this
+    # function is retried for recovery after partial transition failures.
+    existing_master_ids = {
+        row[0]
+        for row in (
+            db.query(PreventiveRecord.preventive_master_id)
+            .filter(
+                PreventiveRecord.pet_id == pet.id,
+                PreventiveRecord.preventive_master_id.isnot(None),
+            )
+            .distinct()
+            .all()
+        )
+        if row[0] is not None
+    }
+
     count = 0
     for master in masters:
+        if master.id in existing_master_ids:
+            continue
         try:
             # Use a savepoint so individual failures only roll back this insert,
             # not the entire transaction (which would lose previously flushed records).

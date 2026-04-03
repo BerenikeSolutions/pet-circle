@@ -18,6 +18,7 @@ from app.models.contact import Contact
 from app.models.custom_preventive_item import CustomPreventiveItem
 from app.models.dashboard_token import DashboardToken
 from app.models.dashboard_visit import DashboardVisit
+from app.models.deferred_care_plan_pending import DeferredCarePlanPending
 from app.models.diagnostic_test_result import DiagnosticTestResult
 from app.models.diet_item import DietItem
 from app.models.document import Document
@@ -55,6 +56,7 @@ __all__ = [
     "Document",
     "MessageLog",
     "DashboardToken",
+    "DeferredCarePlanPending",
     "ConflictFlag",
     "ShownFunFact",
     "DiagnosticTestResult",

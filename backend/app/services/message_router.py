@@ -115,10 +115,14 @@ _batch_is_onboarding: dict[str, bool] = {}
 # Seconds to wait after the last upload before starting batch extraction.
 # Gives the user time to finish sending all files in a batch.
 _EXTRACTION_DELAY_SECONDS: int = 15
+_document_window_sweeper_task: asyncio.Task | None = None
+_DOCUMENT_WINDOW_SWEEP_INTERVAL_SECONDS: int = 60
 from app.models.conflict_flag import ConflictFlag
+from app.models.deferred_care_plan_pending import DeferredCarePlanPending
 from app.models.document import Document
 from app.models.pet import Pet
 from app.models.reminder import Reminder
+from app.models.user import User
 from app.services.onboarding import (
     _generate_care_plan_message,
     create_pending_user,
@@ -183,7 +187,6 @@ async def _auto_finalize_onboarding_after_deadline(user_id, from_number, wait_se
         await asyncio.sleep(wait_seconds)
 
         from app.database import get_fresh_session
-        from app.models.user import User
         from app.services.onboarding import _finalize_onboarding
 
         bg_db = get_fresh_session()
@@ -215,6 +218,143 @@ async def _auto_finalize_onboarding_after_deadline(user_id, from_number, wait_se
         current_task = asyncio.current_task()
         if _document_window_timers.get(user_key) is current_task:
             _document_window_timers.pop(user_key, None)
+
+
+async def sweep_expired_document_windows_once(batch_size: int = 50) -> int:
+    """Finalize expired awaiting_documents users if in-memory timers were lost."""
+    from app.database import get_fresh_session
+    from app.services.onboarding import _finalize_onboarding
+
+    finalized_count = 0
+    bg_db = get_fresh_session()
+    try:
+        expired_users = (
+            bg_db.query(User)
+            .filter(
+                User.onboarding_state == "awaiting_documents",
+                User.doc_upload_deadline.isnot(None),
+            )
+            .order_by(User.doc_upload_deadline.asc())
+            .limit(batch_size)
+            .all()
+        )
+
+        for expired_user in expired_users:
+            if not is_doc_upload_deadline_expired(expired_user.doc_upload_deadline):
+                continue
+
+            try:
+                from_number = decrypt_field(expired_user.mobile_number)
+                expired_user._plaintext_mobile = from_number
+                await _finalize_onboarding(bg_db, expired_user, send_text_message)
+                finalized_count += 1
+            except Exception as user_err:
+                logger.warning(
+                    "Expired document-window finalize failed for user %s: %s",
+                    str(expired_user.id),
+                    str(user_err),
+                )
+                try:
+                    bg_db.rollback()
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.warning("Expired document-window sweep failed: %s", str(e))
+        try:
+            bg_db.rollback()
+        except Exception:
+            pass
+    finally:
+        bg_db.close()
+
+    return finalized_count
+
+
+async def _document_window_sweeper_loop() -> None:
+    """Background loop for durable document-window expiry recovery."""
+    await sweep_expired_document_windows_once()
+
+    while True:
+        await asyncio.sleep(_DOCUMENT_WINDOW_SWEEP_INTERVAL_SECONDS)
+        await sweep_expired_document_windows_once()
+
+
+def start_document_window_sweeper() -> None:
+    """Start durable document-window sweeper if not running."""
+    global _document_window_sweeper_task
+    if _document_window_sweeper_task and not _document_window_sweeper_task.done():
+        return
+    _document_window_sweeper_task = asyncio.create_task(_document_window_sweeper_loop())
+
+
+async def stop_document_window_sweeper() -> None:
+    """Stop durable document-window sweeper on shutdown."""
+    global _document_window_sweeper_task
+    if not _document_window_sweeper_task:
+        return
+
+    _document_window_sweeper_task.cancel()
+    try:
+        await _document_window_sweeper_task
+    except asyncio.CancelledError:
+        pass
+    _document_window_sweeper_task = None
+
+
+def _has_pending_deferred_care_plan(db: Session, pet_id, user=None) -> bool:
+    """Return True when per-pet marker or legacy user pending flag indicates deferred send."""
+    marker = (
+        db.query(DeferredCarePlanPending.id)
+        .filter(
+            DeferredCarePlanPending.pet_id == pet_id,
+            DeferredCarePlanPending.is_cleared == False,
+        )
+        .first()
+    )
+    if marker is not None:
+        return True
+
+    # Backward compatibility during rollout from user-level pending flag.
+    if user is not None and getattr(user, "dashboard_link_pending", False):
+        try:
+            db.add(
+                DeferredCarePlanPending(
+                    user_id=user.id,
+                    pet_id=pet_id,
+                    reason="legacy_user_pending",
+                    is_cleared=False,
+                    cleared_at=None,
+                )
+            )
+            db.flush()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        return True
+
+    return False
+
+
+def _clear_deferred_care_plan_marker(db: Session, pet_id, user=None) -> None:
+    """Clear all active deferred markers for a pet and legacy user-level pending flag."""
+    (
+        db.query(DeferredCarePlanPending)
+        .filter(
+            DeferredCarePlanPending.pet_id == pet_id,
+            DeferredCarePlanPending.is_cleared == False,
+        )
+        .update(
+            {
+                DeferredCarePlanPending.is_cleared: True,
+                DeferredCarePlanPending.cleared_at: datetime.utcnow(),
+            },
+            synchronize_session=False,
+        )
+    )
+    if user is not None and getattr(user, "dashboard_link_pending", False):
+        user.dashboard_link_pending = False
 
 
 def _should_use_agentic_order() -> bool:
@@ -1371,7 +1511,7 @@ async def _delayed_batch_extraction(
             )
 
             if not agentic_sent:
-                if getattr(user, "dashboard_link_pending", False):
+                if _has_pending_deferred_care_plan(bg_db, pet.id, user=user):
                     await _send_deferred_care_plan(
                         bg_db, user, pet, from_number,
                         all_results=all_results,
@@ -1763,9 +1903,9 @@ async def _send_deferred_care_plan(
                 fail_count=fail_count,
                 failed_doc_names=failed_doc_names,
             )
-            if getattr(user, "dashboard_link_pending", False):
+            if _has_pending_deferred_care_plan(db, pet.id, user=user):
                 try:
-                    user.dashboard_link_pending = False
+                    _clear_deferred_care_plan_marker(db, pet.id, user=user)
                     db.commit()
                 except Exception:
                     try:
@@ -1852,14 +1992,14 @@ async def _send_deferred_care_plan(
         else:
             care_plan_msg += f"\n\nSend *dashboard* anytime to get {pet.name}'s care plan link."
 
-        # Clear pending flag before sending to avoid duplicate sends on retries.
+        # Clear pending marker before sending to avoid duplicate sends on retries.
         try:
-            user.dashboard_link_pending = False
+            _clear_deferred_care_plan_marker(db, pet.id, user=user)
             db.commit()
         except Exception as flag_err:
             logger.warning(
-                "Could not clear dashboard_link_pending for user=%s: %s",
-                str(user.id), flag_err,
+                "Could not clear deferred marker for pet=%s: %s",
+                str(pet.id), flag_err,
             )
             try:
                 db.rollback()
@@ -1879,9 +2019,9 @@ async def _send_deferred_care_plan(
             fail_count=fail_count,
             failed_doc_names=failed_doc_names,
         )
-        if getattr(user, "dashboard_link_pending", False):
+        if _has_pending_deferred_care_plan(db, pet.id, user=user):
             try:
-                user.dashboard_link_pending = False
+                _clear_deferred_care_plan_marker(db, pet.id, user=user)
                 db.commit()
             except Exception:
                 try:

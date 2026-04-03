@@ -12,7 +12,7 @@ User sends their **first message** to the PetCircle WhatsApp number. The system 
 
 - User's WhatsApp phone number (from webhook payload)
 - User's name (collected via conversation)
-- Consent acknowledgment (explicit yes/no)
+- Consent acknowledgment (implicit on first inbound message)
 - Pet details:
   - Name
   - Species (dog / cat)
@@ -28,15 +28,13 @@ User sends their **first message** to the PetCircle WhatsApp number. The system 
    - If no record exists, begin onboarding flow.
    - Service: `onboarding.py`
 
-2. **Capture consent**
-   - Send consent request message explaining data usage.
-   - Wait for explicit confirmation (yes/no).
-   - If declined, send acknowledgment and stop. Do not create any records.
-   - If accepted, log consent with timestamp in `consent_logs` table.
-   - Service: `onboarding.py`, `whatsapp_sender.py`
+2. **Capture consent (implicit)**
+   - Treat the first inbound WhatsApp message as consent for Phase 1 onboarding.
+   - Set `users.consent_given=True` when creating the user.
+   - Service: `onboarding.py`
 
 3. **Create user record**
-   - Insert into `users` table with phone number, name, consent status, and timestamp.
+   - Insert into `users` table with phone number, onboarding defaults, and consent status.
    - Service: `onboarding.py`
 
 4. **Collect pet details**
@@ -53,10 +51,12 @@ User sends their **first message** to the PetCircle WhatsApp number. The system 
 6. **Generate dashboard token**
    - Create a 128-bit random token, store in `dashboard_tokens` table.
    - Token must be unique and revocable (soft delete only).
+   - If generation fails during transition, continue onboarding and recover before/at finalization.
    - Service: `onboarding.py`
 
 7. **Send onboarding complete message**
-   - Send WhatsApp template with welcome message and dashboard link.
+   - Send deterministic care-plan completion message with dashboard link.
+   - If document extraction is still pending, defer the care-plan link and send it after extraction completes.
    - Service: `whatsapp_sender.py`
 
 8. **Log activity**
@@ -65,14 +65,14 @@ User sends their **first message** to the PetCircle WhatsApp number. The system 
 
 ## Expected Output
 
-- `users` record created with consent logged.
+- `users` record created with `consent_given=True`.
 - `pets` record created with validated details.
 - `dashboard_tokens` record created.
-- User receives welcome template message with dashboard link.
+- User receives deterministic onboarding completion message with dashboard link.
 
 ## Edge Cases
 
-- **User declines consent:** Stop onboarding. Send polite acknowledgment. No records created.
+- **Consent decline branch:** Not used in deterministic Phase 1 (implicit consent model).
 - **User already exists:** Skip onboarding. Route to normal message handling.
 - **Invalid date format:** Re-prompt with accepted formats. Do not guess.
 - **Pet limit reached (5):** Inform user that maximum pets have been registered. Do not create another.

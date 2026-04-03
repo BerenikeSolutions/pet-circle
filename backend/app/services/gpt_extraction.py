@@ -62,6 +62,31 @@ from app.utils.retry import retry_openai_call
 
 logger = logging.getLogger(__name__)
 
+# Conservative pattern: dosage units or pharmaceutical delivery forms that indicate a string
+# is a drug/medication name rather than a disease/condition name.  Only triggers on
+# things like "Simparica 50mg" or "Doxycycline Capsule", not on real condition names.
+_RE_MEDICATION_SIGNAL = re.compile(
+    r"\b(\d+\s*(mg|ml|mcg|ug|iu|units?|g)\b)"
+    r"|\b(tablet|capsule|syrup|drops?|spray|ointment|cream|lotion|gel"
+    r"|powder|suspension|solution|topical)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_likely_medication_name(name: str) -> bool:
+    """Return True if *name* looks like a drug/product rather than a diagnosed condition.
+
+    Conservative check — only rejects names that contain explicit dosage units
+    (e.g. "50mg") or pharmaceutical delivery form words (e.g. "Capsule", "Spray").
+    This prevents GPT mis-classifications such as "Simparica 50mg" or
+    "Doxycycline Tablet" from being stored as Condition records.
+
+    False-positive risk is low because real veterinary condition names
+    ("Hip Dysplasia", "Otitis Externa", "Diabetes Mellitus") never contain
+    dosage units or delivery form words.
+    """
+    return bool(_RE_MEDICATION_SIGNAL.search(name))
+
 
 def _extract_partial_json_string_value(raw_json: str, key: str) -> str | None:
     """Best-effort extraction of a top-level JSON string field from malformed output."""
@@ -568,13 +593,16 @@ EXTRACTION_SYSTEM_PROMPT = (
     '    - "reference_range": string or null\n'
     '    - "status_flag": "low" | "normal" | "high" | "abnormal" | null\n'
     '    - "observed_at": date string (same accepted formats) or null\n'
-    '  - "conditions": array of objects (diagnosed conditions found in the document; [] if none), each with:\n'
-    '    - "condition_name": string (e.g., "Hip Dysplasia", "Diabetes", "Skin Allergy")\n'
+    '  - "conditions": array of objects (diagnosed diseases/conditions found in the document; [] if none), each with:\n'
+    '    - "condition_name": string — the NAME of a diagnosed DISEASE, DISORDER, or SYNDROME only '
+    '(e.g. "Hip Dysplasia", "Diabetes Mellitus", "Otitis Externa", "Skin Allergy"). '
+    'NEVER use a medication, drug, supplement, or vaccine brand as condition_name '
+    '(e.g. do NOT write "Simparica", "Doxycycline", "NexGard", "Omega-3" as a condition_name).\n'
     '    - "condition_type": "chronic" | "episodic" | "resolved"\n'
     '    - "diagnosis": string or null (brief diagnosis description)\n'
     '    - "diagnosed_at": date string or null\n'
-    '    - "medications": array of objects ([] if none), each with:\n'
-    '      - "name": string (medication name)\n'
+    '    - "medications": array of objects ([] if none) — drugs/products prescribed TO TREAT this condition, each with:\n'
+    '      - "name": string (medication/drug name)\n'
     '      - "dose": string or null\n'
     '      - "frequency": string or null (e.g., "Once daily", "Twice daily")\n'
     '      - "route": string or null (e.g., "oral", "topical", "injection")\n'
@@ -625,7 +653,10 @@ EXTRACTION_SYSTEM_PROMPT = (
     "- Capture next_due_date for each vaccine row whenever it is visible.\n"
     "- For X-ray reports: use test_type 'xray', anatomical region as parameter_name, finding as value_text.\n"
     "- For fecal reports: use test_type 'fecal', parasite name as parameter_name, result as value_text, status_flag normal/abnormal.\n"
-    "- For conditions: extract any diagnosed disease/condition with its medications and monitoring schedule.\n"
+    "- For conditions: extract diagnosed diseases/disorders/syndromes with their medications and monitoring.\n"
+    "- condition_name must be the DISEASE/DISORDER name only — never a drug, supplement, or vaccine brand name.\n"
+    "- If a document lists only prescribed drugs with no stated diagnosis, return conditions: [].\n"
+    "- Drugs prescribed to treat a condition belong in that condition's medications[] array, not as a separate condition.\n"
     "- For contacts: extract vet/specialist contact details when explicitly present in the document.\n"
     "- If any field is missing in the document, use null for that field.\n"
     "- If the document is not pet/veterinary related, set document_type to 'not_pet_related' and items to [].\n"
@@ -795,6 +826,8 @@ def _validate_extraction_json(raw_json: str) -> tuple[list[dict], str | None, st
             metadata["vaccination_details"] = raw_vaccination_details
         raw_conditions = parsed.get("conditions")
         if isinstance(raw_conditions, list):
+            # Conditions are passed through raw; _is_likely_medication_name guard
+            # is applied downstream in extract_and_process_document.
             metadata["conditions"] = raw_conditions
         raw_contacts = parsed.get("contacts")
         if isinstance(raw_contacts, list):
@@ -1563,6 +1596,20 @@ async def extract_and_process_document(
                 continue
             condition_name = str(raw_condition.get("condition_name") or "").strip()
             if not condition_name:
+                continue
+            # Post-processing safety net: reject names that contain dosage units or
+            # pharmaceutical delivery form words — those are medication names, not
+            # disease names.  The GPT prompt already instructs GPT not to do this,
+            # but this guard catches residual mis-classifications.
+            # Note: brand-only names without dosage/form words (e.g. "Simparica",
+            # "NexGard") are not caught here — the prompt is the primary defence.
+            if _is_likely_medication_name(condition_name):
+                logger.warning(
+                    "Skipping extracted condition '%s' — name appears to be a medication, "
+                    "not a disease/condition. document_id=%s",
+                    condition_name,
+                    str(document_id),
+                )
                 continue
             try:
                 condition_type = str(raw_condition.get("condition_type") or "chronic").strip().lower()

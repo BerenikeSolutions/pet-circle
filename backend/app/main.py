@@ -14,6 +14,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.core.constants import APP_API_TITLE
 from app.routers import admin, dashboard, internal, webhook
+from app.services.message_router import (
+    start_document_window_sweeper,
+    stop_document_window_sweeper,
+)
 
 # Application initialization.
 # Settings are validated at import time (app/config.py).
@@ -67,6 +71,18 @@ app.include_router(admin.router)
 app.include_router(internal.router)
 # Dashboard router: /dashboard/{token} (token-based access, no auth header)
 app.include_router(dashboard.router)
+
+
+@app.on_event("startup")
+async def _start_background_reconciliation() -> None:
+    """Start background reconciliation loops required for durable onboarding."""
+    start_document_window_sweeper()
+
+
+@app.on_event("shutdown")
+async def _stop_background_reconciliation() -> None:
+    """Stop background reconciliation loops cleanly on service shutdown."""
+    await stop_document_window_sweeper()
 
 
 @app.get("/health")
