@@ -12,7 +12,7 @@ from app.services.records_service import get_records
 
 def _doc(
     category: str,
-    event_date: date,
+    event_date: date | None,
     name: str,
     source_wamid: str | None = None,
 ):
@@ -73,6 +73,26 @@ async def test_get_records_groups_types_and_sorts_desc(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_get_records_does_not_mark_scanned_text_as_imaging(monkeypatch):
+    pet = SimpleNamespace(id=uuid4())
+    scanned_doc = _doc("Other", date(2026, 2, 15), "Scanned prescription page")
+
+    monkeypatch.setattr(
+        "app.services.records_service._fetch_documents",
+        lambda _db, _pet_id: [scanned_doc],
+    )
+    monkeypatch.setattr(
+        "app.services.records_service._fetch_conditions_for_documents",
+        lambda _db, _pet_id, _doc_ids: {},
+    )
+
+    result = await get_records(SimpleNamespace(), pet)
+
+    assert result["records"][0]["type"] == "lab_reports"
+    assert result["records"][0]["icon"] == "📄"
+
+
+@pytest.mark.asyncio
 async def test_get_records_enriches_vet_visit_medications_and_rx(monkeypatch):
     pet = SimpleNamespace(id=uuid4())
     prescription = _doc("Prescription", date(2026, 3, 10), "Prescription Visit")
@@ -107,6 +127,28 @@ async def test_get_records_enriches_vet_visit_medications_and_rx(monkeypatch):
     assert visit["rx"] == "Allergic dermatitis"
     assert visit["notes"] == "Continue medicated bath"
     assert visit["medications"] == [{"name": "Apoquel", "dose": "5mg", "duration": "7 days"}]
+
+
+@pytest.mark.asyncio
+async def test_get_records_sorts_missing_dates_last(monkeypatch):
+    pet = SimpleNamespace(id=uuid4())
+
+    latest_doc = _doc("Diagnostic", date(2026, 3, 1), "Latest report")
+    undated_doc = _doc("Diagnostic", None, "Undated report")
+
+    monkeypatch.setattr(
+        "app.services.records_service._fetch_documents",
+        lambda _db, _pet_id: [undated_doc, latest_doc],
+    )
+    monkeypatch.setattr(
+        "app.services.records_service._fetch_conditions_for_documents",
+        lambda _db, _pet_id, _doc_ids: {},
+    )
+
+    result = await get_records(SimpleNamespace(), pet)
+
+    assert [item["title"] for item in result["records"]] == ["Latest report", "Undated report"]
+    assert result["records"][1]["date"] is None
 
 
 @pytest.mark.asyncio

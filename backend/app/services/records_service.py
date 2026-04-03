@@ -8,6 +8,7 @@ Builds Records V2 payload for the records view:
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from typing import Any
 
@@ -25,7 +26,15 @@ _TAG_STYLES: dict[str, dict[str, str]] = {
     "whatsapp": {"tag": "WhatsApp", "tag_color": "#166534", "tag_bg": "#E9FBEF"},
 }
 
-_IMAGING_KEYWORDS = ("xray", "x-ray", "ultrasound", "usg", "mri", "ct", "scan", "radiograph")
+_IMAGING_PATTERNS = (
+    re.compile(r"\bx-?ray\b"),
+    re.compile(r"\bultrasound\b"),
+    re.compile(r"\busg\b"),
+    re.compile(r"\bmri\b"),
+    re.compile(r"\bct\s*scan\b"),
+    re.compile(r"\bradiograph(?:y|ic)?\b"),
+    re.compile(r"\bsonograph(?:y|ic)?\b"),
+)
 
 
 def _sort_key_by_event_date(document: Document) -> date:
@@ -53,7 +62,7 @@ def _record_type_for_document(document: Document) -> tuple[str, str]:
     if category == "diagnostic":
         return "lab_reports", "🧪"
 
-    is_imaging = category == "imaging" or any(keyword in doc_name for keyword in _IMAGING_KEYWORDS)
+    is_imaging = category == "imaging" or any(pattern.search(doc_name) for pattern in _IMAGING_PATTERNS)
     if is_imaging:
         return "imaging", "🩻"
 
@@ -131,7 +140,7 @@ def _fetch_conditions_for_documents(
         .options(selectinload(Condition.medications))
         .filter(
             Condition.pet_id == pet_id,
-            Condition.is_active == True,
+            Condition.is_active.is_(True),
             Condition.document_id.in_(document_ids),
         )
         .all()
@@ -144,7 +153,12 @@ def _fetch_conditions_for_documents(
 
 
 async def get_records(db: Session, pet: Pet) -> dict[str, Any]:
-    """Return Records V2 payload with vet visits and typed records."""
+    """
+    Return Records V2 payload with vet visits and typed records.
+
+    The async signature is intentional for interface consistency with other
+    dashboard-rebuild service entrypoints that are awaited by async routes.
+    """
     documents = _fetch_documents(db, pet.id)
 
     prescription_docs = [
@@ -159,9 +173,9 @@ async def get_records(db: Session, pet: Pet) -> dict[str, Any]:
     ]
 
     condition_map = _fetch_conditions_for_documents(
-        db=db,
-        pet_id=pet.id,
-        document_ids=[document.id for document in prescription_docs],
+        db,
+        pet.id,
+        [document.id for document in prescription_docs],
     )
 
     vet_visits: list[dict[str, Any]] = []
