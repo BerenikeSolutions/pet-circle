@@ -53,7 +53,7 @@ from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
 from app.models.reminder import Reminder
 from app.models.user import User
-from app.services.diet_service import add_diet_item
+from app.services.diet_service import add_diet_item, split_diet_items_by_type
 from app.services.hygiene_service import add_hygiene_item
 from app.services.preventive_seeder import seed_preventive_master
 from app.utils.breed_normalizer import normalize_breed, normalize_breed_with_ai
@@ -1633,18 +1633,9 @@ async def _ai_supplement_recommendation(
         weight = getattr(pet, "weight_kg", None)
         weight_line = f"{weight} kg" if weight else "unknown"
 
-        food_labels = []
-        existing_supplements = []
-        if diet_items:
-            for item in diet_items:
-                label = getattr(item, "label", None)
-                if not label:
-                    continue
-                item_type = getattr(item, "type", None)
-                if item_type == "supplement":
-                    existing_supplements.append(label)
-                else:
-                    food_labels.append(label)
+        split_items = split_diet_items_by_type(diet_items or [])
+        food_labels = split_items["foods"] + split_items["other"]
+        existing_supplements = split_items["supplements"]
         food_summary = ", ".join(food_labels) if food_labels else "not provided"
         supplements_summary = ", ".join(existing_supplements) if existing_supplements else "none"
 
@@ -1740,35 +1731,53 @@ async def _generate_care_plan_message(
     if not supplement_rec:
         # Check which supplements the user is already giving to avoid
         # recommending something they already take.
-        existing_supp_labels = set()
-        if diet_items:
-            for item in diet_items:
-                if getattr(item, "type", None) == "supplement":
-                    label = (getattr(item, "label", "") or "").lower()
-                    existing_supp_labels.add(label)
+        split_items = split_diet_items_by_type(diet_items or [])
+        existing_supp_labels = {
+            label.lower() for label in split_items["supplements"] if label
+        }
 
-        has_omega3 = any("omega" in s for s in existing_supp_labels)
-        has_probiotic = any("probiotic" in s or "gut" in s for s in existing_supp_labels)
+        fallback_candidates = [
+            ("Omega-3", ("omega", "fish oil", "omega 3")),
+            ("a probiotic", ("probiotic", "gut", "lactobacillus")),
+            ("calcium", ("calcium",)),
+            ("a joint supplement", ("glucosamine", "chondroitin", "joint")),
+        ]
 
-        if has_omega3 and has_probiotic:
-            fallback_supp = "a joint supplement and calcium"
-        elif has_omega3:
-            fallback_supp = "a probiotic and calcium"
-        elif has_probiotic:
-            fallback_supp = "Omega-3 and calcium"
-        else:
-            fallback_supp = "Omega-3 and a probiotic"
+        missing_candidates: list[str] = []
+        for display_name, aliases in fallback_candidates:
+            if any(any(alias in existing for alias in aliases) for existing in existing_supp_labels):
+                continue
+            missing_candidates.append(display_name)
 
-        if has_food:
+        if not missing_candidates:
             supplement_rec = (
-                f"We'd suggest adding {fallback_supp} based on {name}'s "
-                f"diet and life stage."
+                f"{name} is already on a strong supplement routine, so we don't suggest "
+                f"adding anything new right now."
             )
+        elif len(missing_candidates) == 1:
+            fallback_supp = missing_candidates[0]
+            if has_food:
+                supplement_rec = (
+                    f"We'd suggest adding {fallback_supp} based on {name}'s "
+                    f"diet and life stage."
+                )
+            else:
+                supplement_rec = (
+                    f"We'd suggest adding {fallback_supp} based on {name}'s "
+                    f"age and breed for coat health, joint support, and overall immunity."
+                )
         else:
-            supplement_rec = (
-                f"We'd suggest adding {fallback_supp} based on {name}'s "
-                f"age and breed for coat health, joint support, and overall immunity."
-            )
+            fallback_supp = f"{missing_candidates[0]} and {missing_candidates[1]}"
+            if has_food:
+                supplement_rec = (
+                    f"We'd suggest adding {fallback_supp} based on {name}'s "
+                    f"diet and life stage."
+                )
+            else:
+                supplement_rec = (
+                    f"We'd suggest adding {fallback_supp} based on {name}'s "
+                    f"age and breed for coat health, joint support, and overall immunity."
+                )
 
     if has_conditions and has_food and has_preventive:
         # Variation 1: Conditions + food + preventive shared.

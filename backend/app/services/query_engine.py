@@ -63,6 +63,7 @@ from app.models.preventive_record import PreventiveRecord
 from app.models.reminder import Reminder
 from app.models.user import User
 from app.models.weight_history import WeightHistory
+from app.services.diet_service import split_diet_items_by_type
 from app.services.health_score import compute_health_score
 from app.utils.retry import retry_openai_call
 
@@ -327,17 +328,39 @@ def _build_pet_context(db: Session, pet_id: UUID) -> str:
 
     context_parts.append("\n=== Diet & Nutrition ===")
     if diet_items:
-        for item in diet_items:
-            line = f"- {item.label} ({item.type})"
-            if item.brand:
-                line += f", brand: {item.brand}"
-            if item.detail:
-                line += f" — {item.detail}"
-            if item.daily_portion_g:
-                line += f", daily portion: {item.daily_portion_g}g"
-            if item.doses_per_day:
-                line += f", {item.doses_per_day}x/day"
-            context_parts.append(line)
+        split_items = split_diet_items_by_type(diet_items)
+
+        context_parts.append("Foods:")
+        if split_items["foods"] or split_items["other"]:
+            for item in diet_items:
+                item_type = (getattr(item, "type", "") or "").strip().lower()
+                if item_type == "supplement":
+                    continue
+                line = f"- {item.label} ({item.type})"
+                if item.brand:
+                    line += f", brand: {item.brand}"
+                if item.detail:
+                    line += f" — {item.detail}"
+                if item.daily_portion_g:
+                    line += f", daily portion: {item.daily_portion_g}g"
+                context_parts.append(line)
+        else:
+            context_parts.append("- No food items recorded.")
+
+        context_parts.append("Supplements:")
+        if split_items["supplements"]:
+            for item in diet_items:
+                item_type = (getattr(item, "type", "") or "").strip().lower()
+                if item_type != "supplement":
+                    continue
+                line = f"- {item.label} (supplement)"
+                if item.detail:
+                    line += f" — {item.detail}"
+                if item.doses_per_day:
+                    line += f", {item.doses_per_day}x/day"
+                context_parts.append(line)
+        else:
+            context_parts.append("- No supplements recorded.")
     else:
         context_parts.append("No diet information recorded.")
 

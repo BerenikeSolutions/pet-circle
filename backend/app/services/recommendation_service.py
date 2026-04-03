@@ -33,7 +33,13 @@ from app.core.constants import (
     ORDER_CAT_SUPPLEMENTS,
 )
 from app.models.order_recommendation import OrderRecommendation
+from app.models.condition import Condition
+from app.models.diet_item import DietItem
+from app.models.pet import Pet
 from app.models.pet_preference import PetPreference
+from app.models.preventive_master import PreventiveMaster
+from app.models.preventive_record import PreventiveRecord
+from app.services.diet_service import normalize_diet_label, split_diet_items_by_type
 from app.utils.retry import retry_openai_call
 
 logger = logging.getLogger(__name__)
@@ -95,9 +101,10 @@ def _get_category_description(category: str) -> str:
 
 async def get_or_generate_recommendations(
     db: Session,
-    pet,
-    category,
+    pet=None,
+    category: str = "",
     increment_on_hit: bool = True,
+    pet_id=None,
 ) -> list:
     """
     Get recommendations for a pet, from cache or AI generation.
@@ -121,10 +128,16 @@ async def get_or_generate_recommendations(
         Returns empty list on error.
     """
     try:
+        if pet is None and pet_id is not None:
+            pet = db.query(Pet).filter(Pet.id == pet_id).first()
+        if pet is None:
+            return []
+
         pet_species = str(getattr(pet, "species", ""))
         pet_breed_value = getattr(pet, "breed", None)
         pet_breed = str(pet_breed_value) if pet_breed_value else None
         age_range = _calculate_age_range(pet.dob)
+        profile_context = _build_profile_context(db, getattr(pet, "id", None), category)
 
         # Check database for existing recommendation
         existing = db.query(OrderRecommendation).filter(
@@ -149,13 +162,20 @@ async def get_or_generate_recommendations(
 
             # Convert JSON items to list with IDs
             items = []
+            existing_names = set(profile_context.get("existing_names", set()))
             raw_items = getattr(existing, "items", []) or []
             for idx, item in enumerate(raw_items if isinstance(raw_items, list) else [], start=1):
                 if isinstance(item, dict):
                     enriched = dict(item)
-                    enriched["id"] = idx
                     items.append(enriched)
-            return items
+            items = _filter_recommendations_against_existing(items, existing_names)
+            if items:
+                for idx, item in enumerate(items, start=1):
+                    item["id"] = idx
+                return items
+            logger.info(
+                "Cached recommendations fully overlapped with existing context; regenerating."
+            )
 
         # No cache hit — generate via AI
         logger.info(
@@ -168,6 +188,7 @@ async def get_or_generate_recommendations(
             pet_breed,
             age_range,
             category,
+            profile_context,
         )
 
         # Store in database for future reuse
@@ -200,6 +221,7 @@ async def _generate_recommendations_via_ai(
     breed: str | None,
     age_range: str,
     category: str,
+    profile_context: dict,
 ) -> list:
     """
     Call OpenAI to generate recommendations.
@@ -211,7 +233,7 @@ async def _generate_recommendations_via_ai(
     category_display = _get_category_description(category)
 
     prompt = _build_recommendation_prompt(
-        species, breed, age_range, category_display
+        species, breed, age_range, category_display, profile_context
     )
 
     try:
@@ -252,11 +274,19 @@ async def _generate_recommendations_via_ai(
         cleaned_items = []
         for item in items:
             if isinstance(item, dict) and "name" in item:
+                name = str(item.get("name", ""))[:200].strip()
+                if not name:
+                    continue
                 cleaned_items.append({
-                    "name": str(item.get("name", ""))[:200],
+                    "name": name,
                     "description": str(item.get("description", ""))[:500],
                     "reason": str(item.get("reason", ""))[:300],
                 })
+
+        cleaned_items = _filter_recommendations_against_existing(
+            cleaned_items,
+            set(profile_context.get("existing_names", set())),
+        )
 
         logger.info(f"Generated {len(cleaned_items)} recommendations via AI")
         return cleaned_items
@@ -273,12 +303,24 @@ def _build_recommendation_prompt(
     breed: str | None,
     age_range: str,
     category_display: str,
+    profile_context: dict,
 ) -> str:
     """Build the prompt for AI recommendation generation."""
     breed_info = f" ({breed})" if breed else ""
 
+    foods = ", ".join(profile_context.get("foods", [])[:5]) or "none"
+    supplements = ", ".join(profile_context.get("supplements", [])[:5]) or "none"
+    conditions = ", ".join(profile_context.get("conditions", [])[:5]) or "none"
+    preventive = ", ".join(profile_context.get("preventive", [])[:5]) or "none"
+    history = ", ".join(profile_context.get("order_history", [])[:5]) or "none"
+
     return (
         f"Recommend 5-7 {category_display.lower()} for a {age_range} {species}{breed_info}.\n\n"
+        f"Current foods: {foods}\n"
+        f"Current supplements: {supplements}\n"
+        f"Active conditions: {conditions}\n"
+        f"Preventive care already tracked: {preventive}\n"
+        f"Recent order history: {history}\n\n"
         f"Return ONLY a JSON array with no markdown formatting, like this:\n"
         f"[\n"
         f'  {{"name": "Product Name", "description": "Short description", "reason": "Why recommended"}},\n'
@@ -288,9 +330,97 @@ def _build_recommendation_prompt(
         f"- Each product must be real and vet-recommended for {species}s\n"
         f"- Include specific brand names where appropriate\n"
         f"- Focus on {age_range} {species.lower()}s' specific needs\n"
+        f"- Do NOT recommend anything already listed in current foods, current supplements, or order history\n"
+        f"- Avoid recommending condition medications as general supplements\n"
         f"- Keep descriptions under 50 words\n"
         f"- Keep reasons under 30 words"
     )
+
+
+def _matches_existing_name(candidate: str, existing_names: set[str]) -> bool:
+    """Return True when candidate overlaps with an existing normalized name."""
+    normalized = normalize_diet_label(candidate)
+    if not normalized:
+        return False
+    if normalized in existing_names:
+        return True
+    for existing in existing_names:
+        if existing in normalized or normalized in existing:
+            return True
+    return False
+
+
+def _filter_recommendations_against_existing(items: list[dict], existing_names: set[str]) -> list[dict]:
+    """Drop recommendations that match current foods/supplements/history context."""
+    filtered: list[dict] = []
+    for item in items:
+        name = str(item.get("name", "")).strip()
+        if not name:
+            continue
+        if _matches_existing_name(name, existing_names):
+            continue
+        filtered.append(item)
+    return filtered
+
+
+def _build_profile_context(db: Session, pet_id, category: str) -> dict:
+    """Build explicit category buckets from current pet profile for prompt safety."""
+    if not pet_id:
+        return {
+            "foods": [],
+            "supplements": [],
+            "conditions": [],
+            "preventive": [],
+            "order_history": [],
+            "existing_names": set(),
+        }
+
+    diet_items = db.query(DietItem).filter(DietItem.pet_id == pet_id).all()
+    split_items = split_diet_items_by_type(diet_items)
+
+    active_conditions = (
+        db.query(Condition)
+        .filter(Condition.pet_id == pet_id, Condition.is_active == True)  # noqa: E712
+        .all()
+    )
+    condition_names = [c.name for c in active_conditions if getattr(c, "name", None)]
+
+    preventive_rows = (
+        db.query(PreventiveMaster.item_name)
+        .join(PreventiveRecord, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
+        .filter(PreventiveRecord.pet_id == pet_id)
+        .all()
+    )
+    preventive_names = [row[0] for row in preventive_rows if row and row[0]]
+
+    history_rows = (
+        db.query(PetPreference.item_name)
+        .filter(PetPreference.pet_id == pet_id, PetPreference.category == category)
+        .order_by(PetPreference.updated_at.desc())
+        .limit(10)
+        .all()
+    )
+    history_names = [row[0] for row in history_rows if row and row[0]]
+
+    existing_names = {
+        normalize_diet_label(name)
+        for name in (
+            split_items["foods"]
+            + split_items["other"]
+            + split_items["supplements"]
+            + history_names
+        )
+        if normalize_diet_label(name)
+    }
+
+    return {
+        "foods": split_items["foods"] + split_items["other"],
+        "supplements": split_items["supplements"],
+        "conditions": condition_names,
+        "preventive": preventive_names,
+        "order_history": history_names,
+        "existing_names": existing_names,
+    }
 
 
 def _extract_json_from_response(response_text: str) -> list:

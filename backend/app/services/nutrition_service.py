@@ -38,6 +38,7 @@ from app.models.food_nutrition_cache import FoodNutritionCache
 from app.models.nutrition_target_cache import NutritionTargetCache
 from app.models.pet import Pet
 from app.models.product_catalog import ProductCatalog
+from app.services.diet_service import split_diet_items_by_type
 from app.utils.retry import retry_openai_call
 
 logger = logging.getLogger(__name__)
@@ -421,7 +422,12 @@ async def _call_openai_food_estimation(
 # ─── Step 3d: AI Recommendation ─────────────────────────────────────
 
 async def generate_recommendation(
-    pet_name: str, breed: str, conditions: list[str], gap_summary: str,
+    pet_name: str,
+    breed: str,
+    conditions: list[str],
+    gap_summary: str,
+    foods: list[str] | None = None,
+    supplements: list[str] | None = None,
 ) -> str:
     """
     Generate a personalized 1-2 sentence nutrition recommendation via GPT.
@@ -431,7 +437,10 @@ async def generate_recommendation(
     in the same session. Falls back to a template string on failure.
     """
     # Build a stable cache key from all inputs
-    key_raw = f"{pet_name}|{breed}|{','.join(sorted(conditions))}|{gap_summary}"
+    key_raw = (
+        f"{pet_name}|{breed}|{','.join(sorted(conditions))}|{gap_summary}|"
+        f"{','.join(sorted(foods or []))}|{','.join(sorted(supplements or []))}"
+    )
     cache_key = hashlib.sha256(key_raw.encode()).hexdigest()
 
     cached = _REC_CACHE.get(cache_key)
@@ -443,7 +452,15 @@ async def generate_recommendation(
         context = f"Pet: {pet_name}, Breed: {breed}"
         if conditions:
             context += f", Conditions: {', '.join(conditions)}"
+        if foods:
+            context += f"\nCurrent foods: {', '.join(foods[:5])}"
+        if supplements:
+            context += f"\nCurrent supplements: {', '.join(supplements[:5])}"
         context += f"\nNutritional gaps: {gap_summary}"
+        if supplements:
+            context += (
+                "\nDo not suggest a supplement already listed under current supplements."
+            )
 
         response = await client.chat.completions.create(
             model=OPENAI_QUERY_MODEL,
@@ -554,7 +571,6 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
         "vitamin_e": 0, "vitamin_d3": 0, "glucosamine": 0, "probiotics": False,
     }
 
-    len(catalog_items)
     for _, product in catalog_items:
         _accumulate_from_product(actual, product)
 
@@ -595,11 +611,17 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
         if n.get("priority") in ("urgent", "high", "medium")
     ) or "none"
 
+    split_items = split_diet_items_by_type(diet_items)
+    food_labels = split_items["foods"] + split_items["other"]
+    supplement_labels = split_items["supplements"]
+
     recommendation = await generate_recommendation(
         pet.name,
         pet.breed or "mixed breed",
         [c.name for c in conditions],
         gap_summary,
+        foods=food_labels,
+        supplements=supplement_labels,
     )
 
     # Overall assessment
@@ -616,9 +638,12 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
     condition_context = " + " + conditions[0].name if conditions else ""
 
     # Build explicit diet summary describing current diet and its strengths
-    diet_labels = [item.label for item in diet_items if item.label]
-    if diet_labels:
-        diet_list = ", ".join(diet_labels[:5])
+    if food_labels or supplement_labels:
+        food_list = ", ".join(food_labels[:5]) if food_labels else "not provided"
+        supplements_text = (
+            f" Supplements: {', '.join(supplement_labels[:5])}."
+            if supplement_labels else ""
+        )
         strengths = []
         if actual["protein"] >= targets.get("protein_min", 20):
             strengths.append("good protein levels")
@@ -630,8 +655,8 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
             strengths.append("adequate fibre")
         if actual["calcium"] >= targets.get("calcium_min", 0.8):
             strengths.append("sufficient calcium")
-        strength_text = (". Strengths: " + ", ".join(strengths)) if strengths else ""
-        diet_summary = f"Current diet: {diet_list}{strength_text}."
+        strength_text = (" Strengths: " + ", ".join(strengths) + ".") if strengths else ""
+        diet_summary = f"Current food: {food_list}.{supplements_text}{strength_text}"
     else:
         diet_summary = "No diet items added yet. Add your pet's food in the Nutrition tab for a detailed analysis."
 

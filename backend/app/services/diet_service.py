@@ -88,12 +88,6 @@ _RE_QTY_MULT = re.compile(
 # Regex: bare multiplier like "280*2" (no unit — default to grams)
 _RE_BARE_MULT = re.compile(r'(\d+(?:\.\d+)?)\s*[*×]\s*(\d+)')
 
-# Regex: "Nx/day", "2x/week", "3x daily" etc.
-_RE_NX = re.compile(
-    r'(\d+)\s*(?:x|times)\s*/?\s*(day|week|month|daily|weekly|monthly)',
-    re.IGNORECASE,
-)
-
 # Normalise unit abbreviations
 _UNIT_MAP: dict[str, str] = {
     "g": "g", "gm": "g", "gms": "g", "gram": "g", "grams": "g",
@@ -110,6 +104,38 @@ _PERIOD_NORM: dict[str, str] = {
     "daily": "day", "weekly": "week", "monthly": "month",
     "day": "day", "week": "week", "month": "month",
 }
+
+
+def normalize_diet_label(value: str | None) -> str:
+    """Normalize a diet/supplement label for tolerant duplicate checks."""
+    cleaned = re.sub(r"[^a-z0-9\s]", " ", (value or "").strip().lower())
+    return " ".join(cleaned.split())
+
+
+def split_diet_items_by_type(diet_items: list) -> dict[str, list[str]]:
+    """
+    Split diet items into explicit food and supplement buckets.
+
+    Returns:
+        {
+            "foods": [...],
+            "supplements": [...],
+            "other": [...]
+        }
+    """
+    buckets = {"foods": [], "supplements": [], "other": []}
+    for item in diet_items or []:
+        label = (getattr(item, "label", "") or "").strip()
+        if not label:
+            continue
+        item_type = (getattr(item, "type", "") or "").strip().lower()
+        if item_type == "supplement":
+            buckets["supplements"].append(label)
+        elif item_type in {"packaged", "homemade"}:
+            buckets["foods"].append(label)
+        else:
+            buckets["other"].append(label)
+    return buckets
 
 
 def _fmt_unit(raw_unit: str) -> str:
