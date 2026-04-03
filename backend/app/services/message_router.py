@@ -545,7 +545,7 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
 
     # --- Greeting — canned menu, no GPT call ---
     if text_lower in GREETINGS:
-        await _send_help_menu(db, from_number)
+        await _send_help_menu(db, from_number, user=user)
         return
 
     # --- Acknowledgments (thanks, ok, got it) — canned reply ---
@@ -566,7 +566,7 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
 
     # --- Help / Menu — show available commands ---
     if text_lower in HELP_COMMANDS:
-        await _send_help_menu(db, from_number)
+        await _send_help_menu(db, from_number, user=user)
         return
 
     # "add pet" command — restart pet portion of onboarding
@@ -622,15 +622,24 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
     await _handle_query(db, user, text)
 
 
-async def _send_help_menu(db: Session, from_number: str) -> None:
-    """Send the help/commands menu to the user."""
+async def _send_help_menu(db: Session, from_number: str, user=None) -> None:
+    """Send the help/commands menu to the user, personalised with pet name."""
+    pet_name = None
+    if user:
+        from app.models.pet import Pet
+        pet = db.query(Pet).filter(Pet.user_id == user.id).order_by(Pet.created_at.desc()).first()
+        if pet:
+            pet_name = pet.name
+
+    greeting = f"Hi there! How can I help with *{pet_name}*? 🐾" if pet_name else "Hi there! How can I help you today? 🐾"
+    pet_possessive = f"{pet_name}'s" if pet_name else "your pet's"
     await send_text_message(
         db, from_number,
-        "Hi there! How can I help you today? 🐾\n\n"
+        f"{greeting}\n\n"
         "You can:\n"
-        "• Ask me anything about your pet's health\n"
+        f"• Ask me anything about {pet_possessive} health\n"
         "• Send *add pet* to register another pet\n"
-        "• Send *dashboard* to view your pet's records\n"
+        f"• Send *dashboard* to view {pet_possessive} records\n"
         "• Send *order* to buy medicines, food, or supplements\n"
         "• Send *help* to see this menu\n"
         "• Upload a vet document for extraction",
@@ -1789,7 +1798,6 @@ async def _send_deferred_care_plan(
             msg += "\n\nPlease upload documents that belong to this pet only."
             await send_text_message(db, from_number, msg)
 
-        from sqlalchemy import or_
         from app.models.condition import Condition
         from app.models.diet_item import DietItem
         from app.models.preventive_master import PreventiveMaster
@@ -1800,29 +1808,16 @@ async def _send_deferred_care_plan(
             DietItem.pet_id == pet.id,
             DietItem.type == "supplement",
         ).count()
-        # Count only records with an actual date logged for the health-critical
-        # categories: vaccines, blood tests, flea/tick prevention, and deworming.
-        # Seeded empty placeholder rows and unrelated circles (nutrition, hygiene
-        # grooming, etc.) are excluded so the count reflects meaningful health events.
+        # Count preventive records with an actual date logged across health
+        # and hygiene circles (hygiene includes Tick/Flea which is clinically
+        # a health item). Nutrition items are excluded.
         record_count = (
             db.query(PreventiveRecord)
             .join(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
             .filter(
                 PreventiveRecord.pet_id == pet.id,
                 PreventiveRecord.last_done_date.isnot(None),
-                or_(
-                    PreventiveMaster.item_name.ilike("%vaccine%"),
-                    PreventiveMaster.item_name.ilike("%rabies%"),
-                    PreventiveMaster.item_name.ilike("%dhpp%"),
-                    PreventiveMaster.item_name.ilike("%feline core%"),
-                    PreventiveMaster.item_name.ilike("%bordetella%"),
-                    PreventiveMaster.item_name.ilike("%kennel cough%"),
-                    PreventiveMaster.item_name.ilike("%blood%"),
-                    PreventiveMaster.item_name.ilike("%deworming%"),
-                    PreventiveMaster.item_name.ilike("%deworm%"),
-                    PreventiveMaster.item_name.ilike("%tick%"),
-                    PreventiveMaster.item_name.ilike("%flea%"),
-                ),
+                PreventiveMaster.circle.in_(["health", "hygiene"]),
             )
             .count()
         )

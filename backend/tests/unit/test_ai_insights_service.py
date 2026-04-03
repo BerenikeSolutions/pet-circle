@@ -11,6 +11,7 @@ os.environ.setdefault("APP_ENV", "test")
 from app.services.ai_insights_service import (
     generate_care_plan_reasons,
     generate_recognition_bullets,
+    get_or_generate_insight,
 )
 from app.services.care_plan_engine import BreedSize, LifeStage
 
@@ -48,6 +49,31 @@ class _FakeSession:
         if self._all_rows:
             return _AllQuery(self._all_rows.pop(0))
         return _ScalarQuery(0)
+
+
+class _InsightQuery:
+    def filter(self, *args, **kwargs):
+        return self
+
+    def first(self):
+        return None
+
+
+class _FakeInsightDB:
+    def __init__(self):
+        self.executed = []
+
+    def query(self, *args, **kwargs):
+        return _InsightQuery()
+
+    def execute(self, statement, params):
+        self.executed.append(params)
+
+    def commit(self):
+        return None
+
+    def rollback(self):
+        return None
 
 
 @pytest.mark.asyncio
@@ -205,3 +231,28 @@ async def test_generate_care_plan_reasons_handles_invalid_weight(monkeypatch):
     )
 
     assert reasons == {"food-1": "Supports ongoing adult-stage care context."}
+
+
+@pytest.mark.asyncio
+async def test_get_or_generate_insight_accepts_namespaced_vet_questions(monkeypatch):
+    db = _FakeInsightDB()
+
+    async def fake_questions(_context):
+        return [{"priority": "high", "icon": "🩺", "q": "Any follow-up panel needed?", "context": ""}]
+
+    monkeypatch.setattr("app.services.ai_insights_service._generate_vet_questions_gpt", fake_questions)
+
+    result = await get_or_generate_insight(
+        db=cast(Any, db),
+        pet_id=uuid4(),
+        insight_type="vet_questions:condition-1",
+        pet={"name": "Bruno", "species": "dog", "breed": "Labrador"},
+        conditions=[{"name": "Dermatitis", "condition_type": "chronic", "medications": [], "monitoring": []}],
+        health_score={"score": None},
+        force=False,
+    )
+
+    assert isinstance(result, list)
+    assert result[0]["q"] == "Any follow-up panel needed?"
+    assert db.executed
+    assert db.executed[0]["insight_type"] == "vet_questions:condition-1"

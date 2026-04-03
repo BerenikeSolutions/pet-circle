@@ -379,11 +379,16 @@ async def get_or_generate_insight(
     # Generate fresh content
     pet_context = _build_pet_context(pet, conditions, health_score)
     try:
-        if insight_type == "conditions_summary":
+        normalized_insight_type = insight_type
+        if insight_type.startswith("vet_questions"):
+            # Allow per-condition cache keys like "vet_questions:<condition_id>".
+            normalized_insight_type = "vet_questions"
+
+        if normalized_insight_type == "conditions_summary":
             content = await _generate_conditions_summary_gpt(pet_context)
-        elif insight_type == "health_summary":
+        elif normalized_insight_type == "health_summary":
             content = await _generate_health_summary_gpt(pet_context)
-        elif insight_type == "vet_questions":
+        elif normalized_insight_type == "vet_questions":
             content = await _generate_vet_questions_gpt(pet_context)
         else:
             logger.error("Unknown insight_type: %s", insight_type)

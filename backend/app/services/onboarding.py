@@ -31,7 +31,6 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 from openai import AsyncOpenAI
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -129,6 +128,9 @@ def _is_doc_skip_intent(text_lower: str) -> bool:
     """Return True when the user indicates they are skipping document upload."""
     normalized = (text_lower or "").strip()
     if normalized in _SKIP_INPUTS:
+        return True
+    # Treat explicit "no" / "nahi" / "nope" etc. as skip intent.
+    if normalized in _NO_INPUTS:
         return True
     # Avoid false positives such as: "I don't have card, uploading report now".
     if any(word in normalized for word in _DOC_UPLOAD_INTENT_WORDS):
@@ -973,13 +975,16 @@ async def _step_prev_retry(db, user, text, send_fn):
 
 async def _store_preventive_data(db, pet, parsed: dict):
     """Store parsed preventive care data as preventive records."""
-    category_map = {
-        "vaccines": "Vaccination",
+    # Map parsed keys to item_name patterns in the preventive_master table.
+    # PreventiveMaster.category is 'essential'/'complete' (not a health category),
+    # so we match on item_name instead.
+    _ITEM_NAME_MAP = {
+        "vaccines": "%Vaccine%",
         "deworming": "Deworming",
-        "flea_tick": "Flea & Tick",
-        "blood_test": "Blood Test",
+        "flea_tick": "Tick/Flea",
+        "blood_test": "Preventive Blood Test",
     }
-    for key, master_category in category_map.items():
+    for key, item_pattern in _ITEM_NAME_MAP.items():
         value = parsed.get(key)
         if not value or value == "none":
             continue
@@ -1005,17 +1010,17 @@ async def _store_preventive_data(db, pet, parsed: dict):
             logger.warning("Preventive date %s is before pet DOB %s, skipping", parsed_date, pet.dob)
             continue
 
-        # Find matching preventive master item.
+        # Find matching preventive master item by item_name pattern.
         master = (
             db.query(PreventiveMaster)
             .filter(
-                PreventiveMaster.category == master_category,
+                PreventiveMaster.item_name.ilike(item_pattern),
                 PreventiveMaster.species.in_([pet.species, "both"]),
             )
             .first()
         )
         if not master:
-            logger.warning("No preventive master for category=%s species=%s", master_category, pet.species)
+            logger.warning("No preventive master for pattern=%s species=%s", item_pattern, pet.species)
             continue
 
         # Check if record already exists for this pet + master item.
@@ -1385,10 +1390,12 @@ async def _step_awaiting_documents(db, user, text_lower, send_fn):
         return
 
     # Any other text — remind user to upload or skip.
+    pet = db.query(Pet).filter(Pet.user_id == user.id).order_by(Pet.created_at.desc()).first()
+    pet_label = f"for *{pet.name}*" if pet else ""
     await send_fn(
         db, mobile,
-        "Upload health records — vaccination cards, prescriptions, lab reports. "
-        "Up to *5 files* (JPEG, PNG, or PDF). Or type *skip* to continue.",
+        f"Upload health records {pet_label} — vaccination cards, prescriptions, "
+        f"lab reports. Up to *5 files* (JPEG, PNG, or PDF). Or type *skip* to continue.",
     )
 
 
@@ -1511,29 +1518,17 @@ async def _finalize_onboarding(db, user, send_fn):
         .first()
     )
     token = token_row.token if token_row else None
-    # Count only records with an actual date logged for the health-critical
-    # categories: vaccines, blood tests, flea/tick prevention, and deworming.
-    # Seeded empty placeholder rows and unrelated circles (nutrition, hygiene
-    # grooming, etc.) are excluded so the count reflects meaningful health events.
+    # Count preventive records with an actual date logged across health
+    # and hygiene circles (hygiene includes Tick/Flea which is clinically
+    # a health item). Nutrition items are excluded. The last_done_date
+    # filter ensures seeded placeholder rows are not counted.
     record_count = (
         db.query(PreventiveRecord)
         .join(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
         .filter(
             PreventiveRecord.pet_id == pet.id,
             PreventiveRecord.last_done_date.isnot(None),
-            or_(
-                PreventiveMaster.item_name.ilike("%vaccine%"),
-                PreventiveMaster.item_name.ilike("%rabies%"),
-                PreventiveMaster.item_name.ilike("%dhpp%"),
-                PreventiveMaster.item_name.ilike("%feline core%"),
-                PreventiveMaster.item_name.ilike("%bordetella%"),
-                PreventiveMaster.item_name.ilike("%kennel cough%"),
-                PreventiveMaster.item_name.ilike("%blood%"),
-                PreventiveMaster.item_name.ilike("%deworming%"),
-                PreventiveMaster.item_name.ilike("%deworm%"),
-                PreventiveMaster.item_name.ilike("%tick%"),
-                PreventiveMaster.item_name.ilike("%flea%"),
-            ),
+            PreventiveMaster.circle.in_(["health", "hygiene"]),
         )
         .count()
     )
@@ -1639,15 +1634,30 @@ async def _ai_supplement_recommendation(
         weight_line = f"{weight} kg" if weight else "unknown"
 
         food_labels = []
+        existing_supplements = []
         if diet_items:
             for item in diet_items:
                 label = getattr(item, "label", None)
-                if label:
+                if not label:
+                    continue
+                item_type = getattr(item, "type", None)
+                if item_type == "supplement":
+                    existing_supplements.append(label)
+                else:
                     food_labels.append(label)
         food_summary = ", ".join(food_labels) if food_labels else "not provided"
+        supplements_summary = ", ".join(existing_supplements) if existing_supplements else "none"
 
         active_conditions = [c for c in (conditions or []) if getattr(c, "name", None)]
         condition_names = ", ".join(c.name for c in active_conditions) if active_conditions else "none"
+
+        already_taking_clause = ""
+        if existing_supplements:
+            already_taking_clause = (
+                f"IMPORTANT: The pet is ALREADY taking these supplements: {supplements_summary}. "
+                f"Do NOT recommend any supplement the pet is already taking. "
+                f"Only recommend supplements they are NOT currently on. "
+            )
 
         prompt = (
             f"Pet profile:\n"
@@ -1658,7 +1668,9 @@ async def _ai_supplement_recommendation(
             f"Gender: {gender}\n"
             f"Weight: {weight_line}\n"
             f"Current diet/food: {food_summary}\n"
+            f"Current supplements: {supplements_summary}\n"
             f"Health conditions: {condition_names}\n\n"
+            f"{already_taking_clause}"
             f"Write ONE short, warm WhatsApp message sentence (max 25 words) "
             f"recommending 1-2 specific supplements for this pet based on their "
             f"profile. Be specific to their breed, age, and diet. "
@@ -1726,14 +1738,35 @@ async def _generate_care_plan_message(
     # AI-generated supplement recommendation, with deterministic fallback.
     supplement_rec = await _ai_supplement_recommendation(pet, diet_items, conditions)
     if not supplement_rec:
+        # Check which supplements the user is already giving to avoid
+        # recommending something they already take.
+        existing_supp_labels = set()
+        if diet_items:
+            for item in diet_items:
+                if getattr(item, "type", None) == "supplement":
+                    label = (getattr(item, "label", "") or "").lower()
+                    existing_supp_labels.add(label)
+
+        has_omega3 = any("omega" in s for s in existing_supp_labels)
+        has_probiotic = any("probiotic" in s or "gut" in s for s in existing_supp_labels)
+
+        if has_omega3 and has_probiotic:
+            fallback_supp = "a joint supplement and calcium"
+        elif has_omega3:
+            fallback_supp = "a probiotic and calcium"
+        elif has_probiotic:
+            fallback_supp = "Omega-3 and calcium"
+        else:
+            fallback_supp = "Omega-3 and a probiotic"
+
         if has_food:
             supplement_rec = (
-                f"We'd suggest adding Omega-3 and a probiotic based on {name}'s "
+                f"We'd suggest adding {fallback_supp} based on {name}'s "
                 f"diet and life stage."
             )
         else:
             supplement_rec = (
-                f"We'd suggest adding Omega-3 and a probiotic based on {name}'s "
+                f"We'd suggest adding {fallback_supp} based on {name}'s "
                 f"age and breed for coat health, joint support, and overall immunity."
             )
 
