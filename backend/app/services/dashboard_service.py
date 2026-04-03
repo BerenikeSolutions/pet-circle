@@ -51,14 +51,149 @@ from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
 from app.models.reminder import Reminder
 from app.models.user import User
+from app.services.ai_insights_service import (
+    generate_care_plan_reasons,
+    generate_recognition_bullets,
+)
+from app.services.care_plan_engine import compute_care_plan
 from app.services.document_upload import download_from_supabase
 from app.services.gpt_extraction import _infer_document_category, _resolve_document_category
+from app.services.life_stage_service import get_life_stage_data
+from app.services.nutrition_service import get_diet_summary
 from app.services.preventive_calculator import (
     compute_next_due_date,
     compute_status,
 )
+from app.services.vet_summary_service import get_vet_summary
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_iso_date(value: date | datetime | None) -> str | None:
+    """Return ISO date string for date-like values."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    return value.isoformat()
+
+
+def _condition_severity(condition: Condition) -> str:
+    """Map condition type to UI severity color token."""
+    condition_type = (condition.condition_type or "").strip().lower()
+    if condition_type == "chronic":
+        return "red"
+    if condition_type == "episodic":
+        return "yellow"
+    return "green"
+
+
+def _condition_trend_label(condition: Condition) -> str:
+    """Build trend label text like 'Active · Since Feb 2025'."""
+    if condition.diagnosed_at:
+        return f"Active · Since {condition.diagnosed_at.strftime('%b %Y')}"
+    return "Active"
+
+
+def _condition_insight(condition: Condition) -> str:
+    """Build a one-line observational insight for condition summary."""
+    if condition.notes:
+        note = " ".join(condition.notes.strip().split())
+        if note:
+            return note[:180]
+
+    active_meds = [med for med in condition.medications if (med.status or "active") == "active"]
+    if active_meds:
+        first_med = active_meds[0].name or "current medication"
+        return f"Current management includes {first_med}; review response trend with your vet."
+
+    if condition.monitoring:
+        first_monitor = condition.monitoring[0].name or "follow-up monitoring"
+        return f"Track {first_monitor} cadence and discuss pattern changes with your vet."
+
+    return "Observed pattern tracked from uploaded records; discuss updates with your vet."
+
+
+def _build_health_conditions_summary(condition_rows: list[Condition]) -> list[dict]:
+    """Build health_conditions_summary payload from active conditions."""
+    summary: list[dict] = []
+    for condition in condition_rows:
+        summary.append(
+            {
+                "id": str(condition.id),
+                "icon": condition.icon or "🩺",
+                "title": condition.name,
+                "severity": _condition_severity(condition),
+                "trend_label": _condition_trend_label(condition),
+                "insight": _condition_insight(condition),
+            }
+        )
+    return summary
+
+
+def _collect_orderable_items(care_plan: dict | None) -> list[dict]:
+    """Collect all orderable care-plan items across buckets."""
+    if not isinstance(care_plan, dict):
+        return []
+
+    items: list[dict] = []
+    for bucket in ("continue", "attend", "add"):
+        sections = care_plan.get(bucket, [])
+        if not isinstance(sections, list):
+            continue
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            for item in section.get("items", []):
+                if isinstance(item, dict) and item.get("orderable"):
+                    items.append(item)
+    return items
+
+
+def _normalize_care_plan_shape(care_plan: dict | None) -> dict:
+    """Normalize care plan keys to {continue, attend, add}."""
+    if not isinstance(care_plan, dict):
+        return {"continue": [], "attend": [], "add": []}
+
+    # Already normalized.
+    if all(key in care_plan for key in ("continue", "attend", "add")):
+        return {
+            "continue": care_plan.get("continue") or [],
+            "attend": care_plan.get("attend") or [],
+            "add": care_plan.get("add") or [],
+        }
+
+    # care_plan_engine currently returns *_items keys.
+    return {
+        "continue": care_plan.get("continue_items") or [],
+        "attend": care_plan.get("attend_items") or [],
+        "add": care_plan.get("add_items") or [],
+    }
+
+
+def _apply_reasons_to_care_plan(care_plan: dict, reasons: dict[str, str]) -> dict:
+    """Attach GPT reasons to orderable care-plan items by id/name key."""
+    if not isinstance(care_plan, dict) or not reasons:
+        return care_plan
+
+    for bucket in ("continue", "attend", "add"):
+        sections = care_plan.get(bucket, [])
+        if not isinstance(sections, list):
+            continue
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            section_items = section.get("items", [])
+            if not isinstance(section_items, list):
+                continue
+            for item in section_items:
+                if not isinstance(item, dict) or not item.get("orderable"):
+                    continue
+                item_key = str(item.get("item_id") or item.get("id") or item.get("name") or "")
+                if item_key and item_key in reasons:
+                    item["reason"] = reasons[item_key]
+
+    return care_plan
 
 
 def validate_dashboard_token(db: Session, token: str) -> DashboardToken:
@@ -103,7 +238,7 @@ def validate_dashboard_token(db: Session, token: str) -> DashboardToken:
     return dashboard_token
 
 
-def get_dashboard_data(db: Session, token: str) -> dict:
+async def get_dashboard_data(db: Session, token: str) -> dict:
     """
     Retrieve all dashboard data for a pet via its access token.
 
@@ -469,6 +604,64 @@ def get_dashboard_data(db: Session, token: str) -> dict:
                 "created_at": str(cf.created_at) if cf.created_at else None,
             })
 
+    # --- Dashboard Rebuild v2 enrichments ---
+    async def _safe_async_call(label: str, default, coro):
+        try:
+            return await coro
+        except Exception as exc:
+            logger.error("%s failed for pet=%s: %s", label, pet_id, exc)
+            return default
+
+    async def _safe_sync_call(label: str, default, fn, *args):
+        try:
+            return fn(*args)
+        except Exception as exc:
+            logger.error("%s failed for pet=%s: %s", label, pet_id, exc)
+            return default
+
+    empty_care_plan = {"continue_items": [], "attend_items": [], "add_items": []}
+
+    care_plan_v2, life_stage_data, vet_summary, diet_summary, recognition_bullets = await asyncio.gather(
+        _safe_sync_call("care_plan_engine.compute_care_plan", empty_care_plan, compute_care_plan, db, pet),
+        _safe_async_call("life_stage_service.get_life_stage_data", None, get_life_stage_data(db, pet)),
+        _safe_sync_call("vet_summary_service.get_vet_summary", None, get_vet_summary, db, pet.id),
+        _safe_async_call("nutrition_service.get_diet_summary", {"macros": [], "missing_micros": []}, get_diet_summary(db, pet)),
+        _safe_async_call("ai_insights_service.generate_recognition_bullets", [], generate_recognition_bullets(db, pet)),
+    )
+
+    care_plan_v2 = _normalize_care_plan_shape(care_plan_v2)
+
+    orderable_items = _collect_orderable_items(care_plan_v2)
+    care_plan_reasons = await _safe_async_call(
+        "ai_insights_service.generate_care_plan_reasons",
+        {},
+        generate_care_plan_reasons(db, pet, orderable_items),
+    )
+    care_plan_v2 = _apply_reasons_to_care_plan(care_plan_v2, care_plan_reasons)
+
+    life_stage_payload = None
+    if life_stage_data is not None:
+        life_stage_payload = {
+            "stage": life_stage_data.stage,
+            "age_months": life_stage_data.age_months,
+            "breed_size": life_stage_data.breed_size,
+            "traits": life_stage_data.traits,
+            "essential_care": life_stage_data.essential_care,
+        }
+
+    vet_summary_payload = None
+    if vet_summary is not None:
+        vet_summary_payload = {
+            "name": vet_summary.name,
+            "last_visit": _safe_iso_date(vet_summary.last_visit),
+        }
+
+    health_conditions_summary = _build_health_conditions_summary(condition_rows)
+    recognition_payload = {
+        "report_count": sum(1 for doc in document_data if doc.get("extraction_status") == "success"),
+        "bullets": recognition_bullets,
+    }
+
     # --- Build response (no internal IDs exposed) ---
     # photo_url: serve via dashboard endpoint if pet has a photo, else None.
     photo_url = f"/dashboard/{token}/pet-photo" if pet.photo_path else None
@@ -498,6 +691,12 @@ def get_dashboard_data(db: Session, token: str) -> dict:
         "health_score": health_score,
         "nutrition": diet_items_data,
         "conflict_flags": conflict_rows,
+        "vet_summary": vet_summary_payload,
+        "life_stage": life_stage_payload,
+        "health_conditions_summary": health_conditions_summary,
+        "care_plan_v2": care_plan_v2,
+        "diet_summary": diet_summary,
+        "recognition": recognition_payload,
         # Internal pet_id exposed only for intra-service use (not sent to frontend).
         # Allows callers to avoid a second validate_dashboard_token() call.
         "_pet_id": str(pet_id),

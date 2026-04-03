@@ -449,7 +449,7 @@ def main():
 
         if dashboard_token:
             # Get dashboard data
-            data = get_dashboard_data(db, dashboard_token)
+            data = loop.run_until_complete(get_dashboard_data(db, dashboard_token))
             test("Dashboard data returned", data is not None)
             test("Pet name in dashboard", data.get("pet", {}).get("name") == "Zayn")
             test("Species in dashboard", data.get("pet", {}).get("species") == "dog")
@@ -484,7 +484,7 @@ def main():
 
             # Test invalid token
             try:
-                get_dashboard_data(db, "invalid_token_12345678")
+                loop.run_until_complete(get_dashboard_data(db, "invalid_token_12345678"))
                 test("Invalid token rejected", False)
             except ValueError:
                 test("Invalid token rejected", True)

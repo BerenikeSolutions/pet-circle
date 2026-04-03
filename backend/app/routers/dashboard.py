@@ -23,6 +23,7 @@ Rules:
 """
 
 import logging
+from typing import Any
 
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from fastapi.responses import Response as FastAPIResponse
@@ -37,6 +38,7 @@ from app.models.condition_medication import ConditionMedication
 from app.models.condition_monitoring import ConditionMonitoring
 from app.models.contact import Contact
 from app.models.nudge import Nudge
+from app.models.pet import Pet
 from app.services.ai_insights_service import (
     get_or_generate_insight,
     get_or_generate_nutrition_importance,
@@ -80,6 +82,7 @@ from app.services.diet_service import (
     get_diet_items,
     update_diet_item,
 )
+from app.services.health_trends_service import get_health_trends as get_health_trends_v2
 from app.services.hygiene_service import (
     add_hygiene_item,
     delete_hygiene_item,
@@ -90,6 +93,7 @@ from app.services.hygiene_service import (
 from app.services.nudge_engine import generate_nudges
 from app.services.nutrition_service import analyze_nutrition
 from app.services.razorpay_service import create_razorpay_payment, verify_razorpay_payment
+from app.services.records_service import get_records as get_records_v2
 from app.services.weight_service import add_weight_entry, get_weight_history
 from app.utils.date_utils import parse_date
 
@@ -141,6 +145,30 @@ class PreventiveDateUpdateRequest(BaseModel):
     )
 
 
+class DashboardHealthTrendsV2Response(BaseModel):
+    """Response schema for GET /dashboard/{token}/health-trends-v2."""
+
+    ask_vet: dict[str, Any] | None = None
+    signals: dict[str, Any] | None = None
+    cadence: dict[str, Any] | None = None
+
+
+class DashboardRecordsV2Response(BaseModel):
+    """Response schema for GET /dashboard/{token}/records-v2."""
+
+    vet_visits: list[dict[str, Any]] = Field(default_factory=list)
+    records: list[dict[str, Any]] = Field(default_factory=list)
+
+
+def _get_pet_for_dashboard_token(db: Session, token: str) -> Pet:
+    """Validate token and return the active pet for dashboard data routes."""
+    dashboard_token = validate_dashboard_token(db, token)
+    pet = db.query(Pet).filter(Pet.id == dashboard_token.pet_id).first()
+    if not pet or pet.is_deleted:
+        raise ValueError("Pet not found or has been removed.")
+    return pet
+
+
 @router.get("/{token}")
 async def dashboard_get(
     token: str,
@@ -172,7 +200,7 @@ async def dashboard_get(
         HTTPException 404: If token is invalid, revoked, or expired.
     """
     try:
-        data = get_dashboard_data(db, token)
+        data = await get_dashboard_data(db, token)
         # Prevent caching of sensitive pet health data.
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         return data
@@ -202,6 +230,60 @@ async def dashboard_get(
         raise HTTPException(
             status_code=503,
             detail="Dashboard is temporarily unavailable. Please try again shortly.",
+        )
+
+
+@router.get("/{token}/health-trends-v2", response_model=DashboardHealthTrendsV2Response)
+async def dashboard_health_trends_v2(
+    token: str,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """Return v2 health trends payload for the dashboard rebuild."""
+    try:
+        pet = _get_pet_for_dashboard_token(db, token)
+        payload = await get_health_trends_v2(db, pet)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        return payload
+    except ValueError as e:
+        logger.warning(
+            "Health trends v2 access failed: token=%s..., error=%s",
+            token[:8] if len(token) >= 8 else token,
+            str(e),
+        )
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Health trends v2 error: %s", str(e), exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="Health trends are temporarily unavailable. Please try again shortly.",
+        )
+
+
+@router.get("/{token}/records-v2", response_model=DashboardRecordsV2Response)
+async def dashboard_records_v2(
+    token: str,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """Return v2 structured records payload for the dashboard rebuild."""
+    try:
+        pet = _get_pet_for_dashboard_token(db, token)
+        payload = await get_records_v2(db, pet)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        return payload
+    except ValueError as e:
+        logger.warning(
+            "Records v2 access failed: token=%s..., error=%s",
+            token[:8] if len(token) >= 8 else token,
+            str(e),
+        )
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Records v2 error: %s", str(e), exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="Records are temporarily unavailable. Please try again shortly.",
         )
 
 
@@ -1510,7 +1592,7 @@ async def dashboard_health_summary(
     try:
         dt = validate_dashboard_token(db, token)
         # get_or_generate_insight handles cache check internally — no need to duplicate it here
-        data = get_dashboard_data(db, token)
+        data = await get_dashboard_data(db, token)
         return await get_or_generate_insight(
             db=db,
             pet_id=dt.pet_id,
@@ -1543,7 +1625,7 @@ async def dashboard_vet_questions(
     try:
         dt = validate_dashboard_token(db, token)
         # get_or_generate_insight handles cache check internally — no need to duplicate it here
-        data = get_dashboard_data(db, token)
+        data = await get_dashboard_data(db, token)
         result = await get_or_generate_insight(
             db=db,
             pet_id=dt.pet_id,
@@ -1574,7 +1656,7 @@ async def dashboard_regenerate_vet_questions(
     """
     try:
         dt = validate_dashboard_token(db, token)
-        data = get_dashboard_data(db, token)
+        data = await get_dashboard_data(db, token)
         result = await get_or_generate_insight(
             db=db,
             pet_id=dt.pet_id,
