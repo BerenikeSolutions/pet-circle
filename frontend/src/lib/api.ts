@@ -263,6 +263,9 @@ export interface HealthConditionSummary {
 export interface CarePlanItem {
   name: string;
   test_type: string;
+  product_id?: string | null;
+  icon?: string | null;
+  price?: number;
   freq: string;
   next_due: string | null;
   status_tag: string;

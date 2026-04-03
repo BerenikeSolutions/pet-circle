@@ -1,73 +1,35 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CartItemData, DashboardData, PlaceOrderResponse } from "@/lib/api";
-import { getCart, placeOrder, toggleCartItem, updateCartQuantity } from "@/lib/api";
-import CheckoutView from "./cart/CheckoutView";
-import type { CheckoutDetails } from "./cart/CheckoutView";
-import ConfirmView from "./cart/ConfirmView";
+import { useMemo } from "react";
 
 interface CartViewProps {
-  data: DashboardData;
-  token: string;
-  pinnedItemId?: string;
+  items: CartItem[];
   onBack: () => void;
+  onUpdateQuantity: (id: string, quantity: number) => void;
+  onRemoveItem: (id: string) => void;
+  onProceedToCheckout: () => void;
 }
 
-type CartScreen = "cart" | "checkout" | "confirm";
+export interface CartItem {
+  id: string;
+  name: string;
+  price: number;
+  quantity: number;
+  icon?: string;
+  section?: string;
+}
 
 const DELIVERY_FEE = 49;
 const FREE_THRESHOLD = 599;
 
-export default function CartView({ data, token, pinnedItemId, onBack }: CartViewProps) {
-  const [screen, setScreen] = useState<CartScreen>("cart");
-  const [items, setItems] = useState<CartItemData[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [orderResult, setOrderResult] = useState<PlaceOrderResponse | null>(null);
-  const pinHandledRef = useRef(false);
-
-  const loadCart = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    try {
-      const response = await getCart(token);
-      setItems(response.items);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load cart.");
-    } finally {
-      setLoading(false);
-    }
-  }, [token]);
-
-  const ensurePinnedItem = useCallback(async () => {
-    if (!pinnedItemId || pinHandledRef.current || loading) return;
-    pinHandledRef.current = true;
-    const alreadyPresent = items.some((item) => item.product_id === pinnedItemId && item.in_cart);
-    if (alreadyPresent) return;
-    try {
-      const updatedItem = await toggleCartItem(token, pinnedItemId);
-      setItems((prev) => {
-        const idx = prev.findIndex((entry) => entry.product_id === updatedItem.product_id);
-        if (idx === -1) return [...prev, updatedItem];
-        const next = [...prev];
-        next[idx] = updatedItem;
-        return next;
-      });
-    } catch {
-      // Keep flow non-blocking if pin add fails.
-    }
-  }, [items, loading, pinnedItemId, token]);
-
-  useEffect(() => {
-    loadCart();
-  }, [loadCart]);
-
-  useEffect(() => {
-    ensurePinnedItem();
-  }, [ensurePinnedItem]);
-
-  const inCartItems = useMemo(() => items.filter((item) => item.in_cart), [items]);
+export default function CartView({
+  items,
+  onBack,
+  onUpdateQuantity,
+  onRemoveItem,
+  onProceedToCheckout,
+}: CartViewProps) {
+  const inCartItems = useMemo(() => items.filter((item) => item.quantity > 0), [items]);
 
   const subtotal = useMemo(() => {
     return inCartItems.reduce((sum, item) => sum + item.price * item.quantity, 0);
@@ -77,87 +39,13 @@ export default function CartView({ data, token, pinnedItemId, onBack }: CartView
   const total = subtotal + deliveryFee;
   const amountForFreeDelivery = Math.max(0, FREE_THRESHOLD - subtotal);
 
-  const changeQuantity = async (productId: string, nextQty: number) => {
-    const quantity = Math.max(1, nextQty);
-    setItems((prev) => prev.map((item) => (item.product_id === productId ? { ...item, quantity } : item)));
-    try {
-      const updated = await updateCartQuantity(token, productId, quantity);
-      setItems((prev) => prev.map((item) => (item.product_id === productId ? updated : item)));
-    } catch {
-      loadCart();
+  const changeQuantity = (itemId: string, nextQty: number) => {
+    if (nextQty <= 0) {
+      onRemoveItem(itemId);
+      return;
     }
+    onUpdateQuantity(itemId, nextQty);
   };
-
-  const handlePlaceOrder = async (details: CheckoutDetails) => {
-    const addressLine = `${details.address}, ${details.pincode}`;
-    const result = await placeOrder(token, {
-      payment_method: details.paymentMethod,
-      address: {
-        name: details.name,
-        line: addressLine,
-        tag: "Home",
-      },
-    });
-    setOrderResult(result);
-    setScreen("confirm");
-  };
-
-  if (loading) {
-    return (
-      <div className="min-h-screen" style={{ background: "var(--bg-app)" }}>
-        <div className="app">
-          <div className="card" style={{ textAlign: "center", color: "var(--t3)" }}>Loading cart...</div>
-        </div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="min-h-screen" style={{ background: "var(--bg-app)" }}>
-        <div className="app">
-          <div className="card" style={{ textAlign: "center" }}>
-            <p style={{ color: "var(--red)", marginBottom: 10 }}>{error}</p>
-            <button type="button" className="btn btn-or" onClick={loadCart}>Retry</button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  if (screen === "checkout") {
-    return (
-      <CheckoutView
-        total={total}
-        initialName={data.owner.full_name || ""}
-        onBack={() => setScreen("cart")}
-        onPlaceOrder={handlePlaceOrder}
-      />
-    );
-  }
-
-  if (screen === "confirm") {
-    const confirmedItems = orderResult?.items?.map((item) => ({
-      id: item.product_id,
-      product_id: item.product_id,
-      icon: item.icon,
-      name: item.name,
-      sub: null,
-      price: item.price,
-      tag: null,
-      tag_color: null,
-      in_cart: true,
-      quantity: item.quantity,
-    })) || inCartItems;
-
-    return (
-      <ConfirmView
-        items={confirmedItems}
-        totalPaid={orderResult?.total ?? total}
-        onBackToDashboard={onBack}
-      />
-    );
-  }
 
   return (
     <div className="min-h-screen" style={{ background: "var(--bg-app)" }}>
@@ -175,10 +63,10 @@ export default function CartView({ data, token, pinnedItemId, onBack }: CartView
           )}
 
           {inCartItems.map((item) => {
-            const sku = item.product_id;
-            const section = item.tag || item.sub || "Care";
+            const sku = item.id;
+            const section = item.section || "Care";
             return (
-              <div className="cart-row" key={item.product_id}>
+              <div className="cart-row" key={item.id}>
                 <div className="cart-icon" style={{ background: "var(--to)" }}>{item.icon || "PKG"}</div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 14, fontWeight: 700, color: "var(--t1)" }}>{item.name}</div>
@@ -189,11 +77,11 @@ export default function CartView({ data, token, pinnedItemId, onBack }: CartView
                   </div>
                 </div>
                 <div className="qty">
-                  <button className="qty-btn" type="button" onClick={() => changeQuantity(item.product_id, item.quantity - 1)}>
+                  <button className="qty-btn" type="button" onClick={() => changeQuantity(item.id, item.quantity - 1)}>
                     -
                   </button>
                   <strong style={{ minWidth: 14, textAlign: "center" }}>{item.quantity}</strong>
-                  <button className="qty-btn" type="button" onClick={() => changeQuantity(item.product_id, item.quantity + 1)}>
+                  <button className="qty-btn" type="button" onClick={() => changeQuantity(item.id, item.quantity + 1)}>
                     +
                   </button>
                 </div>
@@ -236,7 +124,7 @@ export default function CartView({ data, token, pinnedItemId, onBack }: CartView
             className="btn btn-or"
             type="button"
             disabled={inCartItems.length === 0}
-            onClick={() => setScreen("checkout")}
+            onClick={onProceedToCheckout}
           >
             Proceed to Checkout
           </button>

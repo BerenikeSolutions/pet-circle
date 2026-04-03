@@ -14,10 +14,14 @@ import { buildCarePlanBuckets } from "./dashboard-utils";
 
 interface DashboardViewProps {
   data: DashboardData;
+  cartCount: number;
+  cartTotal: number;
+  getCartQty: (item: CarePlanItem, sectionTitle: string) => number;
   onGoToReminders: () => void;
   onGoToTrends: () => void;
   onGoToRecords: () => void;
   onGoToCart: () => void;
+  onAddToCart: (item: CarePlanItem, sectionTitle: string) => void;
 }
 
 function cartItemId(item: CarePlanItem, sectionTitle: string): string {
@@ -26,16 +30,18 @@ function cartItemId(item: CarePlanItem, sectionTitle: string): string {
 
 export default function DashboardView({
   data,
+  cartCount,
+  cartTotal,
+  getCartQty,
   onGoToReminders,
   onGoToTrends,
   onGoToRecords,
   onGoToCart,
+  onAddToCart,
 }: DashboardViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [floaterUnlocked, setFloaterUnlocked] = useState(false);
   const [addedIds, setAddedIds] = useState<Record<string, boolean>>({});
-  const [cartQtyByItem, setCartQtyByItem] = useState<Record<string, number>>({});
-  const [cartPriceByItem, setCartPriceByItem] = useState<Record<string, number>>({});
   const timerIdsRef = useRef<number[]>([]);
 
   const buckets = useMemo(() => buildCarePlanBuckets(data), [data]);
@@ -68,10 +74,7 @@ export default function DashboardView({
 
   const handleAddToCart = (item: CarePlanItem, sectionTitle: string) => {
     const id = cartItemId(item, sectionTitle);
-    setCartQtyByItem((prev) => ({ ...prev, [id]: (prev[id] || 0) + 1 }));
-
-    const price = Number((item as CarePlanItem & { price?: number }).price || 0);
-    setCartPriceByItem((prev) => ({ ...prev, [id]: Number.isFinite(price) ? price : 0 }));
+    onAddToCart(item, sectionTitle);
 
     setAddedIds((prev) => ({ ...prev, [id]: true }));
     const timeoutId = window.setTimeout(() => {
@@ -79,11 +82,6 @@ export default function DashboardView({
     }, 1800);
     timerIdsRef.current.push(timeoutId);
   };
-
-  const cartCount = Object.values(cartQtyByItem).reduce((sum, qty) => sum + qty, 0);
-  const cartTotal = Object.entries(cartQtyByItem).reduce((sum, [id, qty]) => {
-    return sum + qty * (cartPriceByItem[id] || 0);
-  }, 0);
 
   return (
     <div ref={containerRef}>
@@ -95,7 +93,11 @@ export default function DashboardView({
       <CarePlanCard
         petName={data.pet.name}
         buckets={buckets}
-        cartQtyByItem={cartQtyByItem}
+        cartQtyByItem={Object.fromEntries(
+          Object.values(buckets)
+            .flatMap((sections) => sections)
+            .flatMap((section) => section.items.map((item) => [cartItemId(item, section.title), getCartQty(item, section.title)]))
+        )}
         addedIds={addedIds}
         onAddToCart={handleAddToCart}
       />
