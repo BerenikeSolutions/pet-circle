@@ -865,3 +865,159 @@ def _build_improvements(all_nutrients: list[dict]) -> list[dict]:
             })
 
     return improvements
+
+
+# ─── Diet Summary for Dashboard Donut ────────────────────────────────
+
+# Threshold boundary constants for donut macro color coding
+_PCT_OVER_AMBER = 110.0   # Protein / Fat / Omega-3 start of amber (over)
+_PCT_UNDER_RED = 80.0     # Protein / Fat / Omega-3 start of red (under)
+_PCT_CAL_AMBER = 100.0    # Calories: exceed target → amber
+_PCT_OMEGA3_CRITICAL = 15.0  # Omega-3 critical deficiency boundary
+
+
+def _diet_summary_threshold(macro_name: str, pct_of_need: float) -> tuple[str, str]:
+    """
+    Compute color and note for a single donut macro based on % of daily need.
+
+    Rules (guardrail-compliant):
+    - Calories:  >100 % → amber / "Slightly over target"
+                 ≤100 % → green / "On track"
+    - Protein / Fat:
+                 >110 % → amber / "Slightly over"
+                 <80  % → red   / "Deficient"
+                 80–110% → green / "On track"
+    - Omega-3:   ≤15  % → red   / "Critical gap"   (critical-deficiency shortcut)
+                 <80  % → red   / "Deficient"
+                 >110 % → amber / "Slightly over"
+                 80–110% → green / "On track"
+    - Green is NEVER returned for >110 %.
+    """
+    if macro_name == "Calories":
+        if pct_of_need > _PCT_CAL_AMBER:
+            return "amber", "Slightly over target"
+        return "green", "On track"
+
+    if macro_name == "Omega-3":
+        if pct_of_need <= _PCT_OMEGA3_CRITICAL:
+            return "red", "Critical gap"
+        if pct_of_need < _PCT_UNDER_RED:
+            return "red", "Deficient"
+        if pct_of_need > _PCT_OVER_AMBER:
+            return "amber", "Slightly over"
+        return "green", "On track"
+
+    # Protein and Fat share the same thresholds
+    if pct_of_need > _PCT_OVER_AMBER:
+        return "amber", "Slightly over"
+    if pct_of_need < _PCT_UNDER_RED:
+        return "red", "Deficient"
+    return "green", "On track"
+
+
+async def get_diet_summary(db: Session, pet) -> dict:
+    """
+    Format existing nutrition analysis as donut summaries with guardrail thresholds.
+
+    Calls the full analyze_nutrition pipeline, then re-formats the result into
+    4 donut-chart macro segments (Calories, Protein, Omega-3, Fat) plus up to 3
+    missing micronutrients for the dashboard card.
+
+    Returns:
+        {
+            "macros": [
+                {"name": str, "pct_of_need": float, "color": str, "note": str},
+                ...   # 4 items: Calories, Protein, Omega-3, Fat
+            ],
+            "missing_micros": [
+                {"icon": str, "name": str, "reason": str},
+                ...   # max 3, sorted by priority (urgent → high → medium)
+            ],
+        }
+
+    Falls back to empty lists if the analysis pipeline raises an exception.
+    """
+    try:
+        analysis = await analyze_nutrition(db, pet.id)
+    except Exception as e:
+        logger.error("get_diet_summary: analyze_nutrition failed for pet %s: %s", pet.id, e)
+        return {"macros": [], "missing_micros": []}
+
+    # --- Calories ---
+    cal_info = analysis.get("calories", {})
+    cal_actual = cal_info.get("actual", 0)
+    cal_target = cal_info.get("target", DEFAULT_TARGETS["calories"])
+
+    # --- Macros list from analyze_nutrition (Protein, Fat) ---
+    macros_list = analysis.get("macros", [])
+
+    def _find_macro(name: str) -> dict:
+        return next((m for m in macros_list if m.get("name") == name), {})
+
+    protein_m = _find_macro("Protein")
+    fat_m = _find_macro("Fat")
+
+    # --- Omega-3 lives in the 'others' array ---
+    omega3_actual: float = 0.0
+    omega3_target: float = float(DEFAULT_TARGETS["omega_3"])
+    for item in analysis.get("others", []):
+        if item.get("name") == "Omega-3":
+            omega3_actual = float(item.get("actual", 0))
+            omega3_target = float(item.get("target", omega3_target))
+            break
+
+    def _safe_pct(actual: float, target: float) -> float:
+        """Return % of daily target, capped floor at 0."""
+        if not target:
+            return 100.0
+        return round(max(0.0, actual / target) * 100, 1)
+
+    cal_pct = _safe_pct(cal_actual, cal_target)
+    protein_pct = _safe_pct(
+        float(protein_m.get("actual", 0)),
+        float(protein_m.get("target", DEFAULT_TARGETS["protein"])),
+    )
+    fat_pct = _safe_pct(
+        float(fat_m.get("actual", 0)),
+        float(fat_m.get("target", DEFAULT_TARGETS["fat"])),
+    )
+    omega3_pct = _safe_pct(omega3_actual, omega3_target)
+
+    # Build 4 donut segments
+    donut_macros: list[dict] = []
+    for macro_name, pct in [
+        ("Calories", cal_pct),
+        ("Protein", protein_pct),
+        ("Omega-3", omega3_pct),
+        ("Fat", fat_pct),
+    ]:
+        color, note = _diet_summary_threshold(macro_name, pct)
+        donut_macros.append({
+            "name": macro_name,
+            "pct_of_need": pct,
+            "color": color,
+            "note": note,
+        })
+
+    # --- Missing micronutrients (max 3) from gap analysis ---
+    # Combine minerals + others + vitamins; filter to non-ok priorities
+    all_micros = (
+        analysis.get("minerals", [])
+        + analysis.get("others", [])
+        + analysis.get("vitamins", [])
+    )
+    _priority_rank = {"urgent": 0, "high": 1, "medium": 2}
+    deficient = sorted(
+        [n for n in all_micros if n.get("priority") in _priority_rank],
+        key=lambda n: _priority_rank.get(n.get("priority", "ok"), 3),
+    )
+    missing_micros = [
+        {
+            "icon": n.get("icon", "\u26a0\ufe0f"),
+            "name": n["name"],
+            "reason": n.get("reason") or f"{n['name']} supplementation recommended",
+        }
+        for n in deficient[:3]
+    ]
+
+    return {"macros": donut_macros, "missing_micros": missing_micros}

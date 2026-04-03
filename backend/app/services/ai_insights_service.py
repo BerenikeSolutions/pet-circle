@@ -25,15 +25,22 @@ sensible default payload is returned so the dashboard never crashes.
 import json
 import logging
 from datetime import date, datetime, timedelta
+from typing import Any, TypedDict
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.constants import OPENAI_QUERY_MODEL
+from app.models.condition import Condition
+from app.models.diet_item import DietItem
+from app.models.document import Document
 from app.models.pet import Pet
 from app.models.pet_ai_insight import PetAiInsight
+from app.models.preventive_record import PreventiveRecord
+from app.services.care_plan_engine import _get_breed_size, _get_life_stage, _get_pet_age_months
+from app.services.nutrition_service import get_diet_summary
 from app.utils.retry import retry_openai_call
 
 logger = logging.getLogger(__name__)
@@ -49,6 +56,13 @@ NUTRITION_IMPORTANCE_CACHE_DAYS = 30
 # --------------------------------------------------------------------------- #
 
 _openai_client = None
+
+
+class Bullet(TypedDict):
+    """Single recognition bullet used by the What We Found card."""
+
+    icon: str
+    label: str
 
 
 def _get_openai_client():
@@ -515,3 +529,214 @@ async def get_or_generate_nutrition_importance(db: Session, pet_id: UUID) -> dic
         db.rollback()
 
     return content
+
+
+async def generate_recognition_bullets(db: Session, pet: Pet) -> list[Bullet]:
+    """
+    Build deterministic recognition bullets for the dashboard's What We Found card.
+
+    Bullets are observational and traceable to DB records only (no GPT).
+    Output order is fixed: conditions first, preventive second, diet last.
+
+    Args:
+        db: SQLAlchemy session.
+        pet: Pet model instance.
+
+    Returns:
+        Up to three bullets of shape {icon, label}.
+    """
+    if not pet:
+        return []
+
+    report_count = (
+        db.query(func.count(Document.id))
+        .filter(
+            Document.pet_id == pet.id,
+            Document.extraction_status == "success",
+        )
+        .scalar()
+        or 0
+    )
+
+    active_condition_count = (
+        db.query(func.count(Condition.id))
+        .filter(
+            Condition.pet_id == pet.id,
+            Condition.is_active.is_(True),
+        )
+        .scalar()
+        or 0
+    )
+
+    on_schedule_preventive_count = (
+        db.query(func.count(PreventiveRecord.id))
+        .filter(
+            PreventiveRecord.pet_id == pet.id,
+            PreventiveRecord.status.in_(["up_to_date", "upcoming"]),
+        )
+        .scalar()
+        or 0
+    )
+
+    diet_item_count = (
+        db.query(func.count(DietItem.id))
+        .filter(DietItem.pet_id == pet.id)
+        .scalar()
+        or 0
+    )
+
+    bullets: list[Bullet] = []
+
+    if active_condition_count > 0:
+        report_phrase = f" from {report_count} reviewed reports" if report_count > 0 else ""
+        bullets.append(
+            {
+                "icon": "🩺",
+                "label": (
+                    f"Found {active_condition_count} active health conditions"
+                    f"{report_phrase}."
+                ),
+            }
+        )
+
+    if on_schedule_preventive_count > 0:
+        bullets.append(
+            {
+                "icon": "✅",
+                "label": (
+                    f"{on_schedule_preventive_count} preventive items are currently on schedule."
+                ),
+            }
+        )
+
+    if diet_item_count > 0:
+        bullets.append(
+            {
+                "icon": "🍽️",
+                "label": f"Captured {diet_item_count} diet entries in the current routine.",
+            }
+        )
+
+    return bullets[:3]
+
+
+def _extract_orderable_item_key_and_name(item: dict[str, Any]) -> tuple[str, str] | None:
+    """Extract a stable id and display name from an orderable item payload."""
+    item_id = item.get("item_id") or item.get("id") or item.get("name")
+    item_name = item.get("name") or item.get("label") or item_id
+    if not item_id or not item_name:
+        return None
+    return str(item_id), str(item_name)
+
+
+async def generate_care_plan_reasons(
+    db: Session,
+    pet: Pet,
+    orderable_items: list[dict[str, Any]],
+) -> dict[str, str]:
+    """
+    Generate one-sentence reasons for orderable care plan items.
+
+    Reasons are generated fresh on every load and are never cached.
+    On GPT failure, return {} so the UI can render items without reasons.
+
+    Args:
+        db: SQLAlchemy session.
+        pet: Pet model instance.
+        orderable_items: List of orderable item payloads with id/name fields.
+
+    Returns:
+        Mapping of item_id -> reason sentence.
+    """
+    if not pet or not orderable_items:
+        return {}
+
+    item_map: dict[str, str] = {}
+    for item in orderable_items:
+        extracted = _extract_orderable_item_key_and_name(item)
+        if extracted:
+            item_id, item_name = extracted
+            item_map[item_id] = item_name
+
+    if not item_map:
+        return {}
+
+    active_conditions = (
+        db.query(Condition.name)
+        .filter(
+            Condition.pet_id == pet.id,
+            Condition.is_active.is_(True),
+        )
+        .all()
+    )
+    condition_names = [row[0] for row in active_conditions if row and row[0]]
+
+    age_months = _get_pet_age_months(pet)
+    breed_size = _get_breed_size(float(pet.weight) if pet.weight is not None else None, pet.breed)
+    life_stage = _get_life_stage(age_months, breed_size).value
+
+    nutrition_summary = await get_diet_summary(db, pet)
+    missing_micros = nutrition_summary.get("missing_micros", [])
+    nutrition_gap_names = [
+        str(gap.get("name"))
+        for gap in missing_micros
+        if isinstance(gap, dict) and gap.get("name")
+    ]
+
+    conditions_text = ", ".join(condition_names) if condition_names else "none"
+    nutrition_gaps_text = ", ".join(nutrition_gap_names) if nutrition_gap_names else "none identified"
+    items_text = "\n".join([f"- {item_id}: {name}" for item_id, name in item_map.items()])
+
+    system_prompt = (
+        "You are a veterinary care-plan assistant. "
+        "For each orderable item id, write exactly one sentence that explains why the item is relevant "
+        "based on life stage, active health context, and nutrition context. "
+        "Return ONLY a valid JSON object where each key is item id and each value is the reason string. "
+        "No markdown, no extra keys, no recommendations beyond context, and no alarming language."
+    )
+
+    user_prompt = (
+        f"Pet: {pet.name} ({pet.species}, breed={pet.breed or 'unknown'})\n"
+        f"Life stage: {life_stage}\n"
+        f"Active conditions: {conditions_text}\n"
+        f"Nutrition gaps: {nutrition_gaps_text}\n"
+        "Orderable items:\n"
+        f"{items_text}"
+    )
+
+    client = _get_openai_client()
+
+    async def _call() -> str:
+        response = await client.chat.completions.create(
+            model=OPENAI_QUERY_MODEL,
+            temperature=0,
+            max_tokens=500,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        return response.choices[0].message.content or "{}"
+
+    try:
+        raw = await retry_openai_call(_call)
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise ValueError("Expected JSON object for care plan reasons")
+
+        reasons: dict[str, str] = {}
+        for item_id in item_map:
+            reason = parsed.get(item_id)
+            if not isinstance(reason, str):
+                continue
+            one_line_reason = " ".join(reason.strip().split())
+            if not one_line_reason:
+                continue
+            if not one_line_reason.endswith((".", "!", "?")):
+                one_line_reason = f"{one_line_reason}."
+            reasons[item_id] = one_line_reason
+        return reasons
+    except Exception as exc:
+        logger.warning("care_plan_reasons generation failed for pet %s: %s", pet.id, exc)
+        return {}

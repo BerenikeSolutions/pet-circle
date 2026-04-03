@@ -1,7 +1,7 @@
 ---
 task: 005
 feature: dashboard-rebuild
-status: pending
+status: done
 depends_on: [1]
 ---
 
@@ -96,7 +96,18 @@ _Requirements: 7, 18_
 
 ## Handoff to Next Task
 
-**Files changed:** _(fill via /task-handoff)_
-**Decisions made:** _(fill via /task-handoff)_
+**Files changed:**
+- `backend/app/services/nutrition_service.py` — Added `_diet_summary_threshold()` helper and `async get_diet_summary(db, pet)` function after `_build_improvements()`.
+- `backend/tests/unit/test_diet_summary.py` — New test file: 37 unit tests covering all threshold boundaries and integration logic.
+
+**Decisions made:**
+- `_diet_summary_threshold()` extracted as a pure function (no I/O) so threshold logic is independently testable.
+- `get_diet_summary()` delegates to the existing `analyze_nutrition()` pipeline instead of re-implementing aggregation.
+- Omega-3 ≤15 % short-circuits directly to `("red", "Critical gap")` before the generic <80 % check.
+- Calories only has green/amber (no red zone), matching the spec exactly.
+- Missing micros drawn from `minerals + others + vitamins` arrays already returned by `analyze_nutrition()`; limited to max 3 sorted by priority.
+- Graceful fallback returns `{"macros": [], "missing_micros": []}` on any exception from the analysis pipeline.
+
+**Verify result:** 37/37 new tests pass; 183/183 previously passing unit tests unaffected; 8 pre-existing failures unchanged.
 **Context for next task:** _(fill via /task-handoff)_
 **Open questions:** _(fill via /task-handoff)_
