@@ -1,7 +1,7 @@
 ---
 task: 013
 feature: dashboard-rebuild
-status: pending
+status: complete
 depends_on: [11]
 ---
 
@@ -151,9 +151,51 @@ _Requirements: 12, 13, 14_
 
 ---
 
+## Handoff — What Was Done
+
+- Added the full Page-2 Health Trends component tree under `frontend/src/components/trends/` with sticky header, orange active pill navigation, scroll-sync, and section wrappers for Ask Your Vet, Signals, and Care Cadence.
+- Added three cadence chart wrappers in `frontend/src/components/charts/` to adapt the existing shared SVG primitives to the V2 API payloads.
+- Extended `LineChart.tsx` in a backward-compatible way so platelet charts can override dot, stroke, and fill colors while existing weight-chart callers keep the prior default behavior.
+- Kept loading and error states inside the trends view shell so back/home navigation remains available even when fetches fail.
+
+## Handoff — Patterns Learned
+
+- The V2 health-trends payload is already available in `frontend/src/lib/api.ts`, so the trends page can stay isolated from the older legacy trends section.
+- The existing shared SVG primitives are sufficient for this page when wrapped with small API-shaping adapters instead of creating duplicate chart implementations.
+- Build verification on this Windows environment is most reliable when command output is redirected; the completed build surfaced existing repo warnings unrelated to this task.
+
+## Handoff — Files Changed
+
+- `frontend/src/components/charts/LineChart.tsx`
+- `frontend/src/components/charts/VaccinationCadence.tsx`
+- `frontend/src/components/charts/TickFleaCadence.tsx`
+- `frontend/src/components/charts/DewormingCadence.tsx`
+- `frontend/src/components/trends/trend-utils.ts`
+- `frontend/src/components/trends/HealthTrendsView.tsx`
+- `frontend/src/components/trends/AskVetSection.tsx`
+- `frontend/src/components/trends/AskVetConditionCard.tsx`
+- `frontend/src/components/trends/SignalsSection.tsx`
+- `frontend/src/components/trends/BloodPanelTable.tsx`
+- `frontend/src/components/trends/WeightTrendCard.tsx`
+- `frontend/src/components/trends/MetabolicCard.tsx`
+- `frontend/src/components/trends/CareCadenceSection.tsx`
+
+## Handoff — Verification
+
+- `npm run build` completed successfully. The build surfaced existing frontend warnings outside this task, including `img` lint warnings and several admin-panel `react-hooks/exhaustive-deps` warnings.
+- `npm run lint` completed without new blocking errors in the changed trends files.
+- VS Code diagnostics for the new and modified trends files are clean.
+- Code review was run. Remaining reachability work for mounting `HealthTrendsView` into `DashboardClient` belongs to the later navigation/routing task.
+
+## Status
+
+COMPLETE
+
+---
+
 ## Handoff to Next Task
 
-**Files changed:** _(fill via /task-handoff)_
-**Decisions made:** _(fill via /task-handoff)_
-**Context for next task:** _(fill via /task-handoff)_
-**Open questions:** _(fill via /task-handoff)_
+**Files changed:** `frontend/src/components/charts/LineChart.tsx`, `frontend/src/components/charts/VaccinationCadence.tsx`, `frontend/src/components/charts/TickFleaCadence.tsx`, `frontend/src/components/charts/DewormingCadence.tsx`, `frontend/src/components/trends/*`
+**Decisions made:** Kept Health Trends isolated as a page component and did not mount it into `DashboardClient`, because client view-state replacement is covered by the later routing task.
+**Context for next task:** `HealthTrendsView` is ready to plug into the future view-state router; it expects `token`, `petName`, `species`, `vetSummary`, and `onBack` props.
+**Open questions:** None for this task; only the planned dashboard routing integration remains.

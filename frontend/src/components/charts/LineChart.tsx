@@ -25,6 +25,8 @@ export interface LineChartPoint {
    * Defaults to `String(val)` if omitted (e.g., "178K" vs 178).
    */
   display?: string;
+  /** Optional dot color override for threshold-based charts. */
+  color?: string;
 }
 
 export interface LineChartProps {
@@ -37,6 +39,10 @@ export interface LineChartProps {
   referenceValue?: number;
   /** Label shown alongside the reference line (e.g., "200K normal"). */
   referenceLabel?: string;
+  /** Optional override for the line stroke color. */
+  strokeColor?: string;
+  /** Optional override for the area fill gradient color. */
+  fillColor?: string;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -48,7 +54,7 @@ function toY(val: number, yMin: number, yRange: number): number {
 }
 
 /** Dot color: last point is always red; others are amber. */
-function dotColor(index: number, total: number): string {
+function defaultDotColor(index: number, total: number): string {
   return index === total - 1 ? "#FF3B30" : "#FF9F1C";
 }
 
@@ -66,6 +72,8 @@ export default function LineChart({
   points,
   referenceValue,
   referenceLabel,
+  strokeColor = "#FF9F1C",
+  fillColor = "#FF9F1C",
 }: LineChartProps) {
   // Stable, unique ID for the SVG gradient — prevents collisions when multiple
   // LineChart instances appear on the same page.
@@ -114,8 +122,8 @@ export default function LineChart({
     >
       <defs>
         <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#FF9F1C" stopOpacity="0.18" />
-          <stop offset="100%" stopColor="#FF9F1C" stopOpacity="0" />
+          <stop offset="0%" stopColor={fillColor} stopOpacity="0.18" />
+          <stop offset="100%" stopColor={fillColor} stopOpacity="0" />
         </linearGradient>
       </defs>
 
@@ -155,7 +163,7 @@ export default function LineChart({
       <polyline
         points={polylinePoints}
         fill="none"
-        stroke="#FF9F1C"
+        stroke={strokeColor}
         strokeWidth="2"
         strokeLinecap="round"
         strokeLinejoin="round"
@@ -163,7 +171,7 @@ export default function LineChart({
 
       {/* Data points with value labels and x-axis labels */}
       {points.map((p, i) => {
-        const color = dotColor(i, n);
+        const color = p.color ?? defaultDotColor(i, n);
         const displayVal = p.display ?? String(p.val);
         return (
           <g key={i}>

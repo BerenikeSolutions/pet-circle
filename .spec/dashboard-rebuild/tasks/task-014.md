@@ -1,7 +1,7 @@
 ---
 task: 014
 feature: dashboard-rebuild
-status: pending
+status: completed
 depends_on: [10]
 ---
 
@@ -78,20 +78,36 @@ _Requirements: 15_
 ---
 
 ## Acceptance Criteria
-- [ ] Items grouped by care plan section
-- [ ] Edit mode: frequency dropdown with all 7 options, date input, auto-computed next due
-- [ ] Save persists changes to item state
-- [ ] Delete shows confirmation row before removing
-- [ ] Daily-frequency items filtered out
-- [ ] Home floater navigates to dashboard
-- [ ] `npm run build` passes
-- [ ] `/verify` passes
+- [x] Items grouped by care plan section
+- [x] Edit mode: frequency dropdown with all 7 options, date input, auto-computed next due
+- [x] Save persists changes to item state
+- [x] Delete shows confirmation row before removing
+- [x] Daily-frequency items filtered out
+- [x] Home floater navigates to dashboard
+- [x] `npm run build` passes
+- [x] `/verify` passes
 
 ---
 
 ## Handoff to Next Task
 
-**Files changed:** _(fill via /task-handoff)_
-**Decisions made:** _(fill via /task-handoff)_
-**Context for next task:** _(fill via /task-handoff)_
-**Open questions:** _(fill via /task-handoff)_
+**Files changed:**
+- `frontend/src/components/RemindersView.tsx` — Complete reimplementation
+
+**Decisions made:**
+- Used inline styling with CSS variable fallbacks for consistency with existing codebase
+- Implemented FREQ_OPTIONS with 7 frequency labels matching JSX reference
+- Created helper functions: toISO(), computeNextDue(), getStatusDot()
+- Items filtered from pet.carePlan, grouped by section, daily-frequency items excluded
+- Edit mode: frequency dropdown + date input + auto-computed next due
+- Delete mode: confirmation row with Remove/Cancel buttons
+- Home floater at bottom-right (🏠) with fixed positioning
+
+**Context for next task:**
+- RemindersView now matches JSX reference specification
+- Component takes pet and onBack props
+- State management: items, editingId, editVals, confirmDel
+- Build passes successfully with Next.js 14.2.35
+
+**Open questions:**
+- None — task completed to specification
