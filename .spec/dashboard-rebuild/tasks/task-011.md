@@ -1,7 +1,7 @@
 ---
 task: 011
 feature: dashboard-rebuild
-status: pending
+status: complete
 depends_on: [10]
 ---
 
@@ -98,6 +98,36 @@ const nutrColor = { green: '#34C759', amber: '#FF9F1C', red: '#FF3B30' };
 6. Verify all components render at 430px width. `npm run build` passes.
 
 _Requirements: 7, 13, 14_
+
+---
+
+## Handoff — What Was Done
+
+- Created `frontend/src/components/charts/` directory with all 5 SVG chart components.
+- `Donut.tsx` — ring chart matching JSX reference exactly; props `{ pct, status, size? }`.
+- `LineChart.tsx` — amber-gradient line chart with optional dashed reference line; last dot always red; uses `useId()` for unique SVG gradient IDs.
+- `BarChart.tsx` — proportional vertical bar chart; color by caller-supplied `status` field; baseline at y=88.
+- `TimelineSVG.tsx` — horizontal node timeline; 4 node types (done/upcoming/missed/now); optional gap brackets above line; optional legend rows.
+- `DotPlotSVG.tsx` — numbered dose dot-plot; color computed from `gapWeeks`; critical gap bracket annotations; default green/amber/red legend.
+
+## Handoff — Patterns Learned
+
+- All chart components are `"use client"` pure-SVG with no external chart library dependencies.
+- `useId()` (React 18) used in `LineChart` to ensure unique SVG gradient IDs when multiple instances render on the same page.
+- Font family is `"Inter,sans-serif"` for all axis/label text (matching JSX reference) and `"DM Sans,sans-serif"` for `Donut` centre text only.
+- Colour constants are inlined per component — no shared file needed yet (only 5 components, shared file is premature).
+
+## Handoff — Files Changed
+
+- `frontend/src/components/charts/Donut.tsx` — **created**
+- `frontend/src/components/charts/LineChart.tsx` — **created**
+- `frontend/src/components/charts/BarChart.tsx` — **created**
+- `frontend/src/components/charts/TimelineSVG.tsx` — **created**
+- `frontend/src/components/charts/DotPlotSVG.tsx` — **created**
+
+## Status
+
+COMPLETE
 
 ---
 
