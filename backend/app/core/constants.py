@@ -110,7 +110,7 @@ STAGE_OVERDUE: str = "overdue_insight"  # D+7+, monthly repeat
 STAGE_PRIORITY_ORDER: list[str] = [STAGE_DUE, STAGE_D3, STAGE_OVERDUE, STAGE_T7]
 
 # Number of ignored reminders before dropping to monthly-only fallback.
-REMINDER_IGNORE_THRESHOLD: int = 2
+REMINDER_IGNORE_THRESHOLD: int = 3
 
 # Days between monthly overdue_insight repeats once monthly_fallback is True.
 REMINDER_MONTHLY_INTERVAL_DAYS: int = 30

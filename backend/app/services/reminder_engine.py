@@ -20,7 +20,7 @@ Send Rules:
     - Max 1 reminder per pet per day
     - Min 3 days between any two sends for the same pet
     - Never send reminder + overdue_insight on same day (precedence: due > d3 > overdue > t7)
-    - 2 ignored reminders → monthly_fallback = True → only overdue_insight fires monthly
+    - 3 ignored reminders → monthly_fallback = True → only overdue_insight fires monthly
 
 Ignore Detection (runs before creating/sending new reminders):
     - A reminder is "ignored" when no inbound message is received within 24h of sending
@@ -32,6 +32,7 @@ Routes: /internal/run-reminder-engine (full) / /internal/detect-ignores (detect 
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from uuid import UUID
@@ -53,6 +54,7 @@ from app.core.constants import (
     STAGE_D3,
     STAGE_DUE,
     STAGE_OVERDUE,
+    STAGE_PRIORITY_ORDER,
     STAGE_T7,
 )
 from app.core.encryption import decrypt_field
@@ -61,6 +63,7 @@ from app.models.breed_consequence_library import BreedConsequenceLibrary
 from app.models.condition import Condition
 from app.models.condition_medication import ConditionMedication
 from app.models.condition_monitoring import ConditionMonitoring
+from app.models.contact import Contact
 from app.models.diet_item import DietItem
 from app.models.hygiene_preference import HygienePreference
 from app.models.message_log import MessageLog
@@ -69,6 +72,13 @@ from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
 from app.models.reminder import Reminder
 from app.models.user import User
+from app.services.reminder_templates import (
+    MAX_REMINDERS_PER_PET_PER_DAY,
+    MIN_DAYS_BETWEEN_SAME_ITEM_REMINDERS,
+    get_reminder_template,
+    get_send_time,
+    substitute_variables,
+)
 from app.utils.date_utils import IST, format_date_for_user, get_today_ist
 
 logger = logging.getLogger(__name__)
@@ -157,7 +167,21 @@ def run_reminder_engine(db: Session) -> dict:
     results["reminders_skipped"] = len(candidates) - len(filtered)
 
     # Phase 4: create & send
+    now_ist = datetime.now(IST).time()
     for cand in filtered:
+        send_time = get_send_time(cand.category, cand.stage)
+        if now_ist < send_time:
+            results["reminders_skipped"] += 1
+            logger.info(
+                "Reminder delayed until send window: pet=%s category=%s stage=%s now=%s target=%s",
+                cand.pet.name,
+                cand.category,
+                cand.stage,
+                now_ist.strftime("%H:%M"),
+                send_time.strftime("%H:%M"),
+            )
+            continue
+
         created, sent = _process_candidate(db, cand, today)
         if created:
             results["reminders_created"] += 1
@@ -206,6 +230,9 @@ def _detect_ignores(db: Session, today: date) -> int:
 
     ignores = 0
     for reminder, pet, user in sent_reminders:
+        if reminder.last_ignored_at and reminder.sent_at and reminder.last_ignored_at >= reminder.sent_at:
+            continue
+
         # Check if user sent ANY inbound message after the reminder was sent
         reply_count = (
             db.query(MessageLog)
@@ -433,6 +460,14 @@ def _candidates_from_chronic_medicine(db: Session, today: date) -> list[Reminder
     candidates: list[ReminderCandidate] = []
 
     for med, condition, pet, user in rows:
+        if _is_course_medicine(med):
+            logger.info(
+                "Skipping course medicine reminders: med_id=%s name=%s",
+                str(med.id),
+                med.name,
+            )
+            continue
+
         sub_type = "supply_led"
         due = med.refill_due_date
 
@@ -493,7 +528,6 @@ def _candidates_from_vet_followup(db: Session, today: date) -> list[ReminderCand
             continue
 
         # Try to get vet name from contacts
-        from app.models.contact import Contact
         vet = (
             db.query(Contact)
             .filter(Contact.pet_id == pet.id, Contact.role == "veterinarian")
@@ -598,32 +632,78 @@ def _candidates_from_hygiene(db: Session, today: date) -> list[ReminderCandidate
 
 def _apply_send_rules(db: Session, candidates: list[ReminderCandidate], today: date) -> list[ReminderCandidate]:
     """
-    Filter candidates to prevent duplicate sends for the same (pet, item, stage) on the same day.
-
-    Per-item deduplication: skip if a reminder for this exact source_id + stage was already sent today.
-    All other due items for a pet are sent — no per-pet daily cap or inter-reminder gap.
+    Apply communication limits:
+    - Max one reminder per pet per day
+    - Min 3-day gap between sends for the same source item
+    - Dedup exact source_id + stage combinations sent today
     """
-    # Build set of (source_id, stage) already sent today to deduplicate per item
+    day_start = datetime.combine(today, time.min)
+
+    # Build set of (source_id, stage) already sent today to deduplicate per item.
     already_sent_today: set[tuple[str, str]] = set()
+    pets_sent_today_count: dict[str, int] = {}
+    last_sent_by_source: dict[str, datetime] = {}
 
     sent_today_rows = (
-        db.query(Reminder.source_id, Reminder.stage)
+        db.query(Reminder.source_id, Reminder.stage, Reminder.pet_id)
         .filter(
             Reminder.status == "sent",
-            Reminder.sent_at >= datetime.combine(today, time.min),
+            Reminder.sent_at >= day_start,
         )
         .all()
     )
 
-    for source_id, stage in sent_today_rows:
+    for source_id, stage, pet_id in sent_today_rows:
         if source_id and stage:
             already_sent_today.add((str(source_id), stage))
+        if pet_id:
+            pet_key = str(pet_id)
+            pets_sent_today_count[pet_key] = pets_sent_today_count.get(pet_key, 0) + 1
+
+    candidate_source_ids = {cand.source_id for cand in candidates}
+    min_gap_cutoff = datetime.combine(today - timedelta(days=MIN_DAYS_BETWEEN_SAME_ITEM_REMINDERS - 1), time.min)
+
+    recent_sent_rows = (
+        db.query(Reminder.source_id, Reminder.sent_at)
+        .filter(
+            Reminder.status == "sent",
+            Reminder.sent_at.isnot(None),
+            Reminder.source_id.in_(candidate_source_ids),
+            Reminder.sent_at >= min_gap_cutoff,
+        )
+        .all()
+    )
+
+    for source_id, sent_at in recent_sent_rows:
+        if not source_id or not sent_at:
+            continue
+        source_key = str(source_id)
+        existing = last_sent_by_source.get(source_key)
+        if existing is None or sent_at > existing:
+            last_sent_by_source[source_key] = sent_at
+
+    staged_candidates = sorted(candidates, key=lambda c: STAGE_PRIORITY_ORDER.index(c.stage))
 
     result: list[ReminderCandidate] = []
-    for cand in candidates:
+    for cand in staged_candidates:
+        pet_key = str(cand.pet.id)
+
+        # Max one reminder per pet per day.
+        if pets_sent_today_count.get(pet_key, 0) >= MAX_REMINDERS_PER_PET_PER_DAY:
+            continue
+
+        # Per-item minimum spacing guard.
+        last_sent = last_sent_by_source.get(str(cand.source_id))
+        if last_sent:
+            days_since_last = (today - last_sent.date()).days
+            if days_since_last < MIN_DAYS_BETWEEN_SAME_ITEM_REMINDERS:
+                continue
+
         key = (str(cand.source_id), cand.stage)
         if key not in already_sent_today:
             result.append(cand)
+            pets_sent_today_count[pet_key] = pets_sent_today_count.get(pet_key, 0) + 1
+            already_sent_today.add(key)
 
     return result
 
@@ -741,19 +821,18 @@ def _build_template_params(cand: ReminderCandidate, settings, db: Session) -> tu
     due_str = format_date_for_user(cand.due_date)
     today = get_today_ist()
 
-    # --- Scheduled variant (v6): first-time food / supplement / chronic prompt ---
-    # Only fires at the 'due' stage; uses a dedicated template per category.
-    if cand.sub_type == "scheduled" and cand.stage == STAGE_DUE:
-        _scheduled_template_map = {
-            "food":             getattr(settings, "WHATSAPP_TEMPLATE_REMINDER_FOOD_SCHEDULED", None),
-            "supplement":       getattr(settings, "WHATSAPP_TEMPLATE_REMINDER_SUPPLEMENT_SCHEDULED", None),
-            "chronic_medicine": getattr(settings, "WHATSAPP_TEMPLATE_REMINDER_CHRONIC_SCHEDULED", None),
-        }
-        template = _scheduled_template_map.get(cand.category)
-        if not template:
-            return None, []
-        # {{1}}=parent_name, {{2}}=pet_name, {{3}}=item_desc (all items list)
-        return template, [parent_name, pet_name, item_desc]
+    # Prefer category-specific registry templates first.
+    sub_type = cand.sub_type
+    if cand.category == "vaccine":
+        sub_type = _vaccine_template_sub_type(cand)
+
+    registry_template = get_reminder_template(cand.category, sub_type, cand.stage)
+    if registry_template:
+        template_name = _template_name_for_stage(cand.stage, settings)
+        if template_name:
+            variables = _build_variable_dict(cand, db)
+            rendered_body = substitute_variables(registry_template.message_body, variables)
+            return template_name, [rendered_body]
 
     if cand.stage == STAGE_T7:
         template = settings.WHATSAPP_TEMPLATE_REMINDER_T7
@@ -785,6 +864,85 @@ def _build_template_params(cand: ReminderCandidate, settings, db: Session) -> tu
         return None, []
 
     return template, params
+
+
+def _template_name_for_stage(stage: str, settings) -> str | None:
+    """Return the configured WhatsApp template name for a stage."""
+    if stage == STAGE_T7:
+        return settings.WHATSAPP_TEMPLATE_REMINDER_T7
+    if stage == STAGE_DUE:
+        return settings.WHATSAPP_TEMPLATE_REMINDER_DUE
+    if stage == STAGE_D3:
+        return settings.WHATSAPP_TEMPLATE_REMINDER_D3
+    if stage == STAGE_OVERDUE:
+        return settings.WHATSAPP_TEMPLATE_REMINDER_OVERDUE
+    return None
+
+
+def _vaccine_template_sub_type(cand: ReminderCandidate) -> str:
+    """Infer first-time vs booster vaccine template from pet age at due date."""
+    if not cand.pet.dob:
+        return "booster"
+    age_days = (cand.due_date - cand.pet.dob).days
+    return "first_time" if age_days <= 365 else "booster"
+
+
+def _build_variable_dict(cand: ReminderCandidate, db: Session) -> dict[str, str]:
+    """Build placeholder replacement values for category-specific templates."""
+    parent_name = cand.user.full_name or "Pet Parent"
+    pet_name = cand.pet.name
+    today = get_today_ist()
+
+    item_desc = cand.item_desc or "care item"
+    condition = "care"
+    if "(" in item_desc and ")" in item_desc:
+        condition = item_desc[item_desc.find("(") + 1:item_desc.rfind(")")]
+
+    vet = (
+        db.query(Contact)
+        .filter(Contact.pet_id == cand.pet.id, Contact.role == "veterinarian")
+        .order_by(Contact.created_at)
+        .first()
+    )
+    vet_name = vet.name if vet else "your vet"
+
+    days_overdue = max(0, (today - cand.due_date).days)
+    snooze_date = format_date_for_user(today + timedelta(days=cand.snooze_days))
+
+    return {
+        "Name": parent_name,
+        "Pet": pet_name,
+        "breed": cand.pet.breed or "your pet",
+        "date": format_date_for_user(cand.due_date),
+        "vaccineList": item_desc,
+        "Brand": item_desc,
+        "Supplement": item_desc,
+        "Medicine": item_desc,
+        "condition": condition,
+        "vetName": vet_name,
+        "testName": item_desc,
+        "X": str(days_overdue),
+        "breedSpecificConsequence": _get_breed_consequence(db, cand.pet.breed, cand.category),
+        "snoozeDate": snooze_date,
+    }
+
+
+def _is_course_medicine(med: ConditionMedication) -> bool:
+    """Identify fixed-duration course medicines from free-text duration hints."""
+    duration_pattern = re.compile(
+        r"\b(for|x|duration\s*:?\s*)\s*\d+\s*(day|days|week|weeks|month|months)\b",
+        re.IGNORECASE,
+    )
+    recurring_pattern = re.compile(r"\b(every|daily|weekly|monthly|ongoing|indefinite|long[- ]term)\b", re.IGNORECASE)
+    searchable = " ".join([
+        med.name or "",
+        med.dose or "",
+        med.frequency or "",
+        med.notes or "",
+    ])
+    if recurring_pattern.search(searchable):
+        return False
+    return bool(duration_pattern.search(searchable))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
