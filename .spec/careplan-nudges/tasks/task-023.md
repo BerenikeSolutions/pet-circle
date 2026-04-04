@@ -1,7 +1,7 @@
 ---
 task: 023
 feature: careplan-nudges
-status: pending
+status: complete
 depends_on: [022]
 ---
 
@@ -103,9 +103,28 @@ interface DashboardViewProps {
 ---
 
 ## Acceptance Criteria
-- [ ] Banner visible when nudgeCount > 0
-- [ ] Banner hidden when nudgeCount = 0
-- [ ] Banner text shows correct count and pet name
-- [ ] Tapping "View All" navigates to NudgesView
-- [ ] Count updates when returning from NudgesView after dismissals
-- [ ] `npm run build` passes
+- [x] Banner visible when nudgeCount > 0
+- [x] Banner hidden when nudgeCount = 0
+- [x] Banner text shows correct count and pet name
+- [x] Tapping "View All" navigates to NudgesView
+- [x] Count updates when returning from NudgesView after dismissals
+- [x] `npm run build` passes
+
+## Handoff — What Was Done
+- Added a new compact nudge entry card component that renders only when undismissed nudge count is greater than zero and supports full-banner tap plus View All CTA navigation.
+- Wired dashboard view props to accept and render nudge count + navigation callback between Health Conditions and Diet Analysis cards.
+- Updated dashboard client to fetch undismissed nudge count on dashboard load and refresh it when returning from NudgesView.
+
+## Handoff — Patterns Learned
+- Keep dashboard-level nudge count fetch non-blocking relative to primary dashboard data to avoid delaying first render.
+- For compact dashboard CTAs, reusing the shared card class with minimal inline overrides keeps visual consistency.
+- Preserve prior nudge count on transient nudge API failures instead of forcing zero, so action visibility does not flicker away.
+
+## Handoff — Files Changed
+- frontend/src/components/dashboard/NudgeBanner.tsx
+- frontend/src/components/dashboard/DashboardView.tsx
+- frontend/src/components/DashboardClient.tsx
+- .spec/careplan-nudges/tasks/task-023.md
+
+## Status
+COMPLETE
