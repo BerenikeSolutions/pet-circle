@@ -1,7 +1,7 @@
 ---
 task: 025
 feature: careplan-nudges
-status: pending
+status: complete
 depends_on: [020]
 ---
 
@@ -112,9 +112,24 @@ Render differentiated CTAs for food/supplement items in the care plan: use `cta_
 ---
 
 ## Acceptance Criteria
-- [ ] First-time food items show "Order Now →" CTA (from `cta_label`)
-- [ ] Repeat food items show "Reorder →" CTA (from `cta_label`)
-- [ ] Items with `status_tag: "Due Soon"` show amber badge
-- [ ] Food/supplement rows visually match vaccine row styling in Continue bucket
-- [ ] Reason text renders connecting to health/nutrition insights
-- [ ] `npm run build` passes
+- [x] First-time food items show "Order Now →" CTA (from `cta_label`)
+- [x] Repeat food items show "Reorder →" CTA (from `cta_label`)
+- [x] Items with `status_tag: "Due Soon"` show amber badge
+- [x] Food/supplement rows visually match vaccine row styling in Continue bucket
+- [x] Reason text renders connecting to health/nutrition insights
+- [x] `npm run build` passes
+
+## Handoff — What Was Done
+- Updated care-plan CTA rendering to use backend-provided `cta_label` with a safe fallback (`Order Now`) and consistent arrow suffix.
+- Added CTA normalization to prevent duplicate arrow suffixes if backend text already includes trailing punctuation/symbols.
+- Verified existing status badge mapping already renders `Due Soon` as amber (`s-tag-y`), so no extra badge-class change was needed.
+
+## Handoff — Patterns Learned
+- `itemStatusClass` in `dashboard-utils.ts` already maps any status containing `soon` to `s-tag-y`; frontend badge behavior for "Due Soon" can be achieved via backend `status_tag` alone.
+- Care plan item visual parity is shared through the existing `care-item` layout; CTA text behavior can be updated without touching row styling.
+
+## Handoff — Files Changed
+- `frontend/src/components/dashboard/CarePlanCard.tsx`
+
+## Status
+COMPLETE

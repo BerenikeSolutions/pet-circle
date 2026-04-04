@@ -61,6 +61,7 @@ export default function CarePlanCard({
                   const inCartQty = cartQtyByItem[id] || 0;
                   const isAdded = !!addedIds[id];
                   const canOrder = bucketKey !== "attend" && item.orderable && !!item.reason;
+                  const ctaText = (item.cta_label || "Order Now").replace(/\s*[→>-]+\s*$/, "");
 
                   return (
                     <div key={id} className="care-item">
@@ -94,7 +95,7 @@ export default function CarePlanCard({
                               ? `✓ Added${inCartQty > 1 ? ` (${inCartQty})` : ""}`
                               : inCartQty > 0
                                 ? `Order Again (${inCartQty} in cart)`
-                                : "Order Now →"}
+                                : `${ctaText} →`}
                           </button>
                         )}
                       </div>
