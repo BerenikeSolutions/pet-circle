@@ -6,6 +6,7 @@ import { normalizeConditions } from "./dashboard-utils";
 interface HealthConditionsCardProps {
   data: DashboardData;
   onGoToTrends: () => void;
+  compact?: boolean;
 }
 
 function shouldLimitInsights(items: HealthConditionSummary[]): boolean {
@@ -15,12 +16,16 @@ function shouldLimitInsights(items: HealthConditionSummary[]): boolean {
   });
 }
 
-export default function HealthConditionsCard({ data, onGoToTrends }: HealthConditionsCardProps) {
+export default function HealthConditionsCard({
+  data,
+  onGoToTrends,
+  compact = false,
+}: HealthConditionsCardProps) {
   const allConditions = normalizeConditions(data);
   const visible = shouldLimitInsights(allConditions) ? allConditions.slice(0, 2) : allConditions;
 
   return (
-    <div className="card">
+    <div className={compact ? undefined : "card"}>
       <div className="sec-lbl">Health Conditions</div>
 
       {allConditions.length === 0 ? (

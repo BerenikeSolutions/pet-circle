@@ -11,6 +11,7 @@ import {
 
 interface LifeStageCardProps {
   data: DashboardData;
+  compact?: boolean;
 }
 
 const TRAIT_CLASS: Record<LifeStageTrait["color"], string> = {
@@ -39,7 +40,7 @@ function traitOrder(label: string): number {
   return 1;
 }
 
-export default function LifeStageCard({ data }: LifeStageCardProps) {
+export default function LifeStageCard({ data, compact = false }: LifeStageCardProps) {
   const lifeStage = data.life_stage;
   const ageMonths = lifeStage?.age_months ?? ageMonthsFromDob(data.pet.dob) ?? 24;
   const ageLabel = formatAgeLabel(ageMonths);
@@ -64,7 +65,7 @@ export default function LifeStageCard({ data }: LifeStageCardProps) {
   const essentialCare = (lifeStage?.essential_care || []).slice(0, 2);
 
   return (
-    <div className="card" style={{ paddingBottom: 12 }}>
+    <div className={compact ? undefined : "card"} style={{ paddingBottom: 12 }}>
       <div className="sec-lbl">What to expect as {data.pet.name} turns {ageLabel}</div>
 
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "var(--t3)", marginBottom: 4 }}>

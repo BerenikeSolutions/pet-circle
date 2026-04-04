@@ -7,6 +7,7 @@ import { macroStatus, normalizeMacros } from "./dashboard-utils";
 
 interface DietAnalysisCardProps {
   data: DashboardData;
+  compact?: boolean;
 }
 
 const NOTE_COLOR: Record<"green" | "amber" | "red", string> = {
@@ -15,13 +16,13 @@ const NOTE_COLOR: Record<"green" | "amber" | "red", string> = {
   red: "#FF3B30",
 };
 
-export default function DietAnalysisCard({ data }: DietAnalysisCardProps) {
+export default function DietAnalysisCard({ data, compact = false }: DietAnalysisCardProps) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const macros = normalizeMacros(data.diet_summary?.macros || []);
   const missingMicros = (data.diet_summary?.missing_micros || []).slice(0, 3);
 
   return (
-    <div className="card">
+    <div className={compact ? undefined : "card"}>
       <div className="sec-lbl">Diet Analysis</div>
 
       <div className="donut-grid" style={{ marginBottom: 12 }}>
