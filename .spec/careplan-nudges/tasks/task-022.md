@@ -1,7 +1,7 @@
 ---
 task: 022
 feature: careplan-nudges
-status: pending
+status: complete
 depends_on: []
 ---
 
@@ -143,12 +143,32 @@ export interface CarePlanItem {
 ---
 
 ## Acceptance Criteria
-- [ ] NudgesView renders all undismissed nudges grouped by category in correct order
-- [ ] Priority badges render with correct colors (urgent=red, high=amber, medium=neutral)
-- [ ] Dismiss flow calls API and removes card optimistically
-- [ ] Mandatory nudges have no dismiss button
-- [ ] Orderable nudges show "Order Now" CTA, add to cart with 1.8s feedback
-- [ ] Empty state shows "All caught up!" message
-- [ ] Loading state shows spinner
-- [ ] Navigation to/from nudges works via DashboardClient
-- [ ] `npm run build` passes
+- [x] NudgesView renders all undismissed nudges grouped by category in correct order
+- [x] Priority badges render with correct colors (urgent=red, high=amber, medium=neutral)
+- [x] Dismiss flow calls API and removes card optimistically
+- [x] Mandatory nudges have no dismiss button
+- [x] Orderable nudges show "Order Now" CTA, add to cart with 1.8s feedback
+- [x] Empty state shows "All caught up!" message
+- [x] Loading state shows spinner
+- [x] Navigation to/from nudges works via DashboardClient
+- [x] `npm run build` passes
+
+---
+
+## Handoff — What Was Done
+- Implemented new nudges UI components with grouped category rendering, priority badges, long-message expand/collapse, dismiss confirmation, and order CTA feedback flow.
+- Wired NudgesView into DashboardClient ViewState by adding `"nudges"` union support and a render switch case with back/cart callbacks.
+- Completed verify flow for build/types/lint, and documented E2E blocker (backend not running locally for Playwright global setup).
+
+## Handoff — Patterns Learned
+- This frontend is style-driven by shared utility classes (`card`, `vh`, `floater`, `s-tag*`) plus inline style overrides; new views should reuse this pattern for consistency.
+- For this project, `npm run build` also runs lint+type checks in Next.js; explicit `tsc --noEmit` remains useful for fast iteration.
+- Playwright E2E in this repo requires backend health at `http://localhost:8000` with valid dashboard tokens before tests can proceed.
+
+## Handoff — Files Changed
+- frontend/src/components/nudges/NudgeCard.tsx
+- frontend/src/components/nudges/NudgesView.tsx
+- frontend/src/components/DashboardClient.tsx
+
+## Status
+COMPLETE

@@ -27,3 +27,9 @@ What broke: Level 2 users past slot 5 could be selected before the intended post
 Root cause: `_select_level2_message` only enforced O+N gating for slots within `[1,5,10,20,30]` and lacked explicit 30-day cadence checks for `completed >= 5`.
 Fix: Added post-schedule day gating in Level 2 using `NUDGE_POST_SCHEDULE_INTERVAL_DAYS`, with inactivity override still explicitly controlled by `ignore_schedule=True`.
 File(s): backend/app/services/nudge_scheduler.py, backend/tests/test_nudges_and_reminders_comprehensive.py
+
+## [2026-04-04] NudgesView category extras iteration failed TS target compatibility
+What broke: Frontend type-check and build failed after introducing NudgesView category grouping logic.
+Root cause: Spreading `Map.keys()` (`[...groups.keys()]`) required iterator downlevel support not available under the current TypeScript target/tooling settings.
+Fix: Replaced iterator spread with `Array.from(groups.keys())` and re-ran type/build verification.
+File(s): frontend/src/components/nudges/NudgesView.tsx

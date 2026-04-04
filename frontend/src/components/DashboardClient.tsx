@@ -9,11 +9,12 @@ import CheckoutView from "./cart/CheckoutView";
 import type { CheckoutDetails } from "./cart/CheckoutView";
 import ConfirmView from "./cart/ConfirmView";
 import DashboardView from "./dashboard/DashboardView";
+import NudgesView from "./nudges/NudgesView";
 import RecordsView from "./records/RecordsView";
 import RemindersView from "./RemindersView";
 import HealthTrendsView from "./trends/HealthTrendsView";
 
-type ViewState = "dashboard" | "trends" | "reminders" | "cart" | "checkout" | "confirm" | "records";
+type ViewState = "dashboard" | "trends" | "reminders" | "cart" | "checkout" | "confirm" | "records" | "nudges";
 
 const MAX_STALE_RETRIES = 10;
 const STALE_RETRY_BASE_MS = 10000;
@@ -317,6 +318,15 @@ function DashboardInner({ token }: { token: string }) {
             token={token}
             petName={data.pet.name}
             onBack={() => setView("dashboard")}
+          />
+        );
+      case "nudges":
+        return (
+          <NudgesView
+            token={token}
+            onBack={() => setView("dashboard")}
+            onAddToCart={addToCart}
+            cart={cart}
           />
         );
       default:
