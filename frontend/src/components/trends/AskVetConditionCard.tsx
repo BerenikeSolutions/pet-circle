@@ -29,7 +29,9 @@ export default function AskVetConditionCard({
   const points = condition.chart_data?.points || [];
   const plateletSeries = isPlateletSeries(points);
   const timeline = compressTimelineNodes(condition.timeline_data || []);
-  const questions = condition.questions.slice(0, Math.min(3, condition.questions.length));
+  const maxQuestions = 2;
+  const questions = condition.questions.slice(0, maxQuestions);
+  const hiddenQuestionsCount = Math.max(0, condition.questions.length - questions.length);
 
   return (
     <div className="card">
@@ -109,6 +111,11 @@ export default function AskVetConditionCard({
                 </div>
               );
             })}
+            {hiddenQuestionsCount > 0 && (
+              <div style={{ fontSize: 12, color: "var(--t3)", fontWeight: 600, marginTop: 2 }}>
+                +{hiddenQuestionsCount} more {hiddenQuestionsCount === 1 ? "question" : "questions"}
+              </div>
+            )}
           </div>
         </div>
       )}

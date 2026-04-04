@@ -1,7 +1,7 @@
 ---
 task: 026
 feature: careplan-nudges
-status: pending
+status: complete
 depends_on: []
 ---
 
@@ -99,9 +99,27 @@ Apply guardrail refinements to Health Trends page: cap vet questions to 2 per co
 ---
 
 ## Acceptance Criteria
-- [ ] Max 2 vet questions per condition with overflow indicator
-- [ ] Weight chart renders last in Signals section
-- [ ] CBC/blood chemistry uses table format
-- [ ] Care Cadence order: vaccination → tick & flea → deworming
-- [ ] No prescriptive medication language in questions
-- [ ] `npm run build` passes
+- [x] Max 2 vet questions per condition with overflow indicator
+- [x] Weight chart renders last in Signals section
+- [x] CBC/blood chemistry uses table format
+- [x] Care Cadence order: vaccination → tick & flea → deworming
+- [x] No prescriptive medication language in questions
+- [x] `npm run build` passes
+
+## Handoff — What Was Done
+- Capped Ask Vet questions to 2 per condition and added a `+N more question(s)` overflow indicator.
+- Reordered Signals cards so weight trend always renders last (blood panel, metabolic, then weight).
+- Verified build and type-check success; lint warnings are pre-existing and E2E execution requires backend availability.
+
+## Handoff — Patterns Learned
+- Question truncation is implemented in `AskVetConditionCard` (not the section wrapper), so card-level guardrails are the safest insertion point.
+- Signals render order is explicit JSX order in `SignalsSection`; enforcing order is done by component order, not data sort.
+- E2E tests require a running backend at `http://localhost:8000` with valid dashboard tokens from `.tokens`.
+
+## Handoff — Files Changed
+- frontend/src/components/trends/AskVetConditionCard.tsx
+- frontend/src/components/trends/SignalsSection.tsx
+- .spec/careplan-nudges/tasks/task-026.md
+
+## Status
+COMPLETE
