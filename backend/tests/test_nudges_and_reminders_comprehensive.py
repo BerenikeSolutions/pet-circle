@@ -130,9 +130,11 @@ from app.database import engine
 # dropped Supabase connection when _sort_nudges accesses nudge attributes.
 _TestSession = sessionmaker(bind=engine, expire_on_commit=False)
 from app.core.constants import (
+  NUDGE_INACTIVITY_TRIGGER_HOURS,
     NUDGE_LEVEL_0,
     NUDGE_LEVEL_1,
     NUDGE_LEVEL_2,
+  NUDGE_MAX_PER_WEEK,
     NUDGE_MIN_GAP_HOURS,
     REMINDER_IGNORE_THRESHOLD,
     SNOOZE_DAYS_DEWORMING,
@@ -149,12 +151,14 @@ from app.core.constants import (
     STAGE_T7,
 )
 from app.core.encryption import encrypt_field, hash_field
+from app.core.log_sanitizer import mask_phone
 from app.models.condition import Condition
 from app.models.condition_medication import ConditionMedication
 from app.models.condition_monitoring import ConditionMonitoring
 from app.models.diagnostic_test_result import DiagnosticTestResult
 from app.models.diet_item import DietItem
 from app.models.hygiene_preference import HygienePreference
+from app.models.message_log import MessageLog
 from app.models.nudge import Nudge
 from app.models.nudge_delivery_log import NudgeDeliveryLog
 from app.models.pet import Pet
@@ -174,10 +178,14 @@ from app.services.nudge_engine import (
 )
 from app.services.nudge_scheduler import (
     _L1_MESSAGE_TYPES,
+  _check_inactivity_trigger,
+  _count_nudges_in_window,
     _completed_slots,
+  _has_reminder_scheduled_today,
     _last_nudge_sent_at,
     _reminder_sent_today,
     _select_level0_message,
+  run_nudge_scheduler,
     calculate_nudge_level,
 )
 from app.services.reminder_engine import (
@@ -785,6 +793,83 @@ def run_section_b(db):
     db.delete(log_old)
     db.flush()
 
+    # B6b: Rolling 7-day cap (max 2 nudges/week)
+    log_week_1 = NudgeDeliveryLog(
+      id=uuid.uuid4(), pet_id=pet_l1.id, user_id=user_b.id,
+      wa_status="sent",
+      sent_at=datetime.utcnow() - timedelta(days=2),
+      nudge_level=NUDGE_LEVEL_1,
+    )
+    log_week_2 = NudgeDeliveryLog(
+      id=uuid.uuid4(), pet_id=pet_l1.id, user_id=user_b.id,
+      wa_status="sent",
+      sent_at=datetime.utcnow() - timedelta(days=6),
+      nudge_level=NUDGE_LEVEL_1,
+    )
+    log_old_window = NudgeDeliveryLog(
+      id=uuid.uuid4(), pet_id=pet_l1.id, user_id=user_b.id,
+      wa_status="sent",
+      sent_at=datetime.utcnow() - timedelta(days=9),
+      nudge_level=NUDGE_LEVEL_1,
+    )
+    db.add_all([log_week_1, log_week_2, log_old_window])
+    db.flush()
+    count_7d = _count_nudges_in_window(db, user_b.id)
+    t("B6b rolling 7-day cap counts only in-window nudges",
+      count_7d == NUDGE_MAX_PER_WEEK, f"got {count_7d}")
+    db.delete(log_week_1)
+    db.delete(log_week_2)
+    db.delete(log_old_window)
+    db.flush()
+
+    # B6c: Scheduled reminder today blocks nudge
+    rec_sched = _make_preventive_record(db, pet_guard, masters[0], 0, "upcoming") if masters else None
+    if rec_sched:
+      _make_reminder(
+        db,
+        pet_guard,
+        rec_sched.id,
+        STAGE_DUE,
+        "pending",
+        due_date=today,
+        preventive_record_id=rec_sched.id,
+      )
+      has_pending_today = _has_reminder_scheduled_today(db, user_b.id, today)
+      t("B6c scheduled reminder today -> guard triggers", has_pending_today is True)
+    else:
+      t("B6c scheduled reminder today guard [SKIP: no masters]", True)
+
+    # B6d-B6e: Inactivity trigger based on message_logs
+    masked_phone = mask_phone(_TEST_PHONE_2)
+    stale_log = MessageLog(
+      id=uuid.uuid4(),
+      mobile_number=masked_phone,
+      direction="incoming",
+      message_type="text",
+      payload={},
+      created_at=datetime.utcnow() - timedelta(hours=NUDGE_INACTIVITY_TRIGGER_HOURS + 1),
+    )
+    db.add(stale_log)
+    db.flush()
+    t("B6d inactivity trigger fires for 72h+ silent users",
+      _check_inactivity_trigger(db, user_b) is True)
+
+    fresh_log = MessageLog(
+      id=uuid.uuid4(),
+      mobile_number=masked_phone,
+      direction="outgoing",
+      message_type="template",
+      payload={},
+      created_at=datetime.utcnow() - timedelta(hours=1),
+    )
+    db.add(fresh_log)
+    db.flush()
+    t("B6e inactivity trigger does not fire for recently active users",
+      _check_inactivity_trigger(db, user_b) is False)
+    db.delete(stale_log)
+    db.delete(fresh_log)
+    db.flush()
+
       # B7-B14: Level 0 slot timing
     # Patch template key so _select_level0_message can return non-None
     from app.config import settings as _app_settings
@@ -931,11 +1016,40 @@ def run_section_b(db):
         with patch("app.services.nudge_scheduler.decrypt_field", return_value="919888877755"):
             import asyncio
 
-            from app.services.nudge_scheduler import run_nudge_scheduler as _rns
-            result_sched = asyncio.run(_rns(db))
+        result_sched = asyncio.run(run_nudge_scheduler(db))
     t("B30 run_nudge_scheduler returns dict with sent/skipped/failed",
       all(k in result_sched for k in ("sent", "skipped", "failed")),
       str(result_sched))
+
+    # B31: Skip reason logging for 7-day cap
+    cap_log_1 = NudgeDeliveryLog(
+      id=uuid.uuid4(), pet_id=pet_l2.id, user_id=user_b.id,
+      wa_status="sent",
+      sent_at=datetime.utcnow() - timedelta(days=1),
+      nudge_level=NUDGE_LEVEL_2,
+    )
+    cap_log_2 = NudgeDeliveryLog(
+      id=uuid.uuid4(), pet_id=pet_l2.id, user_id=user_b.id,
+      wa_status="sent",
+      sent_at=datetime.utcnow() - timedelta(days=3),
+      nudge_level=NUDGE_LEVEL_2,
+    )
+    db.add_all([cap_log_1, cap_log_2])
+    db.flush()
+    with patch("app.services.nudge_scheduler.logger.info") as mock_log_info:
+      with patch("app.services.whatsapp_sender.send_template_message", return_value="mock_wa_id"):
+        with patch("app.services.nudge_scheduler.decrypt_field", return_value="919888877755"):
+          import asyncio
+
+          asyncio.run(run_nudge_scheduler(db))
+    has_cap_reason = any(
+      len(c.args) >= 3 and c.args[2] == "7day_cap"
+      for c in mock_log_info.call_args_list
+    )
+    t("B31 scheduler logs skip reason for blocked nudges (7day_cap)", has_cap_reason)
+    db.delete(cap_log_1)
+    db.delete(cap_log_2)
+    db.flush()
 
     _cleanup(db, user_b.id, user_nopet.id)
 

@@ -1,8 +1,8 @@
 ## Active Feature
-Feature: dashboard-rebuild
-Spec: .spec/dashboard-rebuild/requirements.md, design.md
-Tasks: .spec/dashboard-rebuild/tasks/
-Current task: ALL TASKS COMPLETE
+Feature: careplan-nudges
+Spec: .spec/careplan-nudges/requirements.md, design.md
+Tasks: .spec/careplan-nudges/tasks/
+Current task: .spec/careplan-nudges/tasks/task-019.md
 Branch: main (no feature branch)
 
 ---

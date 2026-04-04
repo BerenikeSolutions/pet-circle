@@ -33,21 +33,26 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.constants import (
+    NUDGE_INACTIVITY_TRIGGER_HOURS,
     NUDGE_L2_DATA_PRIORITY,
     NUDGE_LEVEL_0,
     NUDGE_LEVEL_1,
     NUDGE_LEVEL_2,
+    NUDGE_MAX_PER_WEEK,
     NUDGE_MIN_GAP_HOURS,
     NUDGE_POST_SCHEDULE_INTERVAL_DAYS,
     NUDGE_SCHEDULE_DAYS,
 )
 from app.core.encryption import decrypt_field
+from app.core.log_sanitizer import mask_phone
+from app.models.message_log import MessageLog
 from app.models.nudge_delivery_log import NudgeDeliveryLog
 from app.models.nudge_message_library import NudgeMessageLibrary
 from app.models.pet import Pet
 from app.models.preventive_record import PreventiveRecord
 from app.models.reminder import Reminder
 from app.models.user import User
+from app.utils.date_utils import get_today_ist
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +76,7 @@ async def run_nudge_scheduler(db: Session) -> dict:
     """
     from app.services.whatsapp_sender import send_template_message
 
-    today = date.today()
+    today = get_today_ist()
     sent = skipped = failed = 0
 
     users = (
@@ -103,6 +108,21 @@ async def run_nudge_scheduler(db: Session) -> dict:
             # --- Guard: reminder sent today? ---
             reminder_today = _reminder_sent_today(db, user.id, today)
             if reminder_today:
+                logger.info("Nudge skipped for user %s: reason=%s", str(user.id), "reminder_sent_today")
+                skipped += 1
+                continue
+
+            # --- Guard: reminder scheduled today (pending)? ---
+            reminder_scheduled_today = _has_reminder_scheduled_today(db, user.id, today)
+            if reminder_scheduled_today:
+                logger.info("Nudge skipped for user %s: reason=%s", str(user.id), "reminder_scheduled_today")
+                skipped += 1
+                continue
+
+            # --- Guard: max nudges in rolling 7-day window? ---
+            nudge_count_7d = _count_nudges_in_window(db, user.id)
+            if nudge_count_7d >= NUDGE_MAX_PER_WEEK:
+                logger.info("Nudge skipped for user %s: reason=%s", str(user.id), "7day_cap")
                 skipped += 1
                 continue
 
@@ -111,6 +131,7 @@ async def run_nudge_scheduler(db: Session) -> dict:
             if last_nudge_at:
                 gap = datetime.utcnow() - last_nudge_at
                 if gap.total_seconds() < NUDGE_MIN_GAP_HOURS * 3600:
+                    logger.info("Nudge skipped for user %s: reason=%s", str(user.id), "min_gap_48h")
                     skipped += 1
                     continue
 
@@ -120,12 +141,29 @@ async def run_nudge_scheduler(db: Session) -> dict:
             # --- Select next message ---
             message_info = _select_next_message(db, user, primary_pet, level, today)
             if not message_info:
-                skipped += 1
-                continue
+                inactivity_triggered = _check_inactivity_trigger(db, user)
+                if not inactivity_triggered:
+                    logger.info("Nudge skipped for user %s: reason=%s", str(user.id), "not_scheduled_and_recently_active")
+                    skipped += 1
+                    continue
+
+                message_info = _select_next_message(
+                    db,
+                    user,
+                    primary_pet,
+                    level,
+                    today,
+                    ignore_schedule=True,
+                )
+                if not message_info:
+                    logger.info("Nudge skipped for user %s: reason=%s", str(user.id), "inactivity_trigger_no_message_available")
+                    skipped += 1
+                    continue
 
             template_key, vars_ = message_info
 
             if not template_key:
+                logger.info("Nudge skipped for user %s: reason=%s", str(user.id), "missing_template_key")
                 skipped += 1
                 continue
 
@@ -247,6 +285,7 @@ def _select_next_message(
     pet: Pet,
     level: int,
     today: date,
+    ignore_schedule: bool = False,
 ) -> tuple[str, list] | None:
     """
     Choose the next nudge message for this user/pet based on level and slot.
@@ -259,17 +298,21 @@ def _select_next_message(
     completed = _completed_slots(db, user.id, level)
 
     if level == NUDGE_LEVEL_0:
-        return _select_level0_message(db, pet, completed, days_since_o)
+        return _select_level0_message(db, pet, completed, days_since_o, ignore_schedule=ignore_schedule)
     elif level == NUDGE_LEVEL_1:
-        return _select_level1_message(db, pet, completed, days_since_o)
+        return _select_level1_message(db, pet, completed, days_since_o, ignore_schedule=ignore_schedule)
     else:
-        return _select_level2_message(db, user, pet, completed, days_since_o)
+        return _select_level2_message(db, user, pet, completed, days_since_o, ignore_schedule=ignore_schedule)
 
 
 # ---- Level 0 ----
 
 def _select_level0_message(
-    db: Session, pet: Pet, completed: int, days_since_o: int,
+    db: Session,
+    pet: Pet,
+    completed: int,
+    days_since_o: int,
+    ignore_schedule: bool = False,
 ) -> tuple[str, list] | None:
     """
     Level 0 schedule: Value Add messages at O+1, 5, 10, 20, 30, then cycle.
@@ -279,14 +322,15 @@ def _select_level0_message(
     """
     slot_days = NUDGE_SCHEDULE_DAYS  # [1, 5, 10, 20, 30]
 
-    if completed < len(slot_days):
-        target_day = slot_days[completed]
-        if days_since_o < target_day:
-            return None  # Not yet time for this slot
-    else:
-        # Post-schedule: send every 30 days
-        if days_since_o < slot_days[-1] + (completed - len(slot_days) + 1) * NUDGE_POST_SCHEDULE_INTERVAL_DAYS:
-            return None
+    if not ignore_schedule:
+        if completed < len(slot_days):
+            target_day = slot_days[completed]
+            if days_since_o < target_day:
+                return None  # Not yet time for this slot
+        else:
+            # Post-schedule: send every 30 days
+            if days_since_o < slot_days[-1] + (completed - len(slot_days) + 1) * NUDGE_POST_SCHEDULE_INTERVAL_DAYS:
+                return None
 
     # Pick tip text from the library (level=0, breed='All'), cycling by seq
     lib_row = (
@@ -332,7 +376,11 @@ _L1_MESSAGE_TYPES = [
 
 
 def _select_level1_message(
-    db: Session, pet: Pet, completed: int, days_since_o: int,
+    db: Session,
+    pet: Pet,
+    completed: int,
+    days_since_o: int,
+    ignore_schedule: bool = False,
 ) -> tuple[str, list] | None:
     """
     Level 1 schedule: mixed types at O+1/5/10/20/30, then cycle.
@@ -341,11 +389,14 @@ def _select_level1_message(
 
     if completed < len(slot_days):
         target_day = slot_days[completed]
-        if days_since_o < target_day:
+        if not ignore_schedule and days_since_o < target_day:
             return None
         msg_type = _L1_MESSAGE_TYPES[completed]
     else:
-        if days_since_o < slot_days[-1] + (completed - len(slot_days) + 1) * NUDGE_POST_SCHEDULE_INTERVAL_DAYS:
+        if (
+            not ignore_schedule
+            and days_since_o < slot_days[-1] + (completed - len(slot_days) + 1) * NUDGE_POST_SCHEDULE_INTERVAL_DAYS
+        ):
             return None
         msg_type = _L1_MESSAGE_TYPES[completed % len(_L1_MESSAGE_TYPES)]
 
@@ -428,6 +479,7 @@ def _select_level2_message(
     pet: Pet,
     completed: int,
     days_since_o: int,
+    ignore_schedule: bool = False,
 ) -> tuple[str, list] | None:
     """
     Level 2 schedule:
@@ -440,7 +492,7 @@ def _select_level2_message(
     """
     slot_days = NUDGE_SCHEDULE_DAYS
 
-    if completed < len(slot_days):
+    if not ignore_schedule and completed < len(slot_days):
         target_day = slot_days[completed]
         if days_since_o < target_day:
             return None
@@ -743,6 +795,74 @@ def _reminder_sent_today(db: Session, user_id: UUID, today: date) -> bool:
         .first()
     )
     return result is not None
+
+
+def _has_reminder_scheduled_today(db: Session, user_id: UUID, today: date) -> bool:
+    """
+    Return True if any reminder is scheduled (pending) today for this user.
+
+    This prevents sending a nudge on the same day a reminder is due,
+    even before the reminder is actually sent.
+    """
+    result = (
+        db.query(Reminder.id)
+        .join(Pet, Reminder.pet_id == Pet.id)
+        .filter(
+            Pet.user_id == user_id,
+            Pet.is_deleted == False,
+            Reminder.status == "pending",
+            Reminder.next_due_date == today,
+        )
+        .first()
+    )
+    return result is not None
+
+
+def _count_nudges_in_window(db: Session, user_id: UUID, window_days: int = 7) -> int:
+    """Return sent nudge count in a rolling UTC window for this user."""
+    window_start = datetime.utcnow() - timedelta(days=window_days)
+    return (
+        db.query(func.count(NudgeDeliveryLog.id))
+        .filter(
+            NudgeDeliveryLog.user_id == user_id,
+            NudgeDeliveryLog.wa_status == "sent",
+            NudgeDeliveryLog.sent_at >= window_start,
+        )
+        .scalar()
+        or 0
+    )
+
+
+def _check_inactivity_trigger(db: Session, user: User) -> bool:
+    """
+    Return True when the user's last message activity is older than the
+    inactivity threshold.
+
+    Activity is read from message_logs (both incoming and outgoing rows).
+    If no activity is found, treat as inactive.
+    """
+    try:
+        plaintext_mobile = decrypt_field(user.mobile_number)
+    except Exception:
+        logger.warning("Inactivity check failed to decrypt mobile for user %s", str(user.id))
+        return False
+
+    masked_mobile = mask_phone(plaintext_mobile)
+    last_activity = (
+        db.query(MessageLog.created_at)
+        .filter(MessageLog.mobile_number == masked_mobile)
+        .order_by(MessageLog.created_at.desc())
+        .first()
+    )
+    if not last_activity:
+        return True
+
+    last_activity_at = last_activity[0]
+    if not last_activity_at:
+        return True
+
+    inactivity_gap = datetime.utcnow() - last_activity_at
+    return inactivity_gap.total_seconds() >= NUDGE_INACTIVITY_TRIGGER_HOURS * 3600
 
 
 def _last_nudge_sent_at(db: Session, user_id: UUID) -> datetime | None:

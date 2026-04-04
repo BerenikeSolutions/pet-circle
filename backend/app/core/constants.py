@@ -338,6 +338,15 @@ NUDGE_SCHEDULE_DAYS: list[int] = [1, 5, 10, 20, 30]
 # Minimum hours between any two nudge sends for the same user (engagement gap rule).
 NUDGE_MIN_GAP_HOURS: int = 48
 
+# Maximum number of nudges that can be sent to a user in a rolling 7-day window.
+# Reminder messages are excluded because this cap applies to nudge_delivery_log only.
+NUDGE_MAX_PER_WEEK: int = 2
+
+# Inactivity threshold for forcing a nudge outside the O+N schedule.
+# If no inbound/outbound activity exists in message_logs for this long,
+# scheduler can send the next undelivered slot (subject to other guards).
+NUDGE_INACTIVITY_TRIGGER_HOURS: int = 72
+
 # Days between nudges for post-O+30 users (Level 0 / 1) and Level 2 post-slot-5.
 NUDGE_POST_SCHEDULE_INTERVAL_DAYS: int = 30
 
