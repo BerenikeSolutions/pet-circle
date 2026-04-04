@@ -1,7 +1,7 @@
 ---
 task: 019
 feature: careplan-nudges
-status: pending
+status: complete
 depends_on: []
 ---
 
@@ -159,10 +159,29 @@ def _last_nudge_sent_at(db: Session, user_id: UUID) -> datetime | None:
 ---
 
 ## Acceptance Criteria
-- [ ] `NUDGE_MAX_PER_WEEK = 2` and `NUDGE_INACTIVITY_TRIGGER_HOURS = 72` in `core/constants.py`
-- [ ] 7-day cap blocks when 2 nudges exist in rolling window
-- [ ] Inactivity trigger fires for 72hr-silent users
-- [ ] No nudge sent on same day as a reminder (sent OR scheduled)
-- [ ] Skip reasons logged for every blocked nudge
-- [ ] Unit tests pass
-- [ ] Existing tests still pass (`python -m pytest`)
+- [x] `NUDGE_MAX_PER_WEEK = 2` and `NUDGE_INACTIVITY_TRIGGER_HOURS = 72` in `core/constants.py`
+- [x] 7-day cap blocks when 2 nudges exist in rolling window
+- [x] Inactivity trigger fires for 72hr-silent users
+- [x] No nudge sent on same day as a reminder (sent OR scheduled)
+- [x] Skip reasons logged for every blocked nudge
+- [x] Unit tests pass
+- [ ] Existing tests still pass (`python -m pytest`) — blocked by unrelated pre-existing failures in `tests/unit/test_diet_summary.py`, `tests/unit/test_onboarding_*`, `tests/test_dashboard_endpoints.py`, and `tests/test_extraction_local.py`
+
+---
+
+## Handoff — What Was Done
+- Added/verified global nudge guards in scheduler: same-day scheduled reminder conflict, rolling 7-day cap, and 72-hour inactivity trigger override path.
+- Added/verified constants for nudge cap and inactivity trigger, plus structured skip-reason logging for blocked sends.
+- Strengthened scheduler coverage in comprehensive tests (weekly cap, scheduled reminder guard, inactivity trigger, skip-reason logging) and fixed test patch-scope issues.
+
+## Handoff — Patterns Learned
+- Guard ordering matters for deterministic skip reasons; broad blockers (same-day reminder) should run before cap/min-gap checks.
+- For scheduler tests, patch `app.services.nudge_scheduler.settings` directly because settings are imported at module scope.
+- Keep post-schedule cadence checks explicit for Level 2 to avoid accidental over-messaging between O+N slots.
+
+## Handoff — Files Changed
+- `backend/app/services/nudge_scheduler.py`
+- `backend/tests/test_nudges_and_reminders_comprehensive.py`
+
+## Status
+COMPLETE

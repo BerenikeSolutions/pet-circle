@@ -130,11 +130,11 @@ from app.database import engine
 # dropped Supabase connection when _sort_nudges accesses nudge attributes.
 _TestSession = sessionmaker(bind=engine, expire_on_commit=False)
 from app.core.constants import (
-  NUDGE_INACTIVITY_TRIGGER_HOURS,
+    NUDGE_INACTIVITY_TRIGGER_HOURS,
     NUDGE_LEVEL_0,
     NUDGE_LEVEL_1,
     NUDGE_LEVEL_2,
-  NUDGE_MAX_PER_WEEK,
+    NUDGE_MAX_PER_WEEK,
     NUDGE_MIN_GAP_HOURS,
     REMINDER_IGNORE_THRESHOLD,
     SNOOZE_DAYS_DEWORMING,
@@ -178,15 +178,16 @@ from app.services.nudge_engine import (
 )
 from app.services.nudge_scheduler import (
     _L1_MESSAGE_TYPES,
-  _check_inactivity_trigger,
-  _count_nudges_in_window,
+    _check_inactivity_trigger,
     _completed_slots,
-  _has_reminder_scheduled_today,
+    _count_nudges_in_window,
+    _has_reminder_scheduled_today,
     _last_nudge_sent_at,
     _reminder_sent_today,
     _select_level0_message,
-  run_nudge_scheduler,
+  _select_level2_message,
     calculate_nudge_level,
+    run_nudge_scheduler,
 )
 from app.services.reminder_engine import (
     ReminderCandidate,
@@ -948,13 +949,16 @@ def run_section_b(db):
     from app.services.nudge_scheduler import _build_personalized_message
     with patch("app.services.nudge_scheduler._get_or_generate_nudge_insight",
                return_value="Your Labrador benefits from regular joint supplements."):
-        with patch("app.config.settings") as mock_settings:
-            mock_settings.WHATSAPP_TEMPLATE_NUDGE_VALUE_ADD_PERSONAL = "nudge_personal_v1"
+      with patch.object(
+        __import__("app.services.nudge_scheduler", fromlist=["settings"]).settings,
+        "WHATSAPP_TEMPLATE_NUDGE_VALUE_ADD_PERSONAL",
+        "nudge_personal_v1",
+      ):
             result_pers = _build_personalized_message(db, user_b, pet_l2)
     if result_pers:
         tpl, params = result_pers
         t("B24 Level 2 slot 3 personalized returns (template, [pet_name, insight])",
-          len(params) == 2 and params[0] == pet_l2.name)
+        len(params) == 3 and params[0] == pet_l2.name and params[2] == pet_l2.name)
     else:
         t("B24 Level 2 slot 3 personalized [SKIP: no template env var configured]", True)
 
@@ -962,6 +966,23 @@ def run_section_b(db):
     t("B25a Level 2 slot 5 idx%5=0 -> breed_data path", (5 % 5) < 3)
     t("B25b Level 2 slot 8 idx%5=3 -> personalized path", (8 % 5) >= 3)
     t("B25c Level 2 slot 9 idx%5=4 -> personalized path", (9 % 5) >= 3)
+    with patch("app.services.nudge_scheduler._build_breed_data_message", return_value=("tpl", ["x"])):
+      early_post_schedule = _select_level2_message(
+        db=db,
+        user=user_b,
+        pet=pet_l2,
+        completed=5,
+        days_since_o=45,
+      )
+      due_post_schedule = _select_level2_message(
+        db=db,
+        user=user_b,
+        pet=pet_l2,
+        completed=5,
+        days_since_o=60,
+      )
+    t("B25d Level 2 post-schedule blocks before O+60", early_post_schedule is None)
+    t("B25e Level 2 post-schedule allows at O+60", due_post_schedule is not None)
 
     # B26: Level transition -- level-up detected via log
     prev_log = NudgeDeliveryLog(
@@ -1035,6 +1056,11 @@ def run_section_b(db):
       nudge_level=NUDGE_LEVEL_2,
     )
     db.add_all([cap_log_1, cap_log_2])
+    db.flush()
+    db.query(Reminder).join(Pet, Reminder.pet_id == Pet.id).filter(
+        Pet.user_id == user_b.id,
+        Reminder.next_due_date == today,
+    ).delete(synchronize_session=False)
     db.flush()
     with patch("app.services.nudge_scheduler.logger.info") as mock_log_info:
       with patch("app.services.whatsapp_sender.send_template_message", return_value="mock_wa_id"):

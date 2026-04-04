@@ -492,10 +492,16 @@ def _select_level2_message(
     """
     slot_days = NUDGE_SCHEDULE_DAYS
 
-    if not ignore_schedule and completed < len(slot_days):
-        target_day = slot_days[completed]
-        if days_since_o < target_day:
-            return None
+    if not ignore_schedule:
+        if completed < len(slot_days):
+            target_day = slot_days[completed]
+            if days_since_o < target_day:
+                return None
+        else:
+            # After O+30, Level 2 follows the same 30-day cadence.
+            next_day = slot_days[-1] + (completed - len(slot_days) + 1) * NUDGE_POST_SCHEDULE_INTERVAL_DAYS
+            if days_since_o < next_day:
+                return None
 
     if completed < 3:
         return _build_breed_data_message(db, pet, completed)

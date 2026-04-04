@@ -21,3 +21,9 @@ What broke: Task-012 dashboard styles were duplicated in `globals.css`, creating
 Root cause: A repeated style insertion left two full blocks for shared dashboard classes.
 Fix: Removed the duplicate block and kept a single canonical dashboard style definition.
 File(s): frontend/src/app/globals.css
+
+## [2026-04-04] Level-2 nudge post-schedule cadence skipped 30-day gate
+What broke: Level 2 users past slot 5 could be selected before the intended post-schedule window, causing over-frequent nudge eligibility.
+Root cause: `_select_level2_message` only enforced O+N gating for slots within `[1,5,10,20,30]` and lacked explicit 30-day cadence checks for `completed >= 5`.
+Fix: Added post-schedule day gating in Level 2 using `NUDGE_POST_SCHEDULE_INTERVAL_DAYS`, with inactivity override still explicitly controlled by `ignore_schedule=True`.
+File(s): backend/app/services/nudge_scheduler.py, backend/tests/test_nudges_and_reminders_comprehensive.py
