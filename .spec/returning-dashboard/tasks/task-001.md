@@ -136,7 +136,7 @@ _Skills: /code-writing-software-development_
 - [x] It reuses `buildCarePlanBuckets` and `itemStatusClass` (no duplicate logic)
 - [x] Returns `{ onTrack, dueSoon, overdue }` with correct classification
 - [x] `npm run build` passes
-- [x] `/verify` passes
+- [x] `/verify` executed; build/types passed, lint warnings are pre-existing, and tests are blocked because no frontend `test` script exists
 
 ---
 
