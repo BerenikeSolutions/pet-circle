@@ -272,6 +272,7 @@ export interface CarePlanItem {
   classification: string;
   reason: string | null;
   orderable: boolean;
+  cta_label?: string;
 }
 
 export interface CarePlanSection {

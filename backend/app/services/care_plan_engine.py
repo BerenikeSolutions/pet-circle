@@ -20,7 +20,7 @@ import statistics
 from dataclasses import dataclass
 from datetime import date, timedelta
 from enum import Enum
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 from app.models.condition import Condition
 from app.models.condition_medication import ConditionMedication
 from app.models.diet_item import DietItem
+from app.models.order import Order
 from app.models.pet import Pet
 from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
@@ -196,6 +197,14 @@ _MIN_NON_RX_GAP_DAYS: int = 30
 # from the care plan response (requirement 9.9).
 _NEXT_YEAR_THRESHOLD_DAYS: int = 365
 
+# Orderable diet-item CTA/status rules.
+_DUE_SOON_SUPPLY_DAYS: int = 7
+_CTA_ORDER_NOW: str = "Order Now"
+_CTA_REORDER: str = "Reorder"
+_STATUS_ACTIVE: str = "Active"
+_STATUS_DUE_SOON: str = "Due Soon"
+_QUALIFYING_ORDER_STATUSES: tuple[str, ...] = ("confirmed", "completed", "placed", "delivered")
+
 # Ordered keyword-to-test_type mapping for item_name normalisation.
 # Checked in order: longer / more specific patterns first to avoid false matches.
 _ITEM_NAME_PATTERNS: list[tuple[str, str]] = [
@@ -309,6 +318,7 @@ class CarePlanItemDict(TypedDict):
     classification: str   # Classification enum value
     reason: str | None    # Contextual reason (for orderable items)
     orderable: bool       # Whether an Order Now button should be shown
+    cta_label: NotRequired[str]  # Optional CTA text for orderable diet rows
 
 
 class CarePlanSectionDict(TypedDict):
@@ -717,6 +727,71 @@ def _to_sections(
     return result
 
 
+def _resolve_diet_item_order_signals(
+    db: Session,
+    pet_id: UUID,
+    diet_label: str,
+) -> tuple[str, str]:
+    """
+    Resolve CTA label and status tag for an orderable diet item.
+
+    Returns defaults ("Order Now", "Active") when no prior order exists
+    or when order lookup/supply estimation fails.
+    """
+    cta_label = _CTA_ORDER_NOW
+    status_tag = _STATUS_ACTIVE
+
+    try:
+        label = (diet_label or "").strip()
+        if not label:
+            return cta_label, status_tag
+
+        order_query = db.query(Order).filter(Order.pet_id == pet_id)
+
+        # Prefer explicit product_name when available, else fall back to
+        # free-text items_description in the current Order model.
+        if hasattr(Order, "product_name"):
+            order_query = order_query.filter(Order.product_name.ilike(f"%{label}%"))
+        else:
+            order_query = order_query.filter(Order.items_description.ilike(f"%{label}%"))
+
+        order_query = order_query.filter(Order.status.in_(_QUALIFYING_ORDER_STATUSES))
+
+        latest_order = order_query.order_by(Order.created_at.desc()).first()
+        if latest_order is None:
+            return cta_label, status_tag
+
+        latest_status = (getattr(latest_order, "status", "") or "").lower()
+        if latest_status and latest_status not in _QUALIFYING_ORDER_STATUSES:
+            return cta_label, status_tag
+
+        cta_label = _CTA_REORDER
+
+        pack_days = getattr(latest_order, "pack_days", None)
+        created_at = getattr(latest_order, "created_at", None)
+        if pack_days is None or created_at is None:
+            return cta_label, status_tag
+
+        order_date = created_at.date() if hasattr(created_at, "date") else created_at
+        if not isinstance(order_date, date):
+            return cta_label, status_tag
+
+        remaining_days = int(pack_days) - (date.today() - order_date).days
+        if remaining_days <= _DUE_SOON_SUPPLY_DAYS:
+            status_tag = _STATUS_DUE_SOON
+
+    except Exception:
+        logger.warning(
+            "Failed to resolve order signals for diet item '%s' of pet %s",
+            diet_label,
+            pet_id,
+            exc_info=True,
+        )
+        return _CTA_ORDER_NOW, _STATUS_ACTIVE
+
+    return cta_label, status_tag
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
@@ -892,15 +967,21 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
                 # Map diet type to care plan test_type.
                 tt = "supplement" if diet_item.type == "supplement" else "food"
                 item_key = f"diet_{diet_item.id}"
+                cta_label, status_tag = _resolve_diet_item_order_signals(
+                    db=db,
+                    pet_id=pet.id,
+                    diet_label=diet_item.label,
+                )
                 continue_items[item_key] = {
                     "name": diet_item.label,
                     "test_type": tt,
                     "freq": "Daily",
                     "next_due": None,
-                    "status_tag": "Active",
+                    "status_tag": status_tag,
                     "classification": Classification.PERIODIC.value,
                     "reason": None,
                     "orderable": True,
+                    "cta_label": cta_label,
                 }
         except Exception:
             logger.warning(

@@ -1,7 +1,7 @@
 ---
 task: 020
 feature: careplan-nudges
-status: pending
+status: complete
 depends_on: []
 ---
 
@@ -125,9 +125,27 @@ except Exception:
 ---
 
 ## Acceptance Criteria
-- [ ] Food/supplement items with no order history return `cta_label: "Order Now"`, `status_tag: "Active"`
-- [ ] Items with prior order return `cta_label: "Reorder"`
-- [ ] Items with low supply (≤7 days) return `status_tag: "Due Soon"`
-- [ ] Items with sufficient supply return `status_tag: "Active"`
-- [ ] Order query failure falls back gracefully
-- [ ] Existing tests still pass (`python -m pytest`)
+- [x] Food/supplement items with no order history return `cta_label: "Order Now"`, `status_tag: "Active"`
+- [x] Items with prior order return `cta_label: "Reorder"`
+- [x] Items with low supply (≤7 days) return `status_tag: "Due Soon"`
+- [x] Items with sufficient supply return `status_tag: "Active"`
+- [x] Order query failure falls back gracefully
+- [x] Existing tests still pass (`python -m pytest`)
+
+## Handoff — What Was Done
+- Added backend order-history signal resolution for orderable food/supplement care-plan rows, including `cta_label` derivation and low-supply `Due Soon` tagging.
+- Added qualifying order-status filtering and strict safe fallback to `Order Now` + `Active` on lookup/estimation failures.
+- Added/expanded unit tests for no history, reorder active, reorder due-soon, cancelled-order guard, malformed supply data fallback, and query failure fallback.
+
+## Handoff — Patterns Learned
+- For care-plan orderability logic, keep helper-level failure isolation: never block plan generation on order-history issues.
+- In this codebase, broad repo lint/type checks contain unrelated legacy noise; validate changed modules directly plus feature-specific tests.
+- Keep frontend API typings in lockstep with backend payload evolution (`CarePlanItem` optional fields).
+
+## Handoff — Files Changed
+- backend/app/services/care_plan_engine.py
+- backend/tests/unit/test_care_plan_engine.py
+- frontend/src/lib/api.ts
+
+## Status
+COMPLETE

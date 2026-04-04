@@ -2,7 +2,7 @@
 Feature: careplan-nudges
 Spec: .spec/careplan-nudges/requirements.md, design.md
 Tasks: .spec/careplan-nudges/tasks/
-Current task: .spec/careplan-nudges/tasks/task-020.md
+Current task: .spec/careplan-nudges/tasks/task-021.md
 Branch: main (no feature branch)
 
 ---

@@ -577,7 +577,15 @@ class TestComputeCarePlan:
         pet.breed = breed
         return pet
 
-    def _run_care_plan(self, pet, record_rows=None, active_meds=None, diet_rows=None):
+    def _run_care_plan(
+        self,
+        pet,
+        record_rows=None,
+        active_meds=None,
+        diet_rows=None,
+        order_row=None,
+        order_query_raises: bool = False,
+    ):
         """Run compute_care_plan with fully mocked DB session."""
         from app.services.care_plan_engine import compute_care_plan
 
@@ -600,11 +608,21 @@ class TestComputeCarePlan:
         mock_dq.filter.return_value = mock_dq
         mock_dq.all.return_value = diet_rows or []
 
+        # Mock Order query for order-history based CTA/status.
+        mock_oq = MagicMock()
+        mock_oq.filter.return_value = mock_oq
+        mock_oq.order_by.return_value = mock_oq
+        if order_query_raises:
+            mock_oq.first.side_effect = RuntimeError("order query failed")
+        else:
+            mock_oq.first.return_value = order_row
+
         # Route queries by the model being queried
         query_returns = {
             "PreventiveRecord": mock_rq,
             "ConditionMedication": mock_mq,
             "DietItem": mock_dq,
+            "Order": mock_oq,
         }
 
         def side_effect(model, *args):
@@ -738,7 +756,7 @@ class TestComputeCarePlan:
         assert "cbc_chemistry" not in all_types
 
     def test_orderable_food_in_continue_bucket(self):
-        """Diet food items should be placed in the Continue bucket as orderable."""
+        """Food with no prior order should default to Order Now + Active."""
         pet = self._make_pet()
 
         diet = MagicMock()
@@ -757,6 +775,60 @@ class TestComputeCarePlan:
         assert len(food_items) >= 1
         assert food_items[0]["orderable"] is True
         assert food_items[0]["name"] == "Royal Canin Adult"
+        assert food_items[0]["cta_label"] == "Order Now"
+        assert food_items[0]["status_tag"] == "Active"
+
+    def test_food_with_prior_order_uses_reorder_cta(self):
+        """Food with prior order and enough supply should show Reorder + Active."""
+        pet = self._make_pet()
+
+        diet = MagicMock()
+        diet.id = "diet-uuid-2"
+        diet.label = "Royal Canin Adult"
+        diet.type = "packaged"
+
+        last_order = MagicMock()
+        last_order.created_at = TODAY - timedelta(days=4)
+        last_order.pack_days = 30
+        last_order.status = "confirmed"
+
+        result = self._run_care_plan(pet, diet_rows=[diet], order_row=last_order)
+
+        food_items = [
+            item
+            for section in result["continue_items"]
+            for item in section["items"]
+            if item["test_type"] == "food"
+        ]
+        assert len(food_items) >= 1
+        assert food_items[0]["cta_label"] == "Reorder"
+        assert food_items[0]["status_tag"] == "Active"
+
+    def test_food_with_low_supply_is_due_soon(self):
+        """Food with prior order and <=7 days supply should be marked Due Soon."""
+        pet = self._make_pet()
+
+        diet = MagicMock()
+        diet.id = "diet-uuid-3"
+        diet.label = "Royal Canin Adult"
+        diet.type = "packaged"
+
+        last_order = MagicMock()
+        last_order.created_at = TODAY - timedelta(days=25)
+        last_order.pack_days = 30
+        last_order.status = "completed"
+
+        result = self._run_care_plan(pet, diet_rows=[diet], order_row=last_order)
+
+        food_items = [
+            item
+            for section in result["continue_items"]
+            for item in section["items"]
+            if item["test_type"] == "food"
+        ]
+        assert len(food_items) >= 1
+        assert food_items[0]["cta_label"] == "Reorder"
+        assert food_items[0]["status_tag"] == "Due Soon"
 
     def test_orderable_supplement_in_continue_bucket(self):
         """Supplement diet items should be placed in Continue as orderable."""
@@ -777,6 +849,83 @@ class TestComputeCarePlan:
         ]
         assert len(supp_items) >= 1
         assert supp_items[0]["orderable"] is True
+
+    def test_order_query_failure_falls_back_to_defaults(self):
+        """Order lookup failure must not break care plan and should keep defaults."""
+        pet = self._make_pet()
+
+        diet = MagicMock()
+        diet.id = "diet-uuid-4"
+        diet.label = "Royal Canin Adult"
+        diet.type = "packaged"
+
+        result = self._run_care_plan(
+            pet,
+            diet_rows=[diet],
+            order_query_raises=True,
+        )
+
+        food_items = [
+            item
+            for section in result["continue_items"]
+            for item in section["items"]
+            if item["test_type"] == "food"
+        ]
+        assert len(food_items) >= 1
+        assert food_items[0]["cta_label"] == "Order Now"
+        assert food_items[0]["status_tag"] == "Active"
+
+    def test_cancelled_order_does_not_trigger_reorder(self):
+        """Cancelled latest order must not drive reorder CTA."""
+        pet = self._make_pet()
+
+        diet = MagicMock()
+        diet.id = "diet-uuid-5"
+        diet.label = "Royal Canin Adult"
+        diet.type = "packaged"
+
+        cancelled_order = MagicMock()
+        cancelled_order.created_at = TODAY - timedelta(days=2)
+        cancelled_order.pack_days = 30
+        cancelled_order.status = "cancelled"
+
+        result = self._run_care_plan(pet, diet_rows=[diet], order_row=cancelled_order)
+
+        food_items = [
+            item
+            for section in result["continue_items"]
+            for item in section["items"]
+            if item["test_type"] == "food"
+        ]
+        assert len(food_items) >= 1
+        assert food_items[0]["cta_label"] == "Order Now"
+        assert food_items[0]["status_tag"] == "Active"
+
+    def test_malformed_supply_data_falls_back_to_defaults(self):
+        """Invalid pack_days should not crash and should keep default CTA/status."""
+        pet = self._make_pet()
+
+        diet = MagicMock()
+        diet.id = "diet-uuid-6"
+        diet.label = "Royal Canin Adult"
+        diet.type = "packaged"
+
+        bad_order = MagicMock()
+        bad_order.created_at = TODAY - timedelta(days=5)
+        bad_order.pack_days = "unknown"
+        bad_order.status = "confirmed"
+
+        result = self._run_care_plan(pet, diet_rows=[diet], order_row=bad_order)
+
+        food_items = [
+            item
+            for section in result["continue_items"]
+            for item in section["items"]
+            if item["test_type"] == "food"
+        ]
+        assert len(food_items) >= 1
+        assert food_items[0]["cta_label"] == "Order Now"
+        assert food_items[0]["status_tag"] == "Active"
 
     def test_attend_bucket_has_no_orderable_items(self):
         """Attend To bucket must not contain orderable items (req 8.7)."""
