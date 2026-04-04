@@ -2,7 +2,7 @@
 Feature: returning-dashboard
 Spec: .spec/returning-dashboard/requirements.md, design.md
 Tasks: .spec/returning-dashboard/tasks/
-Current task: .spec/returning-dashboard/tasks/task-004.md
+Current task: .spec/returning-dashboard/tasks/task-005.md
 Branch: main (no feature branch)
 
 ---

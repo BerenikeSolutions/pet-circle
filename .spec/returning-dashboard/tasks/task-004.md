@@ -1,7 +1,7 @@
 ---
 task: 004
 feature: returning-dashboard
-status: pending
+status: complete
 depends_on: [002]
 ---
 
@@ -116,20 +116,45 @@ _Skills: /code-writing-software-development_
 
 ## Acceptance Criteria
 
-- [ ] Component renders a `CollapsibleCard` with title "Analysis"
-- [ ] Collapsed by default (`defaultOpen={false}`)
-- [ ] Expanding shows LifeStageCard, HealthConditionsCard, DietAnalysisCard in order
-- [ ] All 3 inner cards use `compact={true}` — no double card borders
-- [ ] HealthConditionsCard retains `onGoToTrends` navigation
-- [ ] `npm run build` passes
-- [ ] `/verify` passes
+- [x] Component renders a `CollapsibleCard` with title "Analysis"
+- [x] Collapsed by default (`defaultOpen={false}`)
+- [x] Expanding shows LifeStageCard, HealthConditionsCard, DietAnalysisCard in order
+- [x] All 3 inner cards use `compact={true}` — no double card borders
+- [x] HealthConditionsCard retains `onGoToTrends` navigation
+- [x] `npm run build` passes
+- [x] `/verify` passes
 
 ---
 
 ## Handoff to Next Task
 > Fill via `/task-handoff` after completing this task.
 
-**Files changed:** _(fill via /task-handoff)_
-**Decisions made:** _(fill via /task-handoff)_
-**Context for next task:** _(fill via /task-handoff)_
-**Open questions:** _(fill via /task-handoff)_
+**Files changed:**
+- `frontend/src/components/dashboard/AnalysisSummaryCard.tsx`
+
+**Decisions made:**
+- Kept the component as a pure wrapper around `CollapsibleCard` with internal spacing via a flex column `gap`.
+- Passed `defaultOpen={false}` explicitly even though it is the primitive default, for clarity against requirement 3.1.
+
+**Context for next task:**
+- Analysis cards already support `compact` and are consumed in this new component.
+- `npm run build` and `npx tsc --noEmit` pass; lint shows only pre-existing warnings.
+
+**Open questions:**
+- `frontend/src/components/dashboard/` is ignored for new files in `.gitignore`; future new files in this folder require `git add -f` until ignore rule is adjusted.
+
+## Handoff — What Was Done
+- Implemented `AnalysisSummaryCard` with `CollapsibleCard`, icon "📊", title "Analysis", and `defaultOpen={false}`.
+- Added ordered inner rendering of `LifeStageCard`, `HealthConditionsCard`, and `DietAnalysisCard` with `compact` enabled.
+- Applied consistent inner spacing so expanded content remains readable without nested `.card` borders.
+
+## Handoff — Patterns Learned
+- Existing dashboard analysis cards are already compatible with `compact` rendering for collapsible embedding.
+- Verification should be run from `frontend` with `npm.cmd`/`npx.cmd` on this Windows environment.
+
+## Handoff — Files Changed
+- `frontend/src/components/dashboard/AnalysisSummaryCard.tsx`
+- `.spec/returning-dashboard/tasks/task-004.md`
+
+## Status
+COMPLETE
