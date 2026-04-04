@@ -1,7 +1,7 @@
 ---
 task: 024
 feature: careplan-nudges
-status: pending
+status: complete
 depends_on: []
 ---
 
@@ -110,10 +110,28 @@ const traits = (lifeStage?.traits || []).slice(0, 8);
 ---
 
 ## Acceptance Criteria
-- [ ] Conditions sorted by severity (red first) then recency (most recent first)
-- [ ] Puppy dashboard shows overdue preventive items as pseudo-conditions
-- [ ] No alarming language ("Urgent" → "High Priority", no specific drug recommendations)
-- [ ] Trait pills limited to 2 lines (CSS overflow hidden)
-- [ ] Traits ordered: behavior/energy → appetite/physiology → clinical
-- [ ] Diet thresholds: calories >100% = amber, others >110% = amber, <80% = red
-- [ ] `npm run build` passes
+- [x] Conditions sorted by severity (red first) then recency (most recent first)
+- [x] Puppy dashboard shows overdue preventive items as pseudo-conditions
+- [x] No alarming language ("Urgent" → "High Priority", no specific drug recommendations)
+- [x] Trait pills limited to 2 lines (CSS overflow hidden)
+- [x] Traits ordered: behavior/energy → appetite/physiology → clinical
+- [x] Diet thresholds: calories >100% = amber, others >110% = amber, <80% = red
+- [x] `npm run build` passes
+
+## Handoff — What Was Done
+- Implemented severity + recency sorting in `normalizeConditions()` and added puppy-only preventive gap pseudo-conditions from `care_plan_v2.attend` when items are truly overdue.
+- Added language guardrails for condition text by replacing "Urgent" with "High Priority" and replacing drug/dosage-specific insights with neutral "ask your vet" guidance.
+- Added behavior-first trait ordering and strict 2-row trait pill cap in `LifeStageCard`, and aligned `macroStatus()` thresholds to the spec (calories: >100 amber, else green; others: >110 amber, <80 red).
+
+## Handoff — Patterns Learned
+- Dashboard condition summaries can carry recency metadata indirectly; fallback recency from `conditions.diagnosed_at/created_at` keeps ordering stable.
+- `care_plan_v2.attend` is a reliable source for preventive gap extraction, but overdue filtering must avoid matching "due soon/upcoming".
+- Guardrail sanitization should be minimal and targeted to avoid flattening safe, informative clinical text.
+
+## Handoff — Files Changed
+- frontend/src/components/dashboard/dashboard-utils.ts
+- frontend/src/components/dashboard/LifeStageCard.tsx
+- .spec/careplan-nudges/tasks/task-024.md
+
+## Status
+COMPLETE

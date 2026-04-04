@@ -27,6 +27,18 @@ function getStageStarts() {
   }, []);
 }
 
+function traitOrder(label: string): number {
+  const value = label.toLowerCase();
+  const behaviorKeywords = ["energy", "play", "playful", "anxiety", "anxious", "active", "restless", "behavior", "temperament", "social"];
+  const physiologyKeywords = ["appetite", "weight", "metabolism", "digestion", "sleep", "hydration", "coat", "hunger", "thirst"];
+  const clinicalKeywords = ["joint", "dental", "pain", "stiff", "limp", "vomit", "diarr", "itch", "rash", "infection", "cardiac"];
+
+  if (behaviorKeywords.some((keyword) => value.includes(keyword))) return 0;
+  if (physiologyKeywords.some((keyword) => value.includes(keyword))) return 1;
+  if (clinicalKeywords.some((keyword) => value.includes(keyword))) return 2;
+  return 1;
+}
+
 export default function LifeStageCard({ data }: LifeStageCardProps) {
   const lifeStage = data.life_stage;
   const ageMonths = lifeStage?.age_months ?? ageMonthsFromDob(data.pet.dob) ?? 24;
@@ -41,7 +53,14 @@ export default function LifeStageCard({ data }: LifeStageCardProps) {
   const markerPctRaw = adultStart + posInAdult * adultWidth;
   const markerPct = Math.max(0, Math.min(100, markerPctRaw));
 
-  const traits = (lifeStage?.traits || []).slice(0, 8);
+  const traits = (lifeStage?.traits || [])
+    .map((trait, index) => ({ trait, index }))
+    .sort((a, b) => {
+      const orderDiff = traitOrder(a.trait.label) - traitOrder(b.trait.label);
+      return orderDiff !== 0 ? orderDiff : a.index - b.index;
+    })
+    .map((entry) => entry.trait)
+    .slice(0, 8);
   const essentialCare = (lifeStage?.essential_care || []).slice(0, 2);
 
   return (
@@ -90,7 +109,7 @@ export default function LifeStageCard({ data }: LifeStageCardProps) {
       </div>
 
       {traits.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 10 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 10, maxHeight: "52px", overflow: "hidden" }}>
           {traits.map((trait) => (
             <span
               key={trait.label}

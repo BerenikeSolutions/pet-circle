@@ -83,21 +83,124 @@ export function normalizeRecognitionBullets(data: DashboardData): RecognitionBul
   return [...capped].sort((a, b) => orderScore(a.label) - orderScore(b.label));
 }
 
-export function normalizeConditions(data: DashboardData): HealthConditionSummary[] {
-  if (data.health_conditions_summary && data.health_conditions_summary.length > 0) {
-    return data.health_conditions_summary;
-  }
+const SEVERITY_ORDER: Record<string, number> = {
+  critical: 0,
+  severe: 0,
+  high: 0,
+  red: 0,
+  moderate: 1,
+  medium: 1,
+  amber: 1,
+  yellow: 1,
+  mild: 2,
+  low: 2,
+  green: 2,
+};
 
-  return (data.conditions || [])
-    .filter((condition) => condition.is_active)
-    .map((condition) => ({
-      id: condition.id,
-      icon: condition.icon || "🩺",
-      title: condition.name,
-      severity: "red",
-      trend_label: "Active",
-      insight: condition.notes || "Keep discussing progress with your vet.",
-    }));
+const PREVENTIVE_ITEM_KW = ["vaccine", "vaccination", "rabies", "deworm", "flea", "tick", "preventive"];
+const OVERDUE_ITEM_KW = ["overdue", "missed", "pending", "late"];
+
+function severityRank(condition: HealthConditionSummary): number {
+  const severityText = [condition.severity, condition.trend_label].join(" ").toLowerCase();
+  const severityKey = Object.keys(SEVERITY_ORDER).find((key) => severityText.includes(key));
+  return severityKey ? SEVERITY_ORDER[severityKey] : 3;
+}
+
+function toTimestamp(raw: unknown): number {
+  if (typeof raw !== "string" || !raw.trim()) return 0;
+  const ts = new Date(raw).getTime();
+  return Number.isNaN(ts) ? 0 : ts;
+}
+
+function sanitizeTrendLabel(label: string): string {
+  return label.replace(/urgent/gi, "High Priority");
+}
+
+function sanitizeInsight(insight: string): string {
+  const safe = insight.replace(/urgent/gi, "High Priority");
+  const medicationPattern = /\b(tablet|capsule|syrup|dose|doses|amoxicillin|prednisone|doxycycline|metronidazole|gabapentin|carprofen|clavamox)\b|(\d+(\.\d+)?\s?(mg|ml))\b/i;
+  if (medicationPattern.test(safe)) {
+    return "Monitor this closely and ask your vet for the right diagnosis and treatment plan.";
+  }
+  return safe;
+}
+
+function isPreventiveGap(item: CarePlanItem): boolean {
+  const text = `${item.name} ${item.test_type} ${item.status_tag}`.toLowerCase();
+  const status = (item.status_tag || "").toLowerCase();
+  const explicitlyNotOverdue = status.includes("soon") || status.includes("upcoming");
+  return !explicitlyNotOverdue
+    && PREVENTIVE_ITEM_KW.some((kw) => text.includes(kw))
+    && OVERDUE_ITEM_KW.some((kw) => text.includes(kw));
+}
+
+function buildPuppyPreventiveGaps(data: DashboardData): HealthConditionSummary[] {
+  if (data.life_stage?.stage !== "puppy") return [];
+
+  const attendSections = data.care_plan_v2?.attend || [];
+  const gapItems = attendSections.flatMap((section) => section.items).filter(isPreventiveGap);
+
+  return gapItems.map((item, index) => ({
+    id: `prev_${item.test_type || "preventive"}_${index}`,
+    icon: "🛡️",
+    title: `${item.name} overdue`,
+    severity: "high",
+    trend_label: "preventive gap",
+    insight: "Preventive care is overdue. Ask your vet for the safest catch-up plan.",
+  }));
+}
+
+function sortConditionsBySeverityAndRecency(
+  conditions: HealthConditionSummary[],
+  datesById: Map<string, number>
+): HealthConditionSummary[] {
+  return [...conditions].sort((a, b) => {
+    const severityDiff = severityRank(a) - severityRank(b);
+    if (severityDiff !== 0) return severityDiff;
+
+    const aRecency = Math.max(
+      toTimestamp((a as HealthConditionSummary & { last_detected?: string }).last_detected),
+      toTimestamp((a as HealthConditionSummary & { first_detected?: string }).first_detected),
+      datesById.get(a.id) || 0
+    );
+    const bRecency = Math.max(
+      toTimestamp((b as HealthConditionSummary & { last_detected?: string }).last_detected),
+      toTimestamp((b as HealthConditionSummary & { first_detected?: string }).first_detected),
+      datesById.get(b.id) || 0
+    );
+    return bRecency - aRecency;
+  });
+}
+
+export function normalizeConditions(data: DashboardData): HealthConditionSummary[] {
+  const conditionDates = new Map(
+    (data.conditions || []).map((condition) => [
+      condition.id,
+      toTimestamp(condition.diagnosed_at) || toTimestamp(condition.created_at),
+    ])
+  );
+
+  const base = data.health_conditions_summary && data.health_conditions_summary.length > 0
+    ? data.health_conditions_summary
+    : (data.conditions || [])
+      .filter((condition) => condition.is_active)
+      .map((condition) => ({
+        id: condition.id,
+        icon: condition.icon || "🩺",
+        title: condition.name,
+        severity: "high",
+        trend_label: "Active",
+        insight: condition.notes || "Keep discussing progress with your vet.",
+      }));
+
+  const sanitized = base.map((condition) => ({
+    ...condition,
+    trend_label: sanitizeTrendLabel(condition.trend_label || ""),
+    insight: sanitizeInsight(condition.insight || "Keep discussing progress with your vet."),
+  }));
+
+  const withPuppyGaps = [...sanitized, ...buildPuppyPreventiveGaps(data)];
+  return sortConditionsBySeverityAndRecency(withPuppyGaps, conditionDates);
 }
 
 export function normalizeMacros(macros: DietMacroSummary[] = []): DietMacroSummary[] {
@@ -113,10 +216,8 @@ export function normalizeMacros(macros: DietMacroSummary[] = []): DietMacroSumma
 
 export function macroStatus(name: string, pct: number): "green" | "amber" | "red" {
   const metric = name.toLowerCase();
-  if (metric.includes("omega") && pct <= 15) return "red";
   if (metric.includes("calorie")) {
     if (pct > 100) return "amber";
-    if (pct < 80) return "red";
     return "green";
   }
 
