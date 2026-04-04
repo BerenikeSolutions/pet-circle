@@ -1,8 +1,8 @@
 ## Active Feature
-Feature: careplan-nudges
-Spec: .spec/careplan-nudges/requirements.md, design.md
-Tasks: .spec/careplan-nudges/tasks/
-Current task: ALL TASKS COMPLETE
+Feature: returning-dashboard
+Spec: .spec/returning-dashboard/requirements.md, design.md
+Tasks: .spec/returning-dashboard/tasks/
+Current task: .spec/returning-dashboard/tasks/task-002.md
 Branch: main (no feature branch)
 
 ---
