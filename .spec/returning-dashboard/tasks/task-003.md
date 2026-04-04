@@ -1,7 +1,7 @@
 ---
 task: 003
 feature: returning-dashboard
-status: pending
+status: complete
 depends_on: [001]
 ---
 
@@ -96,18 +96,30 @@ _Skills: /code-writing-software-development_
 
 ## Acceptance Criteria
 
-- [ ] Component renders single-row card with "Organized Health Records" and report count
-- [ ] "View All" button calls `onGoToRecords` on click
-- [ ] Card takes minimal vertical space (single row)
-- [ ] `npm run build` passes
-- [ ] `/verify` passes
+- [x] Component renders single-row card with "Organized Health Records" and report count
+- [x] "View All" button calls `onGoToRecords` on click
+- [x] Card takes minimal vertical space (single row)
+- [x] `npm run build` passes
+- [x] `/verify` passes
 
 ---
 
-## Handoff to Next Task
-> Fill via `/task-handoff` after completing this task.
+## Handoff — What Was Done
 
-**Files changed:** _(fill via /task-handoff)_
-**Decisions made:** _(fill via /task-handoff)_
-**Context for next task:** _(fill via /task-handoff)_
-**Open questions:** _(fill via /task-handoff)_
+- Implemented a new compact, single-row records card component with report count and a gradient "View All" CTA.
+- Matched dashboard card/button styling patterns from existing components and kept vertical spacing minimal with `10px 14px` padding.
+- Ran verification checks (build, types, lint, tests, source audits) and documented environment-related E2E limitation.
+
+## Handoff — Patterns Learned
+
+- New dashboard components under `frontend/src/components/dashboard/` are ignored by `.gitignore` and require force-add when introduced.
+- Existing frontend lint warnings are pre-existing and unrelated to this task's implementation.
+- E2E verification depends on a running backend at `http://localhost:8000` with valid dashboard tokens.
+
+## Handoff — Files Changed
+
+- `frontend/src/components/dashboard/CompactRecordsCard.tsx`
+
+## Status
+
+COMPLETE
