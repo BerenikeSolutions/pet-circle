@@ -1,7 +1,7 @@
 ---
 task: 027
 feature: careplan-nudges
-status: pending
+status: complete
 depends_on: []
 ---
 
@@ -89,10 +89,29 @@ Apply guardrail refinements to the Records view: verify tab order (Vet Visits, L
 ---
 
 ## Acceptance Criteria
-- [ ] Tab order: Vet Visits, Lab Reports, Imaging, WhatsApp Channel
-- [ ] Latest vet visit card expanded by default, others collapsed
-- [ ] Expanded view shows Rx summary, medication rows, notes
-- [ ] Link to full Rx document if available
-- [ ] Key finding pills on all record cards
-- [ ] "View" button on all record cards
-- [ ] `npm run build` passes
+- [x] Tab order: Vet Visits, Lab Reports, Imaging, WhatsApp Channel
+- [x] Latest vet visit card expanded by default, others collapsed
+- [x] Expanded view shows Rx summary, medication rows, notes
+- [x] Link to full Rx document if available
+- [x] Key finding pills on all record cards
+- [x] "View" button on all record cards
+- [x] `npm run build` passes
+
+## Handoff — What Was Done
+- Added document View links on all records cards, including collapsed vet visit cards.
+- Added key-finding pill support end-to-end (`records-v2` payload + frontend rendering with safe fallback).
+- Kept existing collapsible behavior (latest visit expanded by default) and preserved expanded Rx summary, medications, and notes.
+
+## Handoff — Patterns Learned
+- `records-v2` supports additive fields safely because the response model uses `dict[str, Any]` for item payloads.
+- Frontend verification in this repo should rely on `npm.cmd`/`npx.cmd` task execution on Windows.
+- Build can pass with pre-existing warnings; treat warnings separately unless task requires cleanup.
+
+## Handoff — Files Changed
+- backend/app/services/records_service.py
+- frontend/src/lib/api.ts
+- frontend/src/components/records/RecordsView.tsx
+- frontend/src/components/records/VetVisitCard.tsx
+
+## Status
+COMPLETE

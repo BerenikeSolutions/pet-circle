@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { RecordItem, RecordsV2 } from "@/lib/api";
-import { fetchRecords } from "@/lib/api";
+import { fetchRecords, getDashboardDocumentUrl } from "@/lib/api";
 import VetVisitCard from "./VetVisitCard";
 
 type RecordsTabId = "vet_visits" | "lab_reports" | "imaging" | "whatsapp";
@@ -39,7 +39,10 @@ function EmptyState({ text }: { text: string }) {
   );
 }
 
-function RecordCard({ record }: { record: RecordItem }) {
+function RecordCard({ record, token }: { record: RecordItem; token: string }) {
+  const documentUrl = getDashboardDocumentUrl(token, record.id);
+  const keyFindingLabel = record.key_finding || record.tag;
+
   return (
     <article className="card" style={{ padding: 14 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -74,10 +77,28 @@ function RecordCard({ record }: { record: RecordItem }) {
             whiteSpace: "nowrap",
           }}
         >
-          {record.tag}
+          {keyFindingLabel}
         </span>
       </div>
-      <div style={{ marginTop: 10, fontSize: 12, color: "var(--orange)", fontWeight: 700 }}>View →</div>
+      <div style={{ marginTop: 10 }}>
+        <a
+          href={documentUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 12,
+            color: "var(--orange)",
+            fontWeight: 700,
+            textDecoration: "none",
+          }}
+          aria-label={`View ${record.title}`}
+        >
+          View
+        </a>
+      </div>
     </article>
   );
 }
@@ -151,7 +172,7 @@ export default function RecordsView({ token, petName, onBack }: RecordsViewProps
       return (
         <div>
           {visits.map((visit, index) => (
-            <VetVisitCard key={visit.id} visit={visit} defaultOpen={index === 0} />
+            <VetVisitCard key={visit.id} visit={visit} defaultOpen={index === 0} token={token} />
           ))}
         </div>
       );
@@ -164,7 +185,7 @@ export default function RecordsView({ token, petName, onBack }: RecordsViewProps
     return (
       <div>
         {filteredRecords.map((record) => (
-          <RecordCard key={record.id} record={record} />
+          <RecordCard key={record.id} record={record} token={token} />
         ))}
       </div>
     );

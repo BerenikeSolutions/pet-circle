@@ -113,6 +113,44 @@ def _extract_notes(conditions: list[Condition]) -> str | None:
     return " | ".join(dict.fromkeys(notes))
 
 
+def _extract_visit_key_finding(document: Document, conditions: list[Condition]) -> str:
+    """Build compact key-finding text for vet visit pill display."""
+    diagnoses = [
+        condition.diagnosis.strip()
+        for condition in conditions
+        if condition.diagnosis and condition.diagnosis.strip()
+    ]
+    if diagnoses:
+        return diagnoses[0]
+
+    for condition in conditions:
+        for medication in condition.medications:
+            if (medication.status or "active") != "active":
+                continue
+            if medication.name and medication.name.strip():
+                return f"Rx: {medication.name.strip()}"
+
+    if document.document_name and document.document_name.strip():
+        return document.document_name.strip()
+
+    return "Prescription reviewed"
+
+
+def _extract_record_key_finding(document: Document, record_type: str) -> str:
+    """Provide concise key-finding fallback text for non-prescription records."""
+    if document.document_name and document.document_name.strip():
+        return document.document_name.strip()
+
+    if record_type == "lab_reports":
+        return "Lab report reviewed"
+    if record_type == "imaging":
+        return "Imaging findings reviewed"
+    if record_type == "whatsapp":
+        return "Shared on WhatsApp"
+
+    return "Record reviewed"
+
+
 def _fetch_documents(db: Session, pet_id: Any) -> list[Document]:
     """Load successful documents for one pet, newest event first."""
     return (
@@ -191,6 +229,7 @@ async def get_records(db: Session, pet: Pet) -> dict[str, Any]:
                 "tag": style["tag"],
                 "tag_color": style["tag_color"],
                 "tag_bg": style["tag_bg"],
+                "key_finding": _extract_visit_key_finding(document, linked_conditions),
                 "rx": _extract_rx_summary(document, linked_conditions),
                 "medications": _extract_medications(linked_conditions),
                 "notes": _extract_notes(linked_conditions),
@@ -214,6 +253,7 @@ async def get_records(db: Session, pet: Pet) -> dict[str, Any]:
                 "tag": style["tag"],
                 "tag_color": style["tag_color"],
                 "tag_bg": style["tag_bg"],
+                "key_finding": _extract_record_key_finding(document, record_type),
             }
         )
 

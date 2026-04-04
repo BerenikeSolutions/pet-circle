@@ -462,6 +462,7 @@ export interface VetVisit {
   tag: string;
   tag_color: string;
   tag_bg: string;
+  key_finding?: string;
   rx: string;
   medications: VetVisitMedication[];
   notes: string | null;
@@ -476,6 +477,7 @@ export interface RecordItem {
   tag: string;
   tag_color: string;
   tag_bg: string;
+  key_finding?: string;
 }
 
 export interface RecordsV2 {
@@ -1044,6 +1046,10 @@ export async function fetchRecords(token: string): Promise<RecordsV2> {
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+export function getDashboardDocumentUrl(token: string, documentId: string): string {
+  return `${API_BASE}/dashboard/${token}/document/${documentId}`;
 }
 
 // --- Diet Items & Nutrition API ---

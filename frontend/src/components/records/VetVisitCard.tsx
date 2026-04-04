@@ -2,10 +2,12 @@
 
 import { useEffect, useState } from "react";
 import type { VetVisit } from "@/lib/api";
+import { getDashboardDocumentUrl } from "@/lib/api";
 
 interface VetVisitCardProps {
   visit: VetVisit;
   defaultOpen: boolean;
+  token: string;
 }
 
 function formatDate(value: string | null): string {
@@ -19,10 +21,12 @@ function formatDate(value: string | null): string {
   }).format(date);
 }
 
-export default function VetVisitCard({ visit, defaultOpen }: VetVisitCardProps) {
+export default function VetVisitCard({ visit, defaultOpen, token }: VetVisitCardProps) {
   const [open, setOpen] = useState(defaultOpen);
   const buttonId = `visit-toggle-${visit.id}`;
   const panelId = `visit-panel-${visit.id}`;
+  const documentUrl = getDashboardDocumentUrl(token, visit.id);
+  const keyFindingLabel = visit.key_finding || visit.tag;
 
   useEffect(() => {
     setOpen(defaultOpen);
@@ -65,7 +69,7 @@ export default function VetVisitCard({ visit, defaultOpen }: VetVisitCardProps) 
                 whiteSpace: "nowrap",
               }}
             >
-              {visit.tag}
+              {keyFindingLabel}
             </span>
             <button
               id={buttonId}
@@ -91,6 +95,26 @@ export default function VetVisitCard({ visit, defaultOpen }: VetVisitCardProps) 
             >
               ▾
             </button>
+          </div>
+
+          <div style={{ marginTop: 8 }}>
+            <a
+              href={documentUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 12,
+                color: "var(--orange)",
+                fontWeight: 700,
+                textDecoration: "none",
+              }}
+              aria-label={`View prescription for ${visit.title}`}
+            >
+              View
+            </a>
           </div>
 
           {open && (
