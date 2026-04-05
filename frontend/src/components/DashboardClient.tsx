@@ -9,6 +9,7 @@ import CheckoutView from "./cart/CheckoutView";
 import type { CheckoutDetails } from "./cart/CheckoutView";
 import ConfirmView from "./cart/ConfirmView";
 import DashboardView from "./dashboard/DashboardView";
+import ReturningDashboardView from "./dashboard/ReturningDashboardView";
 import NudgesView from "./nudges/NudgesView";
 import RecordsView from "./records/RecordsView";
 import RemindersView from "./RemindersView";
@@ -254,9 +255,11 @@ function DashboardInner({ token }: { token: string }) {
 
   const renderView = () => {
     switch (view) {
-      case "dashboard":
+      case "dashboard": {
+        const isReturning = (data.documents?.length ?? 0) > 0;
+        const ViewComponent = isReturning ? ReturningDashboardView : DashboardView;
         return (
-          <DashboardView
+          <ViewComponent
             data={data}
             cartCount={cartCount}
             cartTotal={cartTotal}
@@ -270,6 +273,7 @@ function DashboardInner({ token }: { token: string }) {
             nudgeCount={nudgeCount}
           />
         );
+      }
       case "trends":
         return (
           <HealthTrendsView
