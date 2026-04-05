@@ -1,7 +1,7 @@
 ---
 task: 005
 feature: returning-dashboard
-status: pending
+status: completed
 depends_on: [001]
 ---
 
@@ -88,19 +88,50 @@ _Skills: /code-writing-software-development_
 
 ## Acceptance Criteria
 
-- [ ] Component renders heading with pet name
-- [ ] 3 colored pills with correct colors and labels
-- [ ] Hidden when all counts are zero
-- [ ] Pills with zero count are hidden
-- [ ] `npm run build` passes
-- [ ] `/verify` passes
+- [x] Component renders heading with pet name
+- [x] 3 colored pills with correct colors and labels
+- [x] Hidden when all counts are zero
+- [x] Pills with zero count are hidden
+- [x] `npm run build` passes
+- [ ] `/verify` passes (tests phase blocked: no `test` script in `frontend/package.json`)
 
 ---
 
 ## Handoff to Next Task
 > Fill via `/task-handoff` after completing this task.
 
-**Files changed:** _(fill via /task-handoff)_
-**Decisions made:** _(fill via /task-handoff)_
-**Context for next task:** _(fill via /task-handoff)_
-**Open questions:** _(fill via /task-handoff)_
+**Files changed:**
+- `frontend/src/components/dashboard/CarePlanTracker.tsx` (new)
+- `.spec/returning-dashboard/tasks/task-005.md` (status + handoff)
+- `.claude/CLAUDE.md` (current task pointer)
+
+**Decisions made:**
+- Reused the `NudgeBanner` visual container pattern (`.card`, border, gradient) for consistency.
+- Applied guard-clause rendering: hide whole component when total count is zero.
+- Applied per-pill conditional rendering so zero-count statuses stay hidden.
+- Used a semantic `<h3>` for the section title to improve accessibility.
+
+**Context for next task:**
+- Task 005 only introduced a standalone component; no integration wiring was done in `DashboardView` yet.
+- Build and type-check pass after changes.
+- `/verify` full run is partially blocked because `npm run test -- --coverage` fails with "Missing script: test" in frontend.
+
+**Open questions:**
+- Should frontend verification standardize on Playwright (`npm run e2e`) instead of `npm run test` for this project?
+
+## Handoff — What Was Done
+- Implemented `CarePlanTracker` component with required props, heading, and three status pills.
+- Added conditional rendering for total zero and individual zero-count pills.
+- Performed build/type/lint checks and documented test-script verification blocker.
+
+## Handoff — Patterns Learned
+- Dashboard status summary cards follow `NudgeBanner` spacing and gradient for visual consistency.
+- Keep pill styles inline and compact (`borderRadius: 20`, `fontSize: 11`, `fontWeight: 700`) for this layout.
+
+## Handoff — Files Changed
+- `frontend/src/components/dashboard/CarePlanTracker.tsx`
+- `.spec/returning-dashboard/tasks/task-005.md`
+- `.claude/CLAUDE.md`
+
+## Status
+COMPLETE
