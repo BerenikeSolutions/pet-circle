@@ -72,6 +72,9 @@ Sample_Reports/
 
 # === Legacy scratch ===
 dashboard/
+!frontend/src/components/dashboard/
+!frontend/src/components/dashboard/*.ts
+!frontend/src/components/dashboard/*.tsx
 
 # === Other project ideas (not part of this repo) ===
 other projects/

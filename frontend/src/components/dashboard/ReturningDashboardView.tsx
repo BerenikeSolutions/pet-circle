@@ -1,36 +1,21 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CarePlanItem, DashboardData } from "@/lib/api";
+import type { CarePlanItem } from "@/lib/api";
 import ProfileBanner from "./ProfileBanner";
-import RecognitionCard from "./RecognitionCard";
-import LifeStageCard from "./LifeStageCard";
-import HealthConditionsCard from "./HealthConditionsCard";
-import DietAnalysisCard from "./DietAnalysisCard";
+import CompactRecordsCard from "./CompactRecordsCard";
+import AnalysisSummaryCard from "./AnalysisSummaryCard";
+import CarePlanTracker from "./CarePlanTracker";
 import CarePlanCard from "./CarePlanCard";
-import NudgeBanner from "./NudgeBanner";
 import CartFloater from "./CartFloater";
-import { buildCarePlanBuckets } from "./dashboard-utils";
-
-export interface DashboardViewProps {
-  data: DashboardData;
-  cartCount: number;
-  cartTotal: number;
-  getCartQty: (item: CarePlanItem, sectionTitle: string) => number;
-  onGoToReminders: () => void;
-  onGoToTrends: () => void;
-  onGoToRecords: () => void;
-  onGoToNudges: () => void;
-  onGoToCart: () => void;
-  onAddToCart: (item: CarePlanItem, sectionTitle: string) => void;
-  nudgeCount: number;
-}
+import type { DashboardViewProps } from "./DashboardView";
+import { buildCarePlanBuckets, computeCarePlanCounts } from "./dashboard-utils";
 
 function cartItemId(item: CarePlanItem, sectionTitle: string): string {
   return `${sectionTitle}:${item.test_type}:${item.name}`.toLowerCase();
 }
 
-export default function DashboardView({
+export default function ReturningDashboardView({
   data,
   cartCount,
   cartTotal,
@@ -38,10 +23,8 @@ export default function DashboardView({
   onGoToReminders,
   onGoToTrends,
   onGoToRecords,
-  onGoToNudges,
   onGoToCart,
   onAddToCart,
-  nudgeCount,
 }: DashboardViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [floaterUnlocked, setFloaterUnlocked] = useState(false);
@@ -49,6 +32,8 @@ export default function DashboardView({
   const timerIdsRef = useRef<number[]>([]);
 
   const buckets = useMemo(() => buildCarePlanBuckets(data), [data]);
+  const carePlanCounts = useMemo(() => computeCarePlanCounts(data), [data]);
+  const reportCount = data.recognition?.report_count ?? data.documents?.length ?? 0;
 
   useEffect(() => {
     if (floaterUnlocked) return;
@@ -90,11 +75,14 @@ export default function DashboardView({
   return (
     <div ref={containerRef}>
       <ProfileBanner data={data} onGoToReminders={onGoToReminders} />
-      <RecognitionCard data={data} onGoToRecords={onGoToRecords} />
-      <LifeStageCard data={data} />
-      <HealthConditionsCard data={data} onGoToTrends={onGoToTrends} />
-      <NudgeBanner petName={data.pet.name} nudgeCount={nudgeCount} onGoToNudges={onGoToNudges} />
-      <DietAnalysisCard data={data} />
+      <CompactRecordsCard reportCount={reportCount} onGoToRecords={onGoToRecords} />
+      <AnalysisSummaryCard data={data} onGoToTrends={onGoToTrends} />
+      <CarePlanTracker
+        petName={data.pet.name}
+        onTrack={carePlanCounts.onTrack}
+        dueSoon={carePlanCounts.dueSoon}
+        overdue={carePlanCounts.overdue}
+      />
       <CarePlanCard
         petName={data.pet.name}
         buckets={buckets}
