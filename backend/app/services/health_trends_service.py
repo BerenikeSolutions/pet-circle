@@ -31,7 +31,20 @@ _BLOOD_GROUP_ORDER: list[tuple[str, tuple[str, ...]]] = [
     ("kidney", ("creatinine", "urea", "bun", "kft", "blood urea")),
     ("electrolytes", ("sodium", "potassium", "chloride", "calcium", "phosphorus")),
 ]
-_VACCINE_KEYWORDS = ("vaccine", "vaccin", "rabies", "dhpp", "dhppi", "fvrcp", "booster")
+_VACCINE_KEYWORDS = (
+    "vaccine",
+    "vaccin",
+    "rabies",
+    "dhpp",
+    "dhppi",
+    "kennel cough",
+    "bordetella",
+    "nobivac",
+    "coronavirus",
+    "ccov",
+    "fvrcp",
+    "booster",
+)
 _DEWORMING_KEYWORDS = ("deworm", "worm")
 _FLEA_TICK_KEYWORDS = ("flea", "tick", "parasite")
 

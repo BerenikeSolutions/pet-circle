@@ -83,8 +83,22 @@ from app.utils.date_utils import IST, format_date_for_user, get_today_ist
 
 logger = logging.getLogger(__name__)
 
-# Vaccine-related item name keywords (case-insensitive) for batching
-VACCINE_KEYWORDS = ("vaccine", "vaccin", "dhpp", "rabies", "nobivac", "fvrcp", "felv", "fiv")
+# Vaccine-related item name keywords (case-insensitive) for batching.
+# Include kennel-cough and canine-coronavirus aliases used in preventive_master.
+VACCINE_KEYWORDS = (
+    "vaccine",
+    "vaccin",
+    "dhpp",
+    "rabies",
+    "nobivac",
+    "kennel cough",
+    "bordetella",
+    "coronavirus",
+    "ccov",
+    "fvrcp",
+    "felv",
+    "fiv",
+)
 
 # Item name keywords for category classification
 DEWORMING_KEYWORDS = ("deworm", "worm")

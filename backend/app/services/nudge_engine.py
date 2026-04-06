@@ -34,8 +34,21 @@ from app.services.nudge_config_service import get_nudge_config_int
 
 logger = logging.getLogger(__name__)
 
-# Keyword sets for matching preventive_master items to nudge categories
-VACCINE_KEYWORDS = {"vaccine", "rabies", "dhpp", "core vaccine", "feline core", "bordetella"}
+# Keyword sets for matching preventive_master items to nudge categories.
+# Keep this in sync with reminder and trends classifiers so generic
+# "vaccines done" updates include all dog/cat vaccine variants.
+VACCINE_KEYWORDS = {
+    "vaccine",
+    "rabies",
+    "dhpp",
+    "core vaccine",
+    "feline core",
+    "bordetella",
+    "kennel cough",
+    "nobivac",
+    "coronavirus",
+    "ccov",
+}
 DEWORMING_KEYWORDS = {"deworming", "deworm"}
 FLEA_KEYWORDS = {"tick", "flea"}
 CHECKUP_KEYWORDS = {"checkup", "annual", "wellness", "blood test", "preventive blood"}
