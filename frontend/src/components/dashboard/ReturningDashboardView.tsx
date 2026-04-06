@@ -5,7 +5,6 @@ import type { CarePlanItem } from "@/lib/api";
 import ProfileBanner from "./ProfileBanner";
 import RecognitionCard from "./RecognitionCard";
 import AnalysisSummaryCard from "./AnalysisSummaryCard";
-import CarePlanTracker from "./CarePlanTracker";
 import CarePlanCard from "./CarePlanCard";
 import CartFloater from "./CartFloater";
 import type { DashboardViewProps } from "./DashboardView";
@@ -74,17 +73,12 @@ export default function ReturningDashboardView({
   return (
     <div ref={containerRef} className="app">
       <ProfileBanner data={data} onGoToReminders={onGoToReminders} />
-      <RecognitionCard data={data} onGoToRecords={onGoToRecords} />
+      <RecognitionCard data={data} onGoToRecords={onGoToRecords} isReturning />
       <AnalysisSummaryCard data={data} onGoToTrends={onGoToTrends} />
-      <CarePlanTracker
-        petName={data.pet.name}
-        onTrack={carePlanCounts.onTrack}
-        dueSoon={carePlanCounts.dueSoon}
-        overdue={carePlanCounts.overdue}
-      />
       <CarePlanCard
         petName={data.pet.name}
         buckets={buckets}
+        counts={carePlanCounts}
         cartQtyByItem={Object.fromEntries(
           Object.values(buckets)
             .flatMap((sections) => sections)

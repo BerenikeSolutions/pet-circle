@@ -10,7 +10,7 @@ import DietAnalysisCard from "./DietAnalysisCard";
 import CarePlanCard from "./CarePlanCard";
 import NudgeBanner from "./NudgeBanner";
 import CartFloater from "./CartFloater";
-import { buildCarePlanBuckets } from "./dashboard-utils";
+import { buildCarePlanBuckets, computeCarePlanCounts } from "./dashboard-utils";
 
 export interface DashboardViewProps {
   data: DashboardData;
@@ -49,6 +49,7 @@ export default function DashboardView({
   const timerIdsRef = useRef<number[]>([]);
 
   const buckets = useMemo(() => buildCarePlanBuckets(data), [data]);
+  const carePlanCounts = useMemo(() => computeCarePlanCounts(data), [data]);
 
   useEffect(() => {
     if (floaterUnlocked) return;
@@ -98,6 +99,7 @@ export default function DashboardView({
       <CarePlanCard
         petName={data.pet.name}
         buckets={buckets}
+        counts={carePlanCounts}
         cartQtyByItem={Object.fromEntries(
           Object.values(buckets)
             .flatMap((sections) => sections)

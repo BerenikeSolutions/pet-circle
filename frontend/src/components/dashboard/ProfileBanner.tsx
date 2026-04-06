@@ -16,12 +16,16 @@ interface ProfileBannerProps {
 
 export default function ProfileBanner({ data, onGoToReminders }: ProfileBannerProps) {
   const ageMonths = data.life_stage?.age_months ?? ageMonthsFromDob(data.pet.dob);
-  const ageLabel = formatAgeLabel(ageMonths);
-  const sex = normalizeSex(data.pet.gender);
-  const weight = normalizeWeight(data.pet.weight);
   const avatar = getPetAvatar(data.pet.species);
   const vetName = data.vet_summary?.name || "Not added yet";
   const vetLastVisit = data.vet_summary?.last_visit || "--";
+
+  const subParts: string[] = [];
+  if (data.pet.breed) subParts.push(data.pet.breed);
+  if (data.pet.gender) subParts.push(normalizeSex(data.pet.gender));
+  if (ageMonths != null && ageMonths > 0 && data.pet.dob) subParts.push(formatAgeLabel(ageMonths));
+  if (typeof data.pet.weight === "number" && data.pet.weight > 0) subParts.push(`⚖️ ${normalizeWeight(data.pet.weight)}`);
+  const subLine = subParts.join(" · ");
 
   return (
     <div className="banner">
@@ -42,9 +46,11 @@ export default function ProfileBanner({ data, onGoToReminders }: ProfileBannerPr
         <div className="avatar">{avatar}</div>
         <div style={{ minWidth: 0 }}>
           <div className="dog-name">{data.pet.name}</div>
-          <div className="dog-sub" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-            {data.pet.breed} · {sex} · {ageLabel} · ⚖️ {weight}
-          </div>
+          {subLine && (
+            <div className="dog-sub" style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              {subLine}
+            </div>
+          )}
         </div>
       </div>
 

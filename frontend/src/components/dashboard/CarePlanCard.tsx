@@ -9,6 +9,7 @@ interface CarePlanCardProps {
   cartQtyByItem: Record<string, number>;
   addedIds: Record<string, boolean>;
   onAddToCart: (item: CarePlanItem, sectionTitle: string) => void;
+  counts?: { onTrack: number; dueSoon: number; overdue: number };
 }
 
 function itemId(item: CarePlanItem, sectionTitle: string): string {
@@ -21,12 +22,34 @@ export default function CarePlanCard({
   cartQtyByItem,
   addedIds,
   onAddToCart,
+  counts,
 }: CarePlanCardProps) {
   const bucketOrder: Array<"continue" | "attend" | "add"> = ["continue", "attend", "add"];
 
   return (
     <div className="card">
-      <div className="sec-lbl">{petName}&apos;s Care Plan</div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginBottom: 2 }}>
+        <div className="sec-lbl" style={{ margin: 0 }}>{petName}&apos;s Care Plan</div>
+        {counts && (counts.onTrack > 0 || counts.dueSoon > 0 || counts.overdue > 0) && (
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            {counts.onTrack > 0 && (
+              <span style={{ borderRadius: 20, padding: "3px 9px", fontSize: 10, fontWeight: 700, background: "#E8F9EE", color: "#1B7A3D" }}>
+                {counts.onTrack} On Track
+              </span>
+            )}
+            {counts.dueSoon > 0 && (
+              <span style={{ borderRadius: 20, padding: "3px 9px", fontSize: 10, fontWeight: 700, background: "#FFF3E0", color: "#E65100" }}>
+                {counts.dueSoon} Due Soon
+              </span>
+            )}
+            {counts.overdue > 0 && (
+              <span style={{ borderRadius: 20, padding: "3px 9px", fontSize: 10, fontWeight: 700, background: "#FFEBEE", color: "#C62828" }}>
+                {counts.overdue} Overdue
+              </span>
+            )}
+          </div>
+        )}
+      </div>
       <div className="sec-source">Based on lifestage, health & diet analysis</div>
 
       {bucketOrder.map((bucketKey, bucketIndex) => {
@@ -71,7 +94,7 @@ export default function CarePlanCard({
                           {item.freq} · Next: {item.next_due || "--"}
                         </div>
                         {item.reason && (
-                          <div style={{ fontSize: 11, color: "var(--t2)", lineHeight: 1.4, marginTop: 3, fontStyle: "italic" }}>
+                          <div style={{ fontSize: 11, color: "var(--t2)", lineHeight: 1.4, marginTop: 3, fontStyle: "italic", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                             {item.reason}
                           </div>
                         )}

@@ -913,11 +913,17 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
         # ── Determine full set of item_keys to classify ──────────────────────
         # Begin with keys that have records or prescriptions.
         all_item_keys: set[str] = set(records_by_key.keys()) | set(prescriptions_by_key.keys())
-        # Add all test_types that exist in the baseline for this life stage,
-        # so items with no history appear as Suggested (requirement 9.9).
+        # Only vaccines, flea/tick, and deworming are mandatory (always shown
+        # even without records).  All other test types (dental, fecal, xray,
+        # cbc, urinalysis, usg, ecg, echo) only appear when the pet has
+        # uploaded documents proving prior completion or a vet prescription.
+        _ALWAYS_SHOW_TYPES: set[str] = {"vaccine", "tick_flea", "deworming"}
         has_any_vaccine_record = any(k.startswith("vaccine:") for k in all_item_keys)
         for ls, tt in BASELINE_PROTOCOL:
             if ls != life_stage.value:
+                continue
+            # Skip non-mandatory types that have no records or prescriptions.
+            if tt not in _ALWAYS_SHOW_TYPES:
                 continue
             # If the pet already has specific vaccine records, don't add the
             # generic "vaccine" baseline — that would show a duplicate generic
@@ -969,7 +975,10 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
             }
 
             # ── Conflict resolution: ATTEND TO > CONTINUE > SUGGESTED ────────
-            if classification == Classification.PRESCRIPTION_ACTIVE:
+            # Overdue and not-started items always go to Attend To.
+            is_overdue = status_tag in ("Overdue", "Not started")
+
+            if classification == Classification.PRESCRIPTION_ACTIVE or is_overdue:
                 # Attend To bucket.  Move out of any other bucket.
                 attend_items[item_key] = item
                 continue_items.pop(item_key, None)
@@ -1000,11 +1009,14 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
                 # Map diet type to care plan test_type.
                 tt = "supplement" if diet_item.type == "supplement" else "food"
                 item_key = f"diet_{diet_item.id}"
+                # Only packaged food and supplements are orderable.
+                # Homemade food is not orderable (no Order Now CTA).
+                is_orderable = diet_item.type != "homemade"
                 cta_label, status_tag = _resolve_diet_item_order_signals(
                     db=db,
                     pet_id=pet.id,
                     diet_label=diet_item.label,
-                )
+                ) if is_orderable else (_CTA_ORDER_NOW, _STATUS_ACTIVE)
                 continue_items[item_key] = {
                     "name": diet_item.label,
                     "test_type": tt,
@@ -1013,8 +1025,8 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
                     "status_tag": status_tag,
                     "classification": Classification.PERIODIC.value,
                     "reason": None,
-                    "orderable": True,
-                    "cta_label": cta_label,
+                    "orderable": is_orderable,
+                    "cta_label": cta_label if is_orderable else None,
                 }
         except Exception:
             logger.warning(
