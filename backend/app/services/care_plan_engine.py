@@ -235,8 +235,11 @@ _ITEM_NAME_PATTERNS: list[tuple[str, str]] = [
     ("flea", "tick_flea"),
     ("leptospirosis", "vaccine"),
     ("bordetella", "vaccine"),
+    ("kennel cough", "vaccine"),
+    ("coronavirus", "vaccine"),
     ("dhppi", "vaccine"),
     ("rabies", "vaccine"),
+    ("nobivac", "vaccine"),
     ("vaccination", "vaccine"),
     ("vaccine", "vaccine"),
     ("supplement", "supplement"),
@@ -995,13 +998,20 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
             # Overdue and not-started items always go to Attend To.
             is_overdue = status_tag in ("Overdue", "Not started")
 
+            # Vaccines with a single record are valid history (one dose is
+            # meaningful), so they belong in Continue rather than Suggested.
+            is_vaccine_single = (
+                test_type == "vaccine"
+                and classification == Classification.SINGLE
+            )
+
             if classification == Classification.PRESCRIPTION_ACTIVE or is_overdue:
                 # Attend To bucket.  Move out of any other bucket.
                 attend_items[item_key] = item
                 continue_items.pop(item_key, None)
                 add_items.pop(item_key, None)
 
-            elif classification == Classification.PERIODIC:
+            elif classification == Classification.PERIODIC or is_vaccine_single:
                 # Continue bucket — only if not already in Attend To.
                 if item_key not in attend_items:
                     continue_items[item_key] = item
