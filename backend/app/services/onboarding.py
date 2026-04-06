@@ -535,6 +535,7 @@ async def _step_breed_age(db, user, text, send_fn):
         if species:
             pet.species = species
             _set_onboarding_data(user, "needs_species", False)
+            _set_onboarding_data(user, "gender_weight_attempts", 0)
             user.onboarding_state = "awaiting_gender_weight"
             db.commit()
             await send_fn(
@@ -548,6 +549,7 @@ async def _step_breed_age(db, user, text, send_fn):
 
     # Handle skip.
     if text_lower in _SKIP_INPUTS:
+        _set_onboarding_data(user, "gender_weight_attempts", 0)
         user.onboarding_state = "awaiting_gender_weight"
         db.commit()
         await send_fn(
@@ -613,21 +615,27 @@ async def _step_breed_age(db, user, text, send_fn):
         _set_onboarding_data(user, "breed_age_attempts", attempts + 1)
         db.commit()
         if not has_breed and not has_age:
-            msg = (
-                f"I couldn't quite catch that. Could you tell me {pet.name}'s breed "
-                f"and approximate age? (e.g., golden retriever, 4 years)"
+            clarification = await _ai_clarify_input(
+                user_message=text,
+                step_context="the pet's breed and approximate age",
+                expected_format="e.g., golden retriever, 4 years",
+                pet_name=pet.name,
             )
         elif not has_breed:
-            msg = (
-                f"Got it — {pet.age_text}. And what breed is {pet.name}? "
-                f"(e.g., golden retriever, or just say 'mixed')"
+            clarification = await _ai_clarify_input(
+                user_message=text,
+                step_context=f"the pet's breed (age already noted as {pet.age_text})",
+                expected_format="e.g., golden retriever, labrador, or just say 'mixed'",
+                pet_name=pet.name,
             )
         else:
-            msg = (
-                f"Got it — {pet.breed}. How old is {pet.name}? "
-                f"An approximate age is fine (e.g., 4 years)"
+            clarification = await _ai_clarify_input(
+                user_message=text,
+                step_context=f"the pet's age (breed already noted as {pet.breed})",
+                expected_format="e.g., 4 years, 6 months, puppy",
+                pet_name=pet.name,
             )
-        await send_fn(db, mobile, msg)
+        await send_fn(db, mobile, clarification)
         return
 
     # If species still unknown, ask as sub-question.
@@ -641,6 +649,7 @@ async def _step_breed_age(db, user, text, send_fn):
         return
 
     # All good — advance to next step.
+    _set_onboarding_data(user, "gender_weight_attempts", 0)
     user.onboarding_state = "awaiting_gender_weight"
     db.commit()
 
@@ -654,7 +663,8 @@ async def _step_breed_age(db, user, text, send_fn):
 async def _step_gender_weight(db, user, text, send_fn):
     """
     Step 3: Collect gender + weight + neutered (combined input, GPT-parsed).
-    Never re-asks — accepts whatever was parsed. Auto-sends life stage note + food question.
+    Clarifies once via AI if nothing can be parsed, then accepts whatever is provided.
+    Auto-sends life stage note + food question.
     """
     mobile = user._plaintext_mobile
     pet = _get_pending_pet(db, user.id)
@@ -666,11 +676,27 @@ async def _step_gender_weight(db, user, text, send_fn):
 
     text_lower = text.strip().lower()
 
+    od = _get_onboarding_data(user)
+    gw_attempts = od.get("gender_weight_attempts", 0)
+
     if text_lower not in _SKIP_INPUTS:
         parsed = await _parse_gender_weight_neutered(text)
         gender = parsed.get("gender")
         weight_kg = parsed.get("weight_kg")
         neutered = parsed.get("neutered")
+
+        # If nothing at all was parsed and this is the first attempt, clarify.
+        if gender is None and weight_kg is None and neutered is None and gw_attempts < 1:
+            _set_onboarding_data(user, "gender_weight_attempts", 1)
+            db.commit()
+            clarification = await _ai_clarify_input(
+                user_message=text,
+                step_context="the pet's gender, approximate weight, and neutered/spayed status",
+                expected_format="e.g., male, 22 kg, neutered",
+                pet_name=pet.name,
+            )
+            await send_fn(db, mobile, clarification)
+            return
 
         # Validate and store gender.
         if gender in ("male", "female"):
@@ -759,47 +785,54 @@ async def _step_food_type(db, user, text, send_fn):
         food_type = "mix"  # Default to mix on skip.
 
     if not food_type:
+        # Try AI parsing for ambiguous input (e.g., "same", "sampe", "like before").
+        ai_food_type = await _ai_parse_food_type(text, pet.name)
+        if ai_food_type in ("home", "packaged", "mix"):
+            food_type = ai_food_type
+
+    if not food_type:
         if attempts >= 1:
             food_type = "mix"  # Default on second unrecognized input.
         else:
             _set_onboarding_data(user, "food_type_attempts", attempts + 1)
             db.commit()
-            await send_fn(
-                db, mobile,
-                f"Sorry, could you clarify — does {pet.name} eat *home food*, "
-                f"*packaged food*, or a *mix* of both?",
+            clarification = await _ai_clarify_input(
+                user_message=text,
+                step_context="what type of food the pet eats",
+                expected_format="Reply with *home food*, *packaged food*, or *mix*",
+                pet_name=pet.name,
             )
+            await send_fn(db, mobile, clarification)
             return
 
     _set_onboarding_data(user, "food_type", food_type)
+    _set_onboarding_data(user, "meal_details_attempts", 0)
+    _set_onboarding_data(user, "meal_confirm_pending", False)
     user.onboarding_state = "awaiting_meal_details"
+
+    # Contextual meal details question — store the example so we can
+    # reference it if the user says "same".
+    _MEAL_EXAMPLES = {
+        "home": "boiled chicken + rice in the morning, dal + roti at night, occasional egg",
+        "packaged": "Royal Canin Adult kibble 50g × 3 times a day, small treat in the evening",
+        "mix": "Pedigree kibble in the morning, home-cooked khichdi at night, egg twice a week",
+    }
+    example_text = _MEAL_EXAMPLES.get(food_type, _MEAL_EXAMPLES["mix"])
+    _set_onboarding_data(user, "meal_example_shown", example_text)
     db.commit()
 
-    # Contextual meal details question.
-    examples = {
-        "home": (
-            "e.g., boiled chicken + rice in the morning, "
-            "dal + roti at night, occasional egg"
-        ),
-        "packaged": (
-            "e.g., Royal Canin Adult kibble 50g × 3 times a day, "
-            "small treat in the evening"
-        ),
-        "mix": (
-            "e.g., Pedigree kibble in the morning, "
-            "home-cooked khichdi at night, egg twice a week"
-        ),
-    }
-    example = examples.get(food_type, examples["mix"])
     await send_fn(
         db, mobile,
-        f"What does {pet.name}'s typical daily diet look like? ({example})",
+        f"What does {pet.name}'s typical daily diet look like? (e.g., {example_text})",
     )
 
 
 async def _step_meal_details(db, user, text, send_fn):
     """
     Step 5: Collect meal details. Parsed via existing _parse_diet_input, stored as DietItems.
+
+    Handles 'same as example' flow:
+    - User says 'same' → confirm the example shown → user says yes/yes-but → capture.
     """
     mobile = user._plaintext_mobile
     pet = _get_pending_pet(db, user.id)
@@ -811,22 +844,76 @@ async def _step_meal_details(db, user, text, send_fn):
 
     od = _get_onboarding_data(user)
     food_type = od.get("food_type", "mix")
+    meal_attempts = od.get("meal_details_attempts", 0)
+    confirm_pending = od.get("meal_confirm_pending", False)
+    example_shown = od.get("meal_example_shown", "")
+    text_lower = text.strip().lower()
 
-    if text.strip().lower() not in _SKIP_INPUTS:
+    # --- Handle confirmation reply (user was asked "Is this what X eats?") ---
+    if confirm_pending:
+        _set_onboarding_data(user, "meal_confirm_pending", False)
+        if text_lower in _SKIP_INPUTS:
+            # Skip — proceed without saving.
+            pass
+        else:
+            # Use AI to interpret: plain yes → use example as-is,
+            # yes-with-changes → modify example, no → re-ask.
+            final_diet = await _ai_resolve_example_confirmation(
+                text, example_shown, pet.name, "diet",
+            )
+            if final_diet == "__reject__":
+                # User said no / something completely different — re-ask.
+                db.commit()
+                await send_fn(
+                    db, mobile,
+                    f"No problem! Could you describe what {pet.name} actually eats "
+                    f"in a typical day?",
+                )
+                return
+            # Parse the resolved diet text into items.
+            items = await _parse_diet_input(final_diet)
+            await _store_meal_items(db, pet, items, food_type)
+
+        user.onboarding_state = "awaiting_supplements"
+        db.commit()
+        await send_fn(
+            db, mobile,
+            f"Noted. Is {pet.name} on any supplements right now? "
+            f"(e.g., joint support, Omega-3, calcium — or just say None)",
+        )
+        return
+
+    # --- Normal meal details input ---
+    if text_lower not in _SKIP_INPUTS:
+        # Detect "same" / "same as example" type responses.
+        if example_shown and _is_same_as_example_intent(text_lower):
+            _set_onboarding_data(user, "meal_confirm_pending", True)
+            db.commit()
+            await send_fn(
+                db, mobile,
+                f"Just to confirm — is this what {pet.name} eats?\n\n"
+                f"_{example_shown}_\n\n"
+                f"Reply *yes* if that's right, or tell me what's different "
+                f"(e.g., 'yes but no egg' or 'yes and also curd').",
+            )
+            return
+
+        # Check if input actually describes food/diet or is ambiguous/irrelevant.
+        is_diet = await _ai_check_diet_relevance(text, pet.name)
+        if not is_diet and meal_attempts < 1:
+            _set_onboarding_data(user, "meal_details_attempts", meal_attempts + 1)
+            db.commit()
+            clarification = await _ai_clarify_input(
+                user_message=text,
+                step_context=f"what {pet.name}'s typical daily diet looks like — the actual meals they eat",
+                expected_format=f"e.g., {example_shown}" if example_shown else "e.g., boiled chicken + rice in the morning, dal + roti at night",
+                pet_name=pet.name,
+            )
+            await send_fn(db, mobile, clarification)
+            return
+
         items = await _parse_diet_input(text)
-        for label, detail in items:
-            # For "mix", let items be classified by content; default to food_type.
-            item_type = food_type if food_type != "mix" else "packaged"
-            # Simple heuristic: if label mentions home-food keywords, use "homemade".
-            label_lower = label.lower()
-            if any(kw in label_lower for kw in ("home", "khichdi", "dal", "roti", "rice", "chicken", "egg", "boiled", "cooked")):
-                item_type = "homemade"
-            elif food_type == "home":
-                item_type = "homemade"
-            try:
-                await add_diet_item(db, pet.id, item_type, label, detail or None)
-            except Exception as e:
-                logger.error("Failed to save diet item for pet %s: %s", str(pet.id), str(e))
+        await _store_meal_items(db, pet, items, food_type)
 
     user.onboarding_state = "awaiting_supplements"
     db.commit()
@@ -869,21 +956,25 @@ async def _step_supplements_v2(db, user, text, send_fn):
     )
 
     # Preventive care question.
+    _PREVENTIVE_EXAMPLE = "vaccines last Dec, deworming Jan, flea 2 months ago, no blood test yet"
     user.onboarding_state = "awaiting_preventive"
     _set_onboarding_data(user, "preventive_attempts", 0)
+    _set_onboarding_data(user, "preventive_confirm_pending", False)
+    _set_onboarding_data(user, "preventive_example_shown", _PREVENTIVE_EXAMPLE)
     db.commit()
 
     await send_fn(
         db, mobile,
         f"What do you remember about {pet.name}'s vaccines, deworming, flea & tick, "
-        f"and blood tests? (e.g., vaccines last Dec, deworming Jan, flea 2 months ago, "
-        f"no blood test yet — rough is fine).",
+        f"and blood tests? (e.g., {_PREVENTIVE_EXAMPLE} — rough is fine).",
     )
 
 
 async def _step_preventive(db, user, text, send_fn):
     """
     Step 7: Collect preventive care info. If partial, re-ask missing fields ONCE.
+
+    Handles 'same as example' flow for preventive care.
     """
     mobile = user._plaintext_mobile
     pet = _get_pending_pet(db, user.id)
@@ -894,24 +985,74 @@ async def _step_preventive(db, user, text, send_fn):
         return
 
     text_lower = text.strip().lower()
+    od = _get_onboarding_data(user)
+    confirm_pending = od.get("preventive_confirm_pending", False)
+    example_shown = od.get("preventive_example_shown", "")
+
+    # --- Handle confirmation reply (user was asked "Is this your pet's history?") ---
+    if confirm_pending:
+        _set_onboarding_data(user, "preventive_confirm_pending", False)
+        if text_lower not in _SKIP_INPUTS:
+            final_preventive = await _ai_resolve_example_confirmation(
+                text, example_shown, pet.name, "preventive",
+            )
+            if final_preventive == "__reject__":
+                db.commit()
+                await send_fn(
+                    db, mobile,
+                    f"No problem! Could you share what you remember about {pet.name}'s "
+                    f"vaccines, deworming, flea & tick, and blood tests?",
+                )
+                return
+            # Parse the confirmed/modified preventive text.
+            parsed = await _parse_preventive_care(final_preventive)
+            await _store_preventive_data(db, pet, parsed)
+
+        await _transition_to_documents(db, user, pet, send_fn)
+        return
 
     # Skip / nothing done.
     if text_lower in _SKIP_INPUTS or text_lower in _NONE_KEYWORDS or text_lower in {"nothing done", "no idea", "don't remember", "dont remember"}:
         await _transition_to_documents(db, user, pet, send_fn)
         return
 
+    # Detect "same as example" intent.
+    if example_shown and _is_same_as_example_intent(text_lower):
+        _set_onboarding_data(user, "preventive_confirm_pending", True)
+        db.commit()
+        await send_fn(
+            db, mobile,
+            f"Just to confirm — is this {pet.name}'s preventive care history?\n\n"
+            f"_{example_shown}_\n\n"
+            f"Reply *yes* if that's right, or tell me what's different "
+            f"(e.g., 'yes but deworming was 2 months ago').",
+        )
+        return
+
     # GPT parse preventive care.
     parsed = await _parse_preventive_care(text)
+
+    missing = parsed.get("missing", [])
+    attempts = od.get("preventive_attempts", 0)
+
+    # If ALL fields are missing (nothing parsed at all), clarify with AI first.
+    all_fields = {"vaccines", "deworming", "flea_tick", "blood_test"}
+    if set(missing) == all_fields and attempts < 1:
+        _set_onboarding_data(user, "preventive_attempts", 1)
+        db.commit()
+        clarification = await _ai_clarify_input(
+            user_message=text,
+            step_context="the pet's preventive care history — vaccines, deworming, flea & tick treatment, and blood tests",
+            expected_format=f"e.g., {example_shown}" if example_shown else "e.g., vaccines last Dec, deworming Jan, flea 2 months ago, no blood test yet",
+            pet_name=pet.name,
+        )
+        await send_fn(db, mobile, clarification)
+        return
 
     # Store whatever was parsed.
     await _store_preventive_data(db, pet, parsed)
 
-    missing = parsed.get("missing", [])
-
     # If some fields are missing and this is the first attempt, re-ask once.
-    od = _get_onboarding_data(user)
-    attempts = od.get("preventive_attempts", 0)
-
     if missing and attempts < 1:
         _set_onboarding_data(user, "preventive_attempts", 1)
         user.onboarding_state = "awaiting_prev_retry"
@@ -1218,6 +1359,225 @@ async def _transition_to_documents(db, user, pet, send_fn):
         f"or lab report? Share a photo or PDF and I'll pull the details in automatically. "
         f"No worries if not, we can always add them later.",
     )
+
+
+async def _ai_clarify_input(
+    user_message: str,
+    step_context: str,
+    expected_format: str,
+    pet_name: str = "your pet",
+) -> str:
+    """
+    Use GPT to generate a friendly clarifying question when user input
+    doesn't match the expected format for the current onboarding step.
+
+    Args:
+        user_message: The user's original message that couldn't be parsed.
+        step_context: Description of what information is being collected.
+        expected_format: Examples of valid input for this step.
+        pet_name: The pet's name for personalization.
+
+    Returns:
+        A friendly, concise clarifying question (AI-generated).
+    """
+    client = _get_openai_onboarding_client()
+    prompt = (
+        "You are a friendly pet care assistant on WhatsApp helping a user register their pet. "
+        f"The user's pet is named {pet_name}.\n\n"
+        f"You are currently asking about: {step_context}\n"
+        f"Expected input format/examples: {expected_format}\n"
+        f"The user replied: \"{user_message}\"\n\n"
+        "Their reply doesn't clearly match what's needed. "
+        "Generate a short, warm, clarifying question (1-2 sentences max) that:\n"
+        "- Acknowledges what they said without being dismissive\n"
+        "- Gently asks for the specific information needed\n"
+        "- Gives a concrete example if helpful\n"
+        "- Uses a conversational WhatsApp tone (not formal)\n"
+        "- Does NOT use emojis excessively (max 1)\n\n"
+        "Return ONLY the clarifying message text, nothing else."
+    )
+    try:
+        response = await retry_openai_call(
+            client.chat.completions.create,
+            model="gpt-4.1-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=150,
+        )
+        clarification = response.choices[0].message.content.strip()
+        if clarification:
+            return clarification
+    except Exception as e:
+        logger.warning("AI clarification failed: %s", str(e))
+
+    # Fallback to a generic re-ask if AI fails.
+    return f"I didn't quite catch that. Could you rephrase? {expected_format}"
+
+
+_SAME_AS_EXAMPLE_PHRASES = frozenset({
+    "same", "same as example", "same as above", "same thing",
+    "same as that", "sampe", "sme", "like that", "like the example",
+    "that one", "that", "this", "this one", "like above", "as above",
+    "what you said", "what u said", "wahi", "wohi", "vahi",
+    "same hi", "same only", "haan wahi", "haan same",
+})
+
+
+def _is_same_as_example_intent(text_lower: str) -> bool:
+    """Return True if the user is referencing the example shown to them."""
+    normalized = re.sub(r"[.!?,]+$", "", text_lower.strip())
+    if normalized in _SAME_AS_EXAMPLE_PHRASES:
+        return True
+    # Partial match for "same as ..." patterns.
+    if normalized.startswith("same") and len(normalized) < 30:
+        return True
+    return False
+
+
+async def _ai_resolve_example_confirmation(
+    user_reply: str,
+    example_text: str,
+    pet_name: str,
+    context_type: str,
+) -> str:
+    """
+    Interpret the user's reply to an example confirmation prompt.
+
+    Returns:
+        - The example_text as-is if user said plain yes.
+        - A modified version if user said 'yes but...' with changes.
+        - '__reject__' if user said no or gave completely unrelated input.
+    """
+    client = _get_openai_onboarding_client()
+    context_labels = {
+        "diet": "daily diet/meals",
+        "preventive": "preventive care (vaccines, deworming, flea & tick, blood tests)",
+    }
+    prompt = (
+        f"A pet parent was shown this example {context_labels.get(context_type, context_type)} "
+        f"for their pet {pet_name}:\n"
+        f"\"{example_text}\"\n\n"
+        f"They were asked to confirm if this matches. They replied:\n"
+        f"\"{user_reply}\"\n\n"
+        "Determine their intent:\n"
+        "1. If they confirmed (yes, yeah, haan, correct, etc.) with NO changes → "
+        f"return the example exactly as-is\n"
+        "2. If they confirmed WITH modifications (yes but no egg, yes and also curd, "
+        "yes but deworming was 2 months ago not 3) → return the MODIFIED version "
+        "reflecting their changes\n"
+        "3. If they rejected (no, nope) or gave a completely different answer → "
+        "return __reject__\n\n"
+        'Return ONLY valid JSON: {"result": "the final text or __reject__"}'
+    )
+    try:
+        response = await retry_openai_call(
+            client.chat.completions.create,
+            model="gpt-4.1-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=300,
+        )
+        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        data = json.loads(raw)
+        return data.get("result", example_text)
+    except Exception as e:
+        logger.warning("AI example confirmation parse failed: %s", str(e))
+        # On failure, if reply looks like yes, accept the example.
+        if user_reply.strip().lower() in _YES_INPUTS:
+            return example_text
+        return "__reject__"
+
+
+async def _store_meal_items(db, pet, items: list, food_type: str):
+    """Store parsed diet items for a pet."""
+    for label, detail in items:
+        item_type = food_type if food_type != "mix" else "packaged"
+        label_lower = label.lower()
+        if any(kw in label_lower for kw in (
+            "home", "khichdi", "dal", "roti", "rice",
+            "chicken", "egg", "boiled", "cooked",
+        )):
+            item_type = "homemade"
+        elif food_type == "home":
+            item_type = "homemade"
+        try:
+            await add_diet_item(db, pet.id, item_type, label, detail or None)
+        except Exception as e:
+            logger.error("Failed to save diet item for pet %s: %s", str(pet.id), str(e))
+
+
+async def _ai_check_diet_relevance(text: str, pet_name: str) -> bool:
+    """
+    Use GPT to check if the user's message actually describes food/diet/meals.
+
+    Returns True if the input describes diet items, False if it's ambiguous,
+    irrelevant, or a vague reference like 'same', 'ok', 'yes'.
+    """
+    client = _get_openai_onboarding_client()
+    prompt = (
+        f"A pet parent was asked: 'What does {pet_name}'s typical daily diet look like?'\n"
+        f"They replied: \"{text}\"\n\n"
+        "Does this reply actually describe food, meals, or diet items? "
+        "Answer YES if it mentions specific foods, brands, ingredients, or meal descriptions. "
+        "Answer NO if it's vague ('same', 'ok', 'yes', 'like before'), irrelevant, "
+        "gibberish, or doesn't describe actual food.\n\n"
+        'Return ONLY valid JSON: {"is_diet": true|false}'
+    )
+    try:
+        response = await retry_openai_call(
+            client.chat.completions.create,
+            model="gpt-4.1-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=50,
+        )
+        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        data = json.loads(raw)
+        return bool(data.get("is_diet", True))
+    except Exception as e:
+        logger.warning("AI diet relevance check failed: %s", str(e))
+        return True  # Default to accepting on failure.
+
+
+async def _ai_parse_food_type(text: str, pet_name: str) -> str | None:
+    """
+    Use GPT to interpret ambiguous food-type input (e.g. 'same', 'like before',
+    typos, shorthand) and map it to one of: home, packaged, mix.
+
+    Returns 'home', 'packaged', 'mix', or None if the intent is unclear.
+    """
+    client = _get_openai_onboarding_client()
+    prompt = (
+        "A pet parent is registering their pet on WhatsApp. "
+        f"The pet's name is {pet_name}. "
+        "They were asked: 'What does your pet usually eat — home food, packaged, or a mix?'\n\n"
+        f"They replied: \"{text}\"\n\n"
+        "Determine which food type they mean. Consider:\n"
+        "- Typos and shorthand (e.g. 'hme' → home, 'pckgd' → packaged)\n"
+        "- References like 'same', 'same as before', 'like I said' — these are UNCLEAR, return null\n"
+        "- Descriptions that imply a type (e.g. 'I cook for him' → home, 'Royal Canin' → packaged)\n"
+        "- If the intent is genuinely unclear or ambiguous, return null\n\n"
+        'Return ONLY valid JSON: {"food_type": "home"|"packaged"|"mix"|null, '
+        '"reasoning": "one line why"}'
+    )
+    try:
+        response = await retry_openai_call(
+            client.chat.completions.create,
+            model="gpt-4.1-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=100,
+        )
+        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        data = json.loads(raw)
+        result = data.get("food_type")
+        if result in ("home", "packaged", "mix"):
+            logger.info("AI parsed food type '%s' from input '%s': %s", result, text, data.get("reasoning", ""))
+            return result
+        return None
+    except Exception as e:
+        logger.warning("AI food type parse failed: %s", str(e))
+        return None
 
 
 async def _parse_diet_input(text: str) -> list[tuple[str, str]]:
