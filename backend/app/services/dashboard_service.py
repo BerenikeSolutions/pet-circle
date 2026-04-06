@@ -171,6 +171,48 @@ def _normalize_care_plan_shape(care_plan: dict | None) -> dict:
     }
 
 
+def _inject_supplement_recommendations(care_plan: dict, diet_summary: dict) -> dict:
+    """
+    Add supplement recommendations from missing micronutrients into the
+    care plan 'add' (Quick Fixes to Add) bucket.
+
+    Each missing micro becomes an orderable supplement suggestion.
+    """
+    if not isinstance(care_plan, dict) or not isinstance(diet_summary, dict):
+        return care_plan
+
+    missing_micros = diet_summary.get("missing_micros") or []
+    if not missing_micros:
+        return care_plan
+
+    supplement_items = []
+    for micro in missing_micros:
+        name = micro.get("name", "")
+        cap_name = name[0].upper() + name[1:] if name else name
+        supplement_items.append({
+            "name": f"{cap_name} Supplement",
+            "test_type": "supplement",
+            "freq": "Daily",
+            "next_due": None,
+            "status_tag": "Recommended",
+            "classification": "suggested",
+            "reason": micro.get("reason") or f"{cap_name} supplementation recommended",
+            "orderable": True,
+            "cta_label": "Order Now",
+        })
+
+    if supplement_items:
+        add_sections = care_plan.get("add") or []
+        add_sections.append({
+            "icon": "\U0001f48a",
+            "title": "Supplements",
+            "items": supplement_items,
+        })
+        care_plan["add"] = add_sections
+
+    return care_plan
+
+
 def _apply_reasons_to_care_plan(care_plan: dict, reasons: dict[str, str]) -> dict:
     """Attach GPT reasons to orderable care-plan items by id/name key."""
     if not isinstance(care_plan, dict) or not reasons:
@@ -638,6 +680,7 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         generate_care_plan_reasons(db, pet, orderable_items),
     )
     care_plan_v2 = _apply_reasons_to_care_plan(care_plan_v2, care_plan_reasons)
+    care_plan_v2 = _inject_supplement_recommendations(care_plan_v2, diet_summary)
 
     life_stage_payload = None
     if life_stage_data is not None:

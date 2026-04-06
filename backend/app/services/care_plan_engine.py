@@ -980,9 +980,8 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
             }
 
             # ── Conflict resolution: ATTEND TO > CONTINUE > SUGGESTED ────────
-            # Overdue items go to Attend To; "Not started" items go to
-            # Suggested (Quick Fixes to Add) so the bucket isn't empty.
-            is_overdue = status_tag == "Overdue"
+            # Overdue and not-started items always go to Attend To.
+            is_overdue = status_tag in ("Overdue", "Not started")
 
             if classification == Classification.PRESCRIPTION_ACTIVE or is_overdue:
                 # Attend To bucket.  Move out of any other bucket.
