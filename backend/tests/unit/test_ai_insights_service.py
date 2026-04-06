@@ -9,6 +9,7 @@ import pytest
 os.environ.setdefault("APP_ENV", "test")
 
 from app.services.ai_insights_service import (
+    _format_found_diet_summary,
     generate_care_plan_reasons,
     generate_recognition_bullets,
     get_or_generate_insight,
@@ -23,6 +24,9 @@ class _ScalarQuery:
     def filter(self, *args, **kwargs):
         return self
 
+    def join(self, *args, **kwargs):
+        return self
+
     def scalar(self):
         return self._value
 
@@ -32,6 +36,9 @@ class _AllQuery:
         self._rows = rows
 
     def filter(self, *args, **kwargs):
+        return self
+
+    def order_by(self, *args, **kwargs):
         return self
 
     def all(self):
@@ -49,6 +56,34 @@ class _FakeSession:
         if self._all_rows:
             return _AllQuery(self._all_rows.pop(0))
         return _ScalarQuery(0)
+
+
+def test_format_found_diet_summary_keeps_main_items_and_supplements():
+    foods = [
+        SimpleNamespace(
+            type="packaged",
+            label="Royal Canin Adult kibble",
+            detail="50g x 3/day . times a day · small treat · in the evening",
+        ),
+        SimpleNamespace(
+            type="homemade",
+            label="boiled rice and chicken",
+            detail=None,
+        ),
+    ]
+    supplements = [SimpleNamespace(type="supplement", label="omega", detail=None)]
+
+    summary = _format_found_diet_summary(foods, supplements)
+
+    assert summary == "Royal Canin Adult kibble. Boiled rice and chicken. Supplements - Omega."
+
+
+def test_format_found_diet_summary_without_supplements_shows_no_supplements():
+    foods = [SimpleNamespace(type="packaged", label="Royal Canin Adult kibble", detail=None)]
+
+    summary = _format_found_diet_summary(foods, [])
+
+    assert summary == "Royal Canin Adult kibble. No supplements."
 
 
 class _InsightQuery:
@@ -78,17 +113,27 @@ class _FakeInsightDB:
 
 @pytest.mark.asyncio
 async def test_generate_recognition_bullets_orders_conditions_preventive_diet():
-    db = _FakeSession(scalar_values=[4, 2, 3, 1])
+    db = _FakeSession(
+        scalar_values=[4, 2],
+        all_rows=[
+            [
+                SimpleNamespace(type="packaged", label="Royal Canin Adult kibble", detail="50g x 3/day"),
+                SimpleNamespace(type="homemade", label="boiled rice and chicken", detail=None),
+                SimpleNamespace(type="supplement", label="omega", detail=None),
+            ]
+        ],
+    )
     pet = SimpleNamespace(id=uuid4())
 
     bullets = await generate_recognition_bullets(cast(Any, db), cast(Any, pet))
 
     assert len(bullets) == 3
     assert bullets[0]["icon"] == "🩺"
-    assert "active health conditions" in bullets[0]["label"]
-    assert "4 reviewed reports" in bullets[0]["label"]
-    assert bullets[1]["icon"] == "✅"
+    assert "active condition" in bullets[0]["label"]
+    assert bullets[1]["icon"] == "💉"
+    assert "preventive care item" in bullets[1]["label"]
     assert bullets[2]["icon"] == "🍽️"
+    assert bullets[2]["label"] == "Royal Canin Adult kibble. Boiled rice and chicken. Supplements - Omega."
 
 
 @pytest.mark.asyncio

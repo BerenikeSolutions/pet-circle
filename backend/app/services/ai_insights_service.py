@@ -24,6 +24,7 @@ sensible default payload is returned so the dashboard never crashes.
 
 import json
 import logging
+import re
 from datetime import date, datetime, timedelta
 from typing import Any, TypedDict
 from uuid import UUID
@@ -63,6 +64,82 @@ class Bullet(TypedDict):
 
     icon: str
     label: str
+
+
+_DIET_SPLIT_RE = re.compile(r"\s*[·,;|]\s*", re.IGNORECASE)
+_NOISE_CHUNK_RE = re.compile(
+    r"(times?\s+a\s+day|x\s*\d+\s*/\s*day|\d+\s*/\s*day|per\s+day|"
+    r"/\s*day|\bday\b|morning|afternoon|evening|night|treat|snack)",
+    re.IGNORECASE,
+)
+_MEASURE_TOKEN_RE = re.compile(r"\b\d+(?:\.\d+)?\s*(?:g|kg|ml|l|cups?|tbsp|tsp|x)\b", re.IGNORECASE)
+
+
+def _sentence_case(text: str) -> str:
+    """Return text with first letter uppercased and trailing punctuation removed."""
+    cleaned = text.strip().strip(". ")
+    if not cleaned:
+        return ""
+    return cleaned[0].upper() + cleaned[1:]
+
+
+def _extract_main_food_items(*texts: str, apply_noise_filter: bool = True) -> list[str]:
+    """Extract main food labels while removing quantity/frequency/noise fragments."""
+    items: list[str] = []
+
+    for text in texts:
+        if not text:
+            continue
+
+        normalized = text.replace("×", "x")
+        chunks = _DIET_SPLIT_RE.split(normalized)
+        for chunk in chunks:
+            chunk = _MEASURE_TOKEN_RE.sub("", chunk)
+            chunk = re.sub(r"\b\d+\b", "", chunk)
+            chunk = re.sub(r"\s+", " ", chunk).strip(" .,-")
+            if not chunk:
+                continue
+            if apply_noise_filter and _NOISE_CHUNK_RE.search(chunk):
+                continue
+
+            main_item = _sentence_case(chunk)
+            if not main_item:
+                continue
+            if main_item.lower() not in {i.lower() for i in items}:
+                items.append(main_item)
+
+    return items
+
+
+def _format_found_diet_summary(food_items: list[DietItem], supplement_items: list[DietItem]) -> str:
+    """Format the What We Found diet line with only main food items and supplements."""
+    main_foods: list[str] = []
+    for food in food_items:
+        # Keep primary labels intact (no noise filtering), then clean free-form detail.
+        main_foods.extend(_extract_main_food_items(food.label or "", apply_noise_filter=False))
+        main_foods.extend(_extract_main_food_items(food.detail or "", apply_noise_filter=True))
+
+    deduped_foods: list[str] = []
+    for item in main_foods:
+        if item.lower() not in {x.lower() for x in deduped_foods}:
+            deduped_foods.append(item)
+
+    parts: list[str] = [f"{item}." for item in deduped_foods]
+
+    if supplement_items:
+        supp_names: list[str] = []
+        for supp in supplement_items:
+            main = _sentence_case((supp.label or "").strip())
+            if main and main.lower() not in {x.lower() for x in supp_names}:
+                supp_names.append(main)
+        if supp_names:
+            parts.append(f"Supplements - {', '.join(supp_names)}.")
+        else:
+            parts.append("No supplements.")
+    else:
+        parts.append("No supplements.")
+
+    return " ".join(parts).strip()
 
 
 def _get_openai_client():
@@ -622,18 +699,9 @@ async def generate_recognition_bullets(db: Session, pet: Pet) -> list[Bullet]:
     supplement_items = [d for d in diet_items if d.type == "supplement"]
 
     if food_items or supplement_items:
-        parts: list[str] = []
-        for fi in food_items:
-            entry = fi.label
-            if fi.detail:
-                entry += f" · {fi.detail}"
-            parts.append(entry)
-        if supplement_items:
-            supp_names = [s.label for s in supplement_items]
-            parts.append(", ".join(supp_names))
-        else:
-            parts.append("No supplements")
-        bullets.append({"icon": "🍽️", "label": " · ".join(parts)})
+        bullets.append(
+            {"icon": "🍽️", "label": _format_found_diet_summary(food_items, supplement_items)}
+        )
     else:
         bullets.append({"icon": "🍽️", "label": "No diet entries recorded"})
 
