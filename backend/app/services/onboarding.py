@@ -565,18 +565,7 @@ async def _step_breed_age(db, user, text, send_fn):
     age_text_raw = parsed.get("age_text")
     confident = parsed.get("confident", False)
 
-    # If GPT returned nothing and this is first attempt, re-ask.
-    if not breed_raw and not age_years and attempts < 1:
-        _set_onboarding_data(user, "breed_age_attempts", attempts + 1)
-        db.commit()
-        await send_fn(
-            db, mobile,
-            f"I couldn't quite catch that. Could you tell me {pet.name}'s breed and "
-            f"approximate age? (e.g., golden retriever, 4 years)",
-        )
-        return
-
-    # Normalize breed.
+    # Normalize and save breed if provided.
     if breed_raw:
         normalized = normalize_breed(breed_raw, species=species_gpt)
         if normalized == breed_raw.strip().title():
@@ -590,15 +579,11 @@ async def _step_breed_age(db, user, text, send_fn):
         if not species_gpt:
             species_gpt = _infer_species_from_breed(breed_raw)
 
-    # Set species.
+    # Set species if newly identified.
     if species_gpt in {"dog", "cat"}:
         pet.species = species_gpt
-    elif pet.breed and pet.species == "_pending":
-        # Species still unknown after breed — need to ask.
-        # But only if we have a breed (otherwise skip).
-        pass
 
-    # Set age.
+    # Save age if provided.
     if age_years is not None:
         pet.age_text = age_text_raw or f"{age_years} years"
         # Compute approximate DOB for scheduling.
@@ -619,15 +604,30 @@ async def _step_breed_age(db, user, text, send_fn):
             approx_dob = date_type(y, m, 1)
         pet.dob = approx_dob
 
-    # If not confident and first attempt, re-ask once.
-    if not confident and not breed_raw and attempts < 1:
+    # Re-ask ONCE for whichever piece is missing. On the 2nd attempt
+    # (attempts >= 1), advance regardless of what's still missing.
+    has_breed = bool(pet.breed)
+    has_age = bool(pet.age_text) or bool(pet.dob)
+
+    if attempts < 1 and (not has_breed or not has_age):
         _set_onboarding_data(user, "breed_age_attempts", attempts + 1)
         db.commit()
-        await send_fn(
-            db, mobile,
-            f"I couldn't identify the breed. Could you try again? "
-            f"(e.g., labrador, 3 years)",
-        )
+        if not has_breed and not has_age:
+            msg = (
+                f"I couldn't quite catch that. Could you tell me {pet.name}'s breed "
+                f"and approximate age? (e.g., golden retriever, 4 years)"
+            )
+        elif not has_breed:
+            msg = (
+                f"Got it — {pet.age_text}. And what breed is {pet.name}? "
+                f"(e.g., golden retriever, or just say 'mixed')"
+            )
+        else:
+            msg = (
+                f"Got it — {pet.breed}. How old is {pet.name}? "
+                f"An approximate age is fine (e.g., 4 years)"
+            )
+        await send_fn(db, mobile, msg)
         return
 
     # If species still unknown, ask as sub-question.
