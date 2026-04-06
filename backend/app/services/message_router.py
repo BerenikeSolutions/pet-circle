@@ -517,6 +517,18 @@ async def route_message(db: Session, message_data: dict) -> None:
                             from_number=from_number,
                             deadline=user.doc_upload_deadline,
                         )
+                        # User is still in the upload window (didn't skip).
+                        # Clear auto-finalize flag so the pending extraction
+                        # processes documents but does NOT finalize onboarding,
+                        # since the user wants to keep uploading.
+                        pet = (
+                            db.query(Pet)
+                            .filter(Pet.user_id == user.id)
+                            .order_by(Pet.created_at.desc())
+                            .first()
+                        )
+                        if pet:
+                            _batch_is_onboarding.pop(str(pet.id), None)
                 return
 
             # --- Legacy agentic state migration ---

@@ -49,6 +49,7 @@ from app.models.message_log import MessageLog
 from app.models.nudge_delivery_log import NudgeDeliveryLog
 from app.models.nudge_message_library import NudgeMessageLibrary
 from app.models.pet import Pet
+from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
 from app.models.reminder import Reminder
 from app.models.user import User
@@ -569,13 +570,111 @@ def _build_breed_data_message(
     return (template_key, [pet_name, insight, health_area, cta, breed])
 
 
+def _category_has_meaningful_data(db: Session, pet: Pet, category: str) -> bool:
+    """
+    True if the pet already has meaningful data in this nudge category.
+
+    Used by _pick_data_category to skip categories the user has already filled
+    so the next-day nudge targets a genuinely missing category instead of
+    blindly re-asking for data already provided.
+
+    Defensive: any query error returns False (preserves the existing behavior
+    of falling through to the static priority list).
+    """
+    from app.services.nudge_engine import _classify_item
+    from app.models.condition import Condition
+    from app.models.condition_medication import ConditionMedication
+    from app.models.diet_item import DietItem
+    from app.models.diagnostic_test_result import DiagnosticTestResult
+
+    try:
+        # Preventive-record-backed categories (keyword-classified by item_name).
+        if category in ("vaccine", "flea_tick", "deworming", "grooming"):
+            target = {
+                "vaccine": "vaccine",
+                "flea_tick": "flea",
+                "deworming": "deworming",
+                "grooming": "grooming",
+            }[category]
+            records = (
+                db.query(PreventiveRecord)
+                .join(PreventiveMaster)
+                .filter(
+                    PreventiveRecord.pet_id == pet.id,
+                    PreventiveRecord.last_done_date.isnot(None),
+                )
+                .all()
+            )
+            return any(
+                _classify_item(r.preventive_master.item_name) == target
+                for r in records
+                if r.preventive_master
+            )
+
+        if category == "nutrition":
+            return (
+                db.query(DietItem.id)
+                .filter(DietItem.pet_id == pet.id, DietItem.type != "supplement")
+                .first()
+                is not None
+            )
+
+        if category == "supplement":
+            return (
+                db.query(DietItem.id)
+                .filter(DietItem.pet_id == pet.id, DietItem.type == "supplement")
+                .first()
+                is not None
+            )
+
+        if category == "condition":
+            return (
+                db.query(Condition.id)
+                .filter(Condition.pet_id == pet.id, Condition.is_active == True)  # noqa: E712
+                .first()
+                is not None
+            )
+
+        if category == "medication":
+            return (
+                db.query(ConditionMedication.id)
+                .join(Condition)
+                .filter(Condition.pet_id == pet.id)
+                .first()
+                is not None
+            )
+
+        if category == "diagnostics":
+            return (
+                db.query(DiagnosticTestResult.id)
+                .filter(DiagnosticTestResult.pet_id == pet.id)
+                .first()
+                is not None
+            )
+
+    except Exception:
+        logger.debug(
+            "meaningful-data check failed pet=%s cat=%s", str(pet.id), category,
+        )
+        return False
+
+    return False
+
+
 def _pick_data_category(db: Session, pet: Pet, slot_idx: int) -> str:
     """
     Return the highest-priority missing data category for Level 2 nudges.
 
-    Falls back to position in NUDGE_L2_DATA_PRIORITY if N9 GPT is unavailable.
+    Selection order:
+        1. Urgent/high-priority nudge detection (vaccine→deworming→flea→…).
+        2. Walk NUDGE_L2_DATA_PRIORITY and return the first category where
+           the pet has NO meaningful data yet. This avoids nudging for
+           categories the user has already filled in (e.g. asking for
+           vaccine info the day after they provided it).
+        3. Final fallback: static slot-index lookup (preserves prior
+           behavior when every category is already populated).
     """
-    # Detect most urgent category from actual health data — best effort, fall back to static priority
+    # 1. Urgent/high detection — unchanged.
     try:
         detected_category = _detect_topic_from_health_data(db, pet)
         if detected_category:
@@ -583,7 +682,12 @@ def _pick_data_category(db: Session, pet: Pet, slot_idx: int) -> str:
     except Exception:
         logger.debug("Health data topic detection skipped for pet %s", str(pet.id))
 
-    # Static fallback: pick from priority list by slot index
+    # 2. Walk the priority list, skipping categories that already have data.
+    for cat in NUDGE_L2_DATA_PRIORITY:
+        if not _category_has_meaningful_data(db, pet, cat):
+            return cat
+
+    # 3. Every category already has data — preserve the slot-based fallback.
     if slot_idx < len(NUDGE_L2_DATA_PRIORITY):
         return NUDGE_L2_DATA_PRIORITY[slot_idx]
     return NUDGE_L2_DATA_PRIORITY[-1]

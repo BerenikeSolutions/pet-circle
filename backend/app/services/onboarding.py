@@ -984,13 +984,156 @@ async def _step_prev_retry(db, user, text, send_fn):
     await _transition_to_documents(db, user, pet, send_fn)
 
 
+async def _parse_preventive_date_value(raw: str, pet: Pet) -> date | None:
+    """
+    Parse a free-text preventive-care date and validate against pet DOB.
+
+    Returns None if the value cannot be parsed or is before the pet's DOB.
+    """
+    if not raw:
+        return None
+
+    parsed_date = None
+    try:
+        parsed_date = parse_date(raw)
+    except (ValueError, TypeError):
+        pass
+    if parsed_date is None:
+        try:
+            parsed_date = await parse_date_with_ai(raw)
+        except (ValueError, TypeError):
+            pass
+
+    if parsed_date is None:
+        logger.warning("Could not parse preventive date: '%s'", raw)
+        return None
+
+    # DOB-based reasonableness: date can't be before pet was born.
+    if pet.dob and parsed_date < pet.dob:
+        logger.warning(
+            "Preventive date %s is before pet DOB %s, skipping", parsed_date, pet.dob,
+        )
+        return None
+
+    return parsed_date
+
+
+def _upsert_preventive_record(db, pet, master, parsed_date) -> None:
+    """
+    Create or update a PreventiveRecord for (pet, master), keeping the most
+    recent last_done_date. Caller is responsible for committing.
+    """
+    existing = (
+        db.query(PreventiveRecord)
+        .filter(
+            PreventiveRecord.pet_id == pet.id,
+            PreventiveRecord.preventive_master_id == master.id,
+        )
+        .first()
+    )
+    if existing:
+        if not existing.last_done_date or parsed_date > existing.last_done_date:
+            existing.last_done_date = parsed_date
+    else:
+        record = PreventiveRecord(
+            pet_id=pet.id,
+            preventive_master_id=master.id,
+            last_done_date=parsed_date,
+        )
+        db.add(record)
+
+
+def _essential_annual_vaccine_masters(db: Session, species: str) -> list[PreventiveMaster]:
+    """
+    Return all recurring annual vaccine masters for the species.
+
+    Filters: circle='health', category='essential', recurrence_days <= 730,
+    and item name classified as 'vaccine' by nudge_engine._classify_item.
+    Excludes puppy dose series (recurrence_days=36500) and non-vaccines
+    (e.g. Deworming, Annual Checkup) that happen to share essential/health.
+    """
+    from app.services.nudge_engine import _classify_item
+
+    rows = (
+        db.query(PreventiveMaster)
+        .filter(
+            PreventiveMaster.species.in_([species, "both"]),
+            PreventiveMaster.circle == "health",
+            PreventiveMaster.category == "essential",
+            PreventiveMaster.recurrence_days <= 730,
+        )
+        .all()
+    )
+    return [m for m in rows if _classify_item(m.item_name) == "vaccine"]
+
+
+def _match_specific_vaccine_master(
+    db: Session, species: str, name: str,
+) -> PreventiveMaster | None:
+    """
+    Map a free-text vaccine name ('rabies', 'dhppi', '7 in 1') to a single
+    PreventiveMaster row. Reuses gpt_extraction._VACCINE_DETAIL_TO_ITEM as
+    the single source of truth for name aliases.
+    """
+    from app.services.gpt_extraction import _VACCINE_DETAIL_TO_ITEM
+
+    key = (name or "").strip().lower()
+    if not key:
+        return None
+    item_name = _VACCINE_DETAIL_TO_ITEM.get(key)
+    if not item_name:
+        return None
+    return (
+        db.query(PreventiveMaster)
+        .filter(
+            PreventiveMaster.item_name == item_name,
+            PreventiveMaster.species.in_([species, "both"]),
+        )
+        .first()
+    )
+
+
 async def _store_preventive_data(db, pet, parsed: dict):
-    """Store parsed preventive care data as preventive records."""
-    # Map parsed keys to item_name patterns in the preventive_master table.
-    # PreventiveMaster.category is 'essential'/'complete' (not a health category),
-    # so we match on item_name instead.
+    """
+    Store parsed preventive care data as preventive records.
+
+    Vaccine handling:
+        - Generic "vaccines" date → bulk update all essential annual vaccine
+          masters for the species (puppy dose series excluded).
+        - "vaccine_specifics" list → update only the named vaccine master(s).
+          Processed AFTER the generic block so user-named dates can override
+          (newer wins via _upsert_preventive_record).
+
+    Other categories (deworming, flea_tick, blood_test) each have exactly
+    one master per species, so they continue to use the single-match loop.
+    """
+    # --- Generic vaccine mention → update all essential annual vaccines ---
+    generic = parsed.get("vaccines")
+    if generic and generic != "none":
+        gen_date = await _parse_preventive_date_value(generic, pet)
+        if gen_date:
+            masters = _essential_annual_vaccine_masters(db, pet.species)
+            if not masters:
+                logger.warning(
+                    "No essential annual vaccine masters found for species=%s",
+                    pet.species,
+                )
+            for master in masters:
+                _upsert_preventive_record(db, pet, master, gen_date)
+
+    # --- Specific vaccines → update only the named master(s) ---
+    for spec in parsed.get("vaccine_specifics") or []:
+        if not isinstance(spec, dict):
+            continue
+        master = _match_specific_vaccine_master(db, pet.species, spec.get("name", ""))
+        if master is None:
+            continue
+        spec_date = await _parse_preventive_date_value(spec.get("date") or "", pet)
+        if spec_date:
+            _upsert_preventive_record(db, pet, master, spec_date)
+
+    # --- Remaining categories: one master per species ---
     _ITEM_NAME_MAP = {
-        "vaccines": "%Vaccine%",
         "deworming": "Deworming",
         "flea_tick": "Tick/Flea",
         "blood_test": "Preventive Blood Test",
@@ -1000,28 +1143,10 @@ async def _store_preventive_data(db, pet, parsed: dict):
         if not value or value == "none":
             continue
 
-        # Try to parse the date from the value.
-        parsed_date = None
-        try:
-            parsed_date = parse_date(value)
-        except (ValueError, TypeError):
-            pass
+        parsed_date = await _parse_preventive_date_value(value, pet)
         if parsed_date is None:
-            try:
-                parsed_date = await parse_date_with_ai(value)
-            except (ValueError, TypeError):
-                pass
-
-        if parsed_date is None:
-            logger.warning("Could not parse preventive date for %s: '%s'", key, value)
             continue
 
-        # DOB-based reasonableness: date can't be before pet was born.
-        if pet.dob and parsed_date < pet.dob:
-            logger.warning("Preventive date %s is before pet DOB %s, skipping", parsed_date, pet.dob)
-            continue
-
-        # Find matching preventive master item by item_name pattern.
         master = (
             db.query(PreventiveMaster)
             .filter(
@@ -1031,29 +1156,13 @@ async def _store_preventive_data(db, pet, parsed: dict):
             .first()
         )
         if not master:
-            logger.warning("No preventive master for pattern=%s species=%s", item_pattern, pet.species)
+            logger.warning(
+                "No preventive master for pattern=%s species=%s",
+                item_pattern, pet.species,
+            )
             continue
 
-        # Check if record already exists for this pet + master item.
-        existing = (
-            db.query(PreventiveRecord)
-            .filter(
-                PreventiveRecord.pet_id == pet.id,
-                PreventiveRecord.preventive_master_id == master.id,
-            )
-            .first()
-        )
-        if existing:
-            # Update existing record if the new date is more recent.
-            if not existing.last_done_date or parsed_date > existing.last_done_date:
-                existing.last_done_date = parsed_date
-        else:
-            record = PreventiveRecord(
-                pet_id=pet.id,
-                preventive_master_id=master.id,
-                last_done_date=parsed_date,
-            )
-            db.add(record)
+        _upsert_preventive_record(db, pet, master, parsed_date)
 
     try:
         db.commit()
@@ -1247,17 +1356,30 @@ async def _parse_preventive_care(text: str) -> dict:
     Use GPT-4.1-mini to extract preventive care dates from combined input.
 
     Returns dict with keys:
-        vaccines (str|None), deworming (str|None),
-        flea_tick (str|None), blood_test (str|None),
-        missing (list[str])  — which of the 4 categories were not mentioned
+        vaccines (str|None)         — generic "vaccines done" date
+        vaccine_specifics (list)    — [{"name": "rabies", "date": "Dec 2025"}, ...]
+        deworming (str|None)
+        flea_tick (str|None)
+        blood_test (str|None)
+        missing (list[str])         — which of the 4 categories were not mentioned
     """
     client = _get_openai_onboarding_client()
     prompt = (
         "Extract preventive care information from this message about a pet. "
         "Look for four categories: vaccines, deworming, flea & tick treatment, and blood tests. "
-        "For each, extract the approximate date or timeframe when it was last done. "
+        "For each, extract the approximate date or timeframe when it was last done.\n\n"
+        "VACCINE RULES:\n"
+        "- If the user names a specific vaccine (rabies, DHPPi, 7-in-1, 9-in-1, "
+        "kennel cough, bordetella, feline core, FVRCP, FeLV, FIV, leptospirosis, "
+        "coronavirus, core vaccine), put each one as an entry in 'vaccine_specifics' "
+        "with its date. In that case 'vaccines' must stay null.\n"
+        "- If the user only says generic 'vaccines' / 'shots' / 'jabs' / 'vaccinated' "
+        "without naming any specific vaccine, set 'vaccines' to the date and leave "
+        "'vaccine_specifics' as an empty list.\n"
+        "- Specific names go in 'vaccine_specifics' even when only one is mentioned.\n\n"
         'Return ONLY valid JSON, no markdown: '
         '{"vaccines": "date or timeframe"|null, '
+        '"vaccine_specifics": [{"name": "vaccine name", "date": "date or timeframe"}], '
         '"deworming": "date or timeframe"|null, '
         '"flea_tick": "date or timeframe"|null, '
         '"blood_test": "date or timeframe"|null, '
@@ -1274,12 +1396,21 @@ async def _parse_preventive_care(text: str) -> dict:
             model="gpt-4.1-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=300,
+            max_tokens=400,
         )
         raw = _strip_json_fences(response.choices[0].message.content.strip())
         data = json.loads(raw)
+        # Defensive parse: vaccine_specifics must be a list of dicts with name+date.
+        raw_specifics = data.get("vaccine_specifics") or []
+        if not isinstance(raw_specifics, list):
+            raw_specifics = []
+        clean_specifics = [
+            s for s in raw_specifics
+            if isinstance(s, dict) and s.get("name") and s.get("date")
+        ]
         return {
             "vaccines": data.get("vaccines"),
+            "vaccine_specifics": clean_specifics,
             "deworming": data.get("deworming"),
             "flea_tick": data.get("flea_tick"),
             "blood_test": data.get("blood_test"),
@@ -1287,7 +1418,14 @@ async def _parse_preventive_care(text: str) -> dict:
         }
     except Exception as e:
         logger.warning("Preventive care GPT parse failed: %s", str(e))
-        return {"vaccines": None, "deworming": None, "flea_tick": None, "blood_test": None, "missing": []}
+        return {
+            "vaccines": None,
+            "vaccine_specifics": [],
+            "deworming": None,
+            "flea_tick": None,
+            "blood_test": None,
+            "missing": [],
+        }
 
 
 def _compute_life_stage(age_years: float | None) -> tuple[str, str] | None:
