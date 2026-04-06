@@ -572,44 +572,66 @@ async def generate_recognition_bullets(db: Session, pet: Pet) -> list[Bullet]:
         or 0
     )
 
-    diet_item_count = (
-        db.query(func.count(DietItem.id))
+    diet_items: list[DietItem] = (
+        db.query(DietItem)
         .filter(DietItem.pet_id == pet.id)
-        .scalar()
-        or 0
+        .order_by(DietItem.created_at)
+        .all()
     )
 
     bullets: list[Bullet] = []
 
+    # 1. Conditions — always present
     if active_condition_count > 0:
         bullets.append(
             {
                 "icon": "🩺",
                 "label": (
-                    f"{active_condition_count} health condition"
+                    f"{active_condition_count} active condition"
                     f"{'s' if active_condition_count != 1 else ''} being managed"
                 ),
             }
         )
+    else:
+        bullets.append(
+            {"icon": "🩺", "label": "No health conditions found"}
+        )
 
+    # 2. Preventive care — always present
     if on_schedule_preventive_count > 0:
         bullets.append(
             {
-                "icon": "✅",
+                "icon": "💉",
                 "label": (
                     f"{on_schedule_preventive_count} preventive care item"
-                    f"{'s' if on_schedule_preventive_count != 1 else ''} are tracked"
+                    f"{'s' if on_schedule_preventive_count != 1 else ''} on schedule"
                 ),
             }
         )
-
-    if diet_item_count > 0:
+    else:
         bullets.append(
-            {
-                "icon": "🍽️",
-                "label": f"Captured {diet_item_count} diet entries in the current routine.",
-            }
+            {"icon": "💉", "label": "0 preventive care items tracked"}
         )
+
+    # 3. Diet — build a specific food + supplement line
+    food_items = [d for d in diet_items if d.type in ("packaged", "homemade")]
+    supplement_items = [d for d in diet_items if d.type == "supplement"]
+
+    if food_items or supplement_items:
+        parts: list[str] = []
+        for fi in food_items:
+            entry = fi.label
+            if fi.detail:
+                entry += f" · {fi.detail}"
+            parts.append(entry)
+        if supplement_items:
+            supp_names = [s.label for s in supplement_items]
+            parts.append(", ".join(supp_names))
+        else:
+            parts.append("No supplements")
+        bullets.append({"icon": "🍽️", "label": " · ".join(parts)})
+    else:
+        bullets.append({"icon": "🍽️", "label": "No diet entries recorded"})
 
     return bullets[:3]
 

@@ -68,51 +68,51 @@ export function normalizeWeight(weight?: number | null): string {
 }
 
 export function normalizeRecognitionBullets(data: DashboardData): RecognitionBullet[] {
+  // Prefer backend-computed bullets when available (they include specific diet item names)
+  const backendBullets = data.recognition?.bullets || [];
+  if (backendBullets.length === 3) {
+    return backendBullets;
+  }
+
+  // Fallback: compute client-side (always 3 bullets)
   const bullets: RecognitionBullet[] = [];
 
-  // 1. Active conditions count
+  // 1. Conditions — always present
   const activeConditions = (data.conditions || []).filter((c) => c.is_active);
   if (activeConditions.length > 0) {
     bullets.push({
       icon: "🩺",
       label: `${activeConditions.length} active condition${activeConditions.length > 1 ? "s" : ""} being managed`,
     });
+  } else {
+    bullets.push({ icon: "🩺", label: "No health conditions found" });
   }
 
-  // 2. Preventive care items on schedule
+  // 2. Preventive care — always present
   const onSchedule = (data.preventive_records || []).filter(
-    (r) => r.status?.toLowerCase() === "up_to_date" || r.status?.toLowerCase() === "done"
+    (r) => r.status?.toLowerCase() === "up_to_date" || r.status?.toLowerCase() === "done" || r.status?.toLowerCase() === "upcoming"
   );
   if (onSchedule.length > 0) {
     bullets.push({
       icon: "💉",
       label: `${onSchedule.length} preventive care item${onSchedule.length > 1 ? "s" : ""} on schedule`,
     });
+  } else {
+    bullets.push({ icon: "💉", label: "0 preventive care items tracked" });
   }
 
-  // 3. Diet summary line
-  const dietEntries = data.diet_summary?.macros || [];
-  if (dietEntries.length > 0) {
-    // Use backend bullets for diet if available
-    const rawBullets = data.recognition?.bullets || [];
-    const dietBullet = rawBullets.find((b) => {
-      const v = b.label.toLowerCase();
-      return v.includes("diet") || v.includes("food") || v.includes("nutrition") || v.includes("kibble") || v.includes("cup");
-    });
-    if (dietBullet) {
-      bullets.push({ icon: dietBullet.icon || "🍽️", label: dietBullet.label });
-    } else {
-      bullets.push({ icon: "🍽️", label: "Diet entries captured in the current routine" });
-    }
+  // 3. Diet — use backend diet bullet if available, else generic
+  const dietBullet = backendBullets.find((b) => {
+    const v = b.label.toLowerCase();
+    return v.includes("diet") || v.includes("food") || v.includes("nutrition") || v.includes("kibble") || v.includes("cup") || v.includes("supplement") || v.includes("🍽️");
+  });
+  if (dietBullet) {
+    bullets.push({ icon: dietBullet.icon || "🍽️", label: dietBullet.label });
+  } else {
+    bullets.push({ icon: "🍽️", label: "No diet entries recorded" });
   }
 
-  // Fallback: if no computed bullets, use backend bullets
-  if (bullets.length === 0) {
-    const rawBullets = data.recognition?.bullets || [];
-    return rawBullets.slice(0, 3);
-  }
-
-  return bullets.slice(0, 3);
+  return bullets;
 }
 
 const SEVERITY_ORDER: Record<string, number> = {
