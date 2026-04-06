@@ -28,6 +28,44 @@ function getStageStarts() {
   }, []);
 }
 
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function markerPositionPct(
+  ageMonths: number,
+  stageIndex: number,
+  starts: number[],
+  boundaries?: { junior_start: number; adult_start: number; senior_start: number },
+): number {
+  const fallbackBounds = {
+    junior_start: 12,
+    adult_start: 24,
+    senior_start: 84,
+  };
+  const b = boundaries || fallbackBounds;
+
+  let segmentStartAge = 0;
+  let segmentEndAge = b.junior_start;
+
+  if (stageIndex === 1) {
+    segmentStartAge = b.junior_start;
+    segmentEndAge = b.adult_start;
+  } else if (stageIndex === 2) {
+    segmentStartAge = b.adult_start;
+    segmentEndAge = b.senior_start;
+  } else if (stageIndex === 3) {
+    segmentStartAge = b.senior_start;
+    // Senior stage is open-ended; use a stable 48-month window for bar positioning.
+    segmentEndAge = b.senior_start + 48;
+  }
+
+  const denom = Math.max(1, segmentEndAge - segmentStartAge);
+  const segmentProgress = clamp01((ageMonths - segmentStartAge) / denom);
+
+  return starts[stageIndex] + segmentProgress * STAGE_WIDTHS[stageIndex];
+}
+
 function traitOrder(label: string): number {
   const value = label.toLowerCase();
   const behaviorKeywords = ["energy", "play", "playful", "anxiety", "anxious", "active", "restless", "behavior", "temperament", "social"];
@@ -51,10 +89,12 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
   const stageIndex = getStageIndex(lifeStage?.stage);
   const starts = getStageStarts();
 
-  const adultStart = starts[2];
-  const adultWidth = STAGE_WIDTHS[2];
-  const posInAdult = (effectiveAge - 24) / (84 - 24);
-  const markerPctRaw = adultStart + posInAdult * adultWidth;
+  const markerPctRaw = markerPositionPct(
+    effectiveAge,
+    stageIndex,
+    starts,
+    lifeStage?.stage_boundaries,
+  );
   const markerPct = Math.max(0, Math.min(100, markerPctRaw));
 
   const traits = (lifeStage?.traits || [])
@@ -119,8 +159,17 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
         <div className="stage-marker" style={{ left: `${markerPct}%` }} />
       </div>
 
-      <div className="stage-caption" style={{ fontSize: 11, marginTop: 4, marginBottom: 8 }}>
-        {data.pet.name} is here · {ageLabel}
+      <div
+        style={{
+          position: "relative",
+          height: 18,
+          marginTop: 4,
+          marginBottom: 8,
+        }}
+      >
+        <div className="stage-caption" style={{ left: `${markerPct}%` }}>
+          {data.pet.name} is here · {ageLabel}
+        </div>
       </div>
 
       {traits.length > 0 && (

@@ -699,6 +699,7 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
             "stage": life_stage_data.stage,
             "age_months": life_stage_data.age_months,
             "breed_size": life_stage_data.breed_size,
+            "stage_boundaries": life_stage_data.stage_boundaries,
             "traits": life_stage_data.traits,
             "essential_care": life_stage_data.essential_care,
         }

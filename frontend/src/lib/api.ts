@@ -248,6 +248,11 @@ export interface LifeStageData {
   stage: "puppy" | "junior" | "adult" | "senior";
   age_months: number;
   breed_size: "mini_toy" | "small" | "medium" | "large" | "extra_large";
+  stage_boundaries?: {
+    junior_start: number;
+    adult_start: number;
+    senior_start: number;
+  };
   traits: LifeStageTrait[];
   essential_care: LifeStageEssentialCare[];
 }
