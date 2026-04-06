@@ -5,13 +5,12 @@ import type { RecordItem, RecordsV2 } from "@/lib/api";
 import { fetchRecords, getDashboardDocumentUrl } from "@/lib/api";
 import VetVisitCard from "./VetVisitCard";
 
-type RecordsTabId = "vet_visits" | "lab_reports" | "imaging" | "whatsapp";
+type RecordsTabId = "vet_visits" | "lab_reports" | "imaging";
 
 const RECORDS_TABS: Array<{ id: RecordsTabId; label: string }> = [
   { id: "vet_visits", label: "Vet Visits" },
   { id: "lab_reports", label: "Lab Reports" },
   { id: "imaging", label: "Imaging" },
-  { id: "whatsapp", label: "WhatsApp Channel" },
 ];
 
 interface RecordsViewProps {
@@ -129,7 +128,15 @@ export default function RecordsView({ token, petName, onBack }: RecordsViewProps
 
   const filteredRecords = useMemo(() => {
     if (!data?.records || activeTab === "vet_visits") return [];
-    return data.records.filter((record) => record.type === activeTab);
+
+    const getDisplayTab = (recordType: string): RecordsTabId | null => {
+      // WhatsApp channel records are intentionally hidden in this view.
+      if (recordType === "whatsapp") return null;
+      if (recordType === "lab_reports" || recordType === "imaging") return recordType;
+      return null;
+    };
+
+    return data.records.filter((record) => getDisplayTab(record.type) === activeTab);
   }, [activeTab, data]);
 
   const renderContent = () => {
