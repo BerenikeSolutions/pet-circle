@@ -37,6 +37,7 @@ from app.models.condition import Condition
 from app.models.diet_item import DietItem
 from app.models.pet import Pet
 from app.models.pet_ai_insight import PetAiInsight
+from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
 from app.services.care_plan_engine import _get_breed_size, _get_life_stage, _get_pet_age_months
 from app.services.nutrition_service import get_diet_summary
@@ -562,11 +563,14 @@ async def generate_recognition_bullets(db: Session, pet: Pet) -> list[Bullet]:
         or 0
     )
 
+    # Count core preventive items that have last_done_date filled.
     on_schedule_preventive_count = (
         db.query(func.count(PreventiveRecord.id))
+        .join(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
         .filter(
             PreventiveRecord.pet_id == pet.id,
-            PreventiveRecord.status.in_(["up_to_date", "upcoming"]),
+            PreventiveMaster.is_core.is_(True),
+            PreventiveRecord.last_done_date.isnot(None),
         )
         .scalar()
         or 0
@@ -597,14 +601,14 @@ async def generate_recognition_bullets(db: Session, pet: Pet) -> list[Bullet]:
             {"icon": "🩺", "label": "No health conditions found"}
         )
 
-    # 2. Preventive care — always present
+    # 2. Preventive care — count core items with last_done_date filled
     if on_schedule_preventive_count > 0:
         bullets.append(
             {
                 "icon": "💉",
                 "label": (
                     f"{on_schedule_preventive_count} preventive care item"
-                    f"{'s' if on_schedule_preventive_count != 1 else ''} on schedule"
+                    f"{'s' if on_schedule_preventive_count != 1 else ''} tracked"
                 ),
             }
         )

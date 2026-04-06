@@ -72,6 +72,10 @@ class PreventiveMaster(Base):
     # How many days after next_due_date before marking as overdue.
     overdue_after_days = Column(Integer, nullable=False)
 
+    # Whether this item is a core default tracked on the recognition card.
+    # Dogs: 6 core items, Cats: 4 core items.
+    is_core = Column(Boolean, default=False, server_default="false")
+
     # --- Unique Constraint ---
     # Prevents duplicate preventive items for the same species.
     # e.g., only one "Rabies Vaccine" entry for "dog".

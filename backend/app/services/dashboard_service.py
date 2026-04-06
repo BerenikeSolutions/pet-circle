@@ -415,6 +415,7 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
             "custom_recurrence_days": record.custom_recurrence_days,
             "medicine_dependent": master.medicine_dependent,
             "medicine_name": record.medicine_name if hasattr(record, 'medicine_name') and record.medicine_name else None,
+            "is_core": bool(master.is_core) if master.is_core is not None else False,
         })
 
     # --- Inject preventive_master items that have no record yet ---
@@ -443,6 +444,7 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
                 "custom_recurrence_days": None,
                 "medicine_dependent": master.medicine_dependent,
                 "medicine_name": None,
+                "is_core": bool(master.is_core) if master.is_core is not None else False,
             })
 
     # --- Health score (6-category, single source of truth) ---

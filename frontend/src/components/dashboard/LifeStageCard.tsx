@@ -124,7 +124,7 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
       </div>
 
       {traits.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 10, maxHeight: "52px", overflow: "hidden" }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 10 }}>
           {traits.map((trait) => (
             <span
               key={trait.label}

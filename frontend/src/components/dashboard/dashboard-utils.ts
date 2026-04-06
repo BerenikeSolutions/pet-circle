@@ -88,14 +88,14 @@ export function normalizeRecognitionBullets(data: DashboardData): RecognitionBul
     bullets.push({ icon: "🩺", label: "No health conditions found" });
   }
 
-  // 2. Preventive care — always present
-  const onSchedule = (data.preventive_records || []).filter(
-    (r) => r.status?.toLowerCase() === "up_to_date" || r.status?.toLowerCase() === "done" || r.status?.toLowerCase() === "upcoming"
+  // 2. Preventive care — count core items with last_done_date filled
+  const coreTracked = (data.preventive_records || []).filter(
+    (r) => r.is_core && r.last_done_date
   );
-  if (onSchedule.length > 0) {
+  if (coreTracked.length > 0) {
     bullets.push({
       icon: "💉",
-      label: `${onSchedule.length} preventive care item${onSchedule.length > 1 ? "s" : ""} on schedule`,
+      label: `${coreTracked.length} preventive care item${coreTracked.length > 1 ? "s" : ""} tracked`,
     });
   } else {
     bullets.push({ icon: "💉", label: "0 preventive care items tracked" });
