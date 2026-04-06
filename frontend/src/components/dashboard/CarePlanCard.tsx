@@ -94,7 +94,7 @@ export default function CarePlanCard({
                   return (
                     <div key={id} className="care-item">
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div className="care-name">{item.name ? item.name.replace(/\b\w/g, (c) => c.toUpperCase()) : item.name}</div>
+                        <div className="care-name">{item.name}</div>
                         <div className="care-meta">
                           {item.freq} · Next: {item.next_due || "--"}
                         </div>
@@ -107,7 +107,9 @@ export default function CarePlanCard({
 
                       <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5, flexShrink: 0 }}>
                         {item.test_type !== "food" && (
-                          <span className={`s-tag ${itemStatusClass(item)}`}>{normalizeStatusTag(item.status_tag)}</span>
+                          bucketKey === "add"
+                            ? <span className="s-tag s-tag-rec">Recommended</span>
+                            : <span className={`s-tag ${itemStatusClass(item)}`}>{normalizeStatusTag(item.status_tag)}</span>
                         )}
 
                         {canOrder && (

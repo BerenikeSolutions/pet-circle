@@ -329,13 +329,15 @@ export function buildCarePlanBuckets(data: DashboardData): Record<"continue" | "
 
 export function normalizeStatusTag(tag: string): string {
   const lower = (tag || "").toLowerCase().trim();
-  if (lower.includes("overdue") || lower.includes("urgent") || lower.includes("red") || lower.includes("missed") || lower.includes("late") || lower.includes("not started")) return "Urgent";
+  if (lower === "recommended") return "Recommended";
+  if (lower.includes("overdue") || lower.includes("urgent") || lower.includes("red") || lower.includes("missed") || lower.includes("late") || lower.includes("not started") || lower.includes("prescription") || lower.includes("review")) return "Urgent";
   if (lower.includes("soon") || lower.includes("upcoming") || lower.includes("watch") || lower.includes("amber") || lower.includes("yellow")) return "Due soon";
   return "On track";
 }
 
-export function itemStatusClass(item: CarePlanItem): "s-tag-g" | "s-tag-y" | "s-tag-r" {
+export function itemStatusClass(item: CarePlanItem): "s-tag-g" | "s-tag-y" | "s-tag-r" | "s-tag-rec" {
   const normalized = normalizeStatusTag(item.status_tag || "");
+  if (normalized === "Recommended") return "s-tag-rec";
   if (normalized === "Urgent") return "s-tag-r";
   if (normalized === "Due soon") return "s-tag-y";
   return "s-tag-g";

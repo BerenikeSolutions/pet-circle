@@ -247,6 +247,7 @@ body {
 .s-tag-g { background: var(--tg); color: #1e8c3a; }
 .s-tag-y { background: var(--ta); color: #b85c00; }
 .s-tag-r { background: var(--tr); color: #c0392b; }
+.s-tag-rec { background: #FFF3E0; color: #E65100; }
 
 /* ── Trait Pills ───────────────────────────────────────────────── */
 .trait-pill {

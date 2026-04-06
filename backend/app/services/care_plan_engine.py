@@ -263,6 +263,14 @@ _SECTION_META: dict[str, dict[str, str]] = {
 }
 _DEFAULT_SECTION_META: dict[str, str] = {"icon": "🏥", "title": "Other Care"}
 
+# Display-name overrides for items whose DB name differs from the desired
+# dashboard label.  Keys are *lowercased* DB item_name values.
+_DISPLAY_NAME: dict[str, str] = {
+    "dhppi": "DHPPi (Nobivac)",
+    "rabies vaccine": "Rabies (Nobivac RL)",
+    "tick/flea": "Flea & Tick Protection",
+}
+
 # Map test_types that should be grouped under another section's key.
 # Deworming items appear under the "Vaccines & Preventive Care" section.
 _SECTION_GROUP: dict[str, str] = {
@@ -637,6 +645,11 @@ def _status_tag(next_due: date | None, classification: Classification) -> str:
     """
     Derive a UI status tag string from next_due and classification.
 
+    Rules:
+        URGENT  — overdue (today > next_due), OR no history, OR no next_due.
+        DUE SOON — next_due within 7 days.
+        ON TRACK — everything else.
+
     Args:
         next_due:       Computed next due date, or None.
         classification: Classification enum value.
@@ -646,16 +659,14 @@ def _status_tag(next_due: date | None, classification: Classification) -> str:
     """
     if classification == Classification.NO_HISTORY:
         return "Not started"
-    if classification == Classification.PRESCRIPTION_ACTIVE:
-        return "Prescription due"
     if next_due is None:
-        return "Review needed"
+        return "Not started"
     today = date.today()
     if next_due < today:
         return "Overdue"
-    if (next_due - today).days <= 30:
+    if (next_due - today).days <= 7:
         return "Due soon"
-    return "Up to date"
+    return "On track"
 
 
 def _get_pet_age_months(pet: Pet) -> int:
@@ -964,7 +975,8 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
             if next_due is not None and next_due > next_year:
                 continue
 
-            name = item_names_by_key.get(item_key, test_type.replace("_", " ").title())
+            raw_name = item_names_by_key.get(item_key, test_type.replace("_", " ").title())
+            name = _DISPLAY_NAME.get(raw_name.lower(), raw_name)
             freq_label = _days_to_freq_label(baseline_days)
             status_tag = _status_tag(next_due, classification)
 
