@@ -42,15 +42,18 @@ function traitOrder(label: string): number {
 
 export default function LifeStageCard({ data, compact = false }: LifeStageCardProps) {
   const lifeStage = data.life_stage;
-  const ageMonths = lifeStage?.age_months ?? ageMonthsFromDob(data.pet.dob) ?? 24;
-  const ageLabel = formatAgeLabel(ageMonths);
+  const computedAge = ageMonthsFromDob(data.pet.dob);
+  const ageMonths = lifeStage?.age_months ?? computedAge;
+  const hasAge = ageMonths !== null && ageMonths !== undefined;
+  const effectiveAge = ageMonths ?? 24;
+  const ageLabel = formatAgeLabel(effectiveAge);
 
   const stageIndex = getStageIndex(lifeStage?.stage);
   const starts = getStageStarts();
 
   const adultStart = starts[2];
   const adultWidth = STAGE_WIDTHS[2];
-  const posInAdult = (ageMonths - 24) / (84 - 24);
+  const posInAdult = (effectiveAge - 24) / (84 - 24);
   const markerPctRaw = adultStart + posInAdult * adultWidth;
   const markerPct = Math.max(0, Math.min(100, markerPctRaw));
 
@@ -63,6 +66,17 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
     .map((entry) => entry.trait)
     .slice(0, 8);
   const essentialCare = (lifeStage?.essential_care || []).slice(0, 2);
+
+  if (!hasAge) {
+    return (
+      <div className={compact ? undefined : "card"} style={{ paddingBottom: 12 }}>
+        <div className="sec-lbl">What to expect as {data.pet.name} grows</div>
+        <div style={{ fontSize: 13, color: "var(--t2)", lineHeight: 1.5, marginTop: 4 }}>
+          Age has not been provided yet. Add {data.pet.name}&apos;s date of birth to see life stage insights and personalized care tips.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={compact ? undefined : "card"} style={{ paddingBottom: 12 }}>
@@ -124,20 +138,17 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
       )}
 
       {essentialCare.length > 0 && (
-        <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8, display: "flex", gap: 8 }}>
+        <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
           {essentialCare.map((care) => (
-            <div key={care.title} style={{ flex: 1, background: "var(--ta)", borderRadius: 8, padding: "6px 10px" }}>
-              <div style={{ fontSize: 10, fontWeight: 700, color: "#b85c00" }}>
-                {care.icon} {care.title}
+            <div key={care.title} style={{ background: "var(--ta)", borderRadius: 8, padding: "8px 12px" }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "#b85c00", marginBottom: 2 }}>
+                {care.title}
               </div>
               <div
                 style={{
-                  fontSize: 10,
+                  fontSize: 11,
                   color: "var(--t2)",
-                  marginTop: 1,
-                  whiteSpace: "nowrap",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
+                  lineHeight: 1.4,
                 }}
                 title={care.detail}
               >

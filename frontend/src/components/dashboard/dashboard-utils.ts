@@ -68,19 +68,51 @@ export function normalizeWeight(weight?: number | null): string {
 }
 
 export function normalizeRecognitionBullets(data: DashboardData): RecognitionBullet[] {
-  const rawBullets = data.recognition?.bullets || [];
-  const capped = rawBullets.slice(0, 3);
+  const bullets: RecognitionBullet[] = [];
 
-  // Keep conditions first, preventive second, diet last when mixed.
-  const orderScore = (label: string): number => {
-    const v = label.toLowerCase();
-    if (v.includes("condition")) return 0;
-    if (v.includes("prevent") || v.includes("vaccin") || v.includes("deworm") || v.includes("tick")) return 1;
-    if (v.includes("diet") || v.includes("food") || v.includes("nutrition")) return 2;
-    return 3;
-  };
+  // 1. Active conditions count
+  const activeConditions = (data.conditions || []).filter((c) => c.is_active);
+  if (activeConditions.length > 0) {
+    bullets.push({
+      icon: "🩺",
+      label: `${activeConditions.length} active condition${activeConditions.length > 1 ? "s" : ""} being managed`,
+    });
+  }
 
-  return [...capped].sort((a, b) => orderScore(a.label) - orderScore(b.label));
+  // 2. Preventive care items on schedule
+  const onSchedule = (data.preventive_records || []).filter(
+    (r) => r.status?.toLowerCase() === "up_to_date" || r.status?.toLowerCase() === "done"
+  );
+  if (onSchedule.length > 0) {
+    bullets.push({
+      icon: "💉",
+      label: `${onSchedule.length} preventive care item${onSchedule.length > 1 ? "s" : ""} on schedule`,
+    });
+  }
+
+  // 3. Diet summary line
+  const dietEntries = data.diet_summary?.macros || [];
+  if (dietEntries.length > 0) {
+    // Use backend bullets for diet if available
+    const rawBullets = data.recognition?.bullets || [];
+    const dietBullet = rawBullets.find((b) => {
+      const v = b.label.toLowerCase();
+      return v.includes("diet") || v.includes("food") || v.includes("nutrition") || v.includes("kibble") || v.includes("cup");
+    });
+    if (dietBullet) {
+      bullets.push({ icon: dietBullet.icon || "🍽️", label: dietBullet.label });
+    } else {
+      bullets.push({ icon: "🍽️", label: "Diet entries captured in the current routine" });
+    }
+  }
+
+  // Fallback: if no computed bullets, use backend bullets
+  if (bullets.length === 0) {
+    const rawBullets = data.recognition?.bullets || [];
+    return rawBullets.slice(0, 3);
+  }
+
+  return bullets.slice(0, 3);
 }
 
 const SEVERITY_ORDER: Record<string, number> = {
@@ -234,6 +266,27 @@ export function buildCarePlanBuckets(data: DashboardData): Record<"continue" | "
 
   const seen = new Set<string>();
 
+  const SECTION_TITLE_MAP: Record<string, string> = {
+    "tick flea": "Flea & Tick Protection",
+    "tick & flea": "Flea & Tick Protection",
+    "tick and flea": "Flea & Tick Protection",
+    "flea tick": "Flea & Tick Protection",
+    "tick flea prevention": "Flea & Tick Protection",
+    "tick & flea prevention": "Flea & Tick Protection",
+  };
+
+  const PREVENTIVE_SECTIONS = ["vaccines", "vaccine", "preventive", "deworming", "flea", "tick"];
+
+  const normalizeSectionTitle = (title: string): string => {
+    const mapped = SECTION_TITLE_MAP[title.toLowerCase().trim()];
+    return mapped || title;
+  };
+
+  const isPreventiveSection = (title: string): boolean => {
+    const lower = title.toLowerCase();
+    return PREVENTIVE_SECTIONS.some((kw) => lower.includes(kw));
+  };
+
   const sanitizeSection = (bucket: "continue" | "attend" | "add", section: CarePlanSection): CarePlanSection => {
     const filteredItems = section.items.filter((item) => {
       const key = `${item.test_type}:${item.name}`.toLowerCase();
@@ -247,7 +300,11 @@ export function buildCarePlanBuckets(data: DashboardData): Record<"continue" | "
       return item;
     });
 
-    return { ...section, items: filteredItems };
+    const normalizedTitle = normalizeSectionTitle(section.title);
+    // Remove icons from vaccine/preventive care sections
+    const sectionIcon = isPreventiveSection(normalizedTitle) ? "" : section.icon;
+
+    return { ...section, title: normalizedTitle, icon: sectionIcon, items: filteredItems };
   };
 
   return {
@@ -257,10 +314,18 @@ export function buildCarePlanBuckets(data: DashboardData): Record<"continue" | "
   };
 }
 
+export function normalizeStatusTag(tag: string): string {
+  const lower = (tag || "").toLowerCase().trim();
+  if (lower.includes("overdue") || lower.includes("urgent") || lower.includes("red") || lower.includes("missed") || lower.includes("late")) return "Urgent";
+  if (lower.includes("not started")) return "Not started";
+  if (lower.includes("soon") || lower.includes("upcoming") || lower.includes("watch") || lower.includes("amber") || lower.includes("yellow")) return "Due soon";
+  return "On track";
+}
+
 export function itemStatusClass(item: CarePlanItem): "s-tag-g" | "s-tag-y" | "s-tag-r" {
-  const status = (item.status_tag || "").toLowerCase();
-  if (status.includes("urgent") || status.includes("overdue") || status.includes("red")) return "s-tag-r";
-  if (status.includes("soon") || status.includes("watch") || status.includes("amber") || status.includes("yellow")) return "s-tag-y";
+  const normalized = normalizeStatusTag(item.status_tag || "");
+  if (normalized === "Urgent") return "s-tag-r";
+  if (normalized === "Due soon") return "s-tag-y";
   return "s-tag-g";
 }
 

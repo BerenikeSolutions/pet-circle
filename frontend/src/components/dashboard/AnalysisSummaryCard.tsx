@@ -13,7 +13,7 @@ interface AnalysisSummaryCardProps {
 
 export default function AnalysisSummaryCard({ data, onGoToTrends }: AnalysisSummaryCardProps) {
   return (
-    <CollapsibleCard icon="📊" title="Analysis" defaultOpen={false}>
+    <CollapsibleCard title="Analysis" defaultOpen={false}>
       <div style={{ padding: "0 16px 16px", display: "flex", flexDirection: "column", gap: 16 }}>
         <div style={{ border: "1px solid var(--border)", borderRadius: 10, padding: "14px 12px" }}>
           <LifeStageCard data={data} compact />

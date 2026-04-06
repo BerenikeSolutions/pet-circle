@@ -1,7 +1,7 @@
 "use client";
 
 import type { CarePlanItem, CarePlanSection } from "@/lib/api";
-import { BUCKET_META, itemStatusClass } from "./dashboard-utils";
+import { BUCKET_META, itemStatusClass, normalizeStatusTag } from "./dashboard-utils";
 
 interface CarePlanCardProps {
   petName: string;
@@ -28,33 +28,32 @@ export default function CarePlanCard({
 
   return (
     <div className="card">
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginBottom: 2 }}>
-        <div className="sec-lbl" style={{ margin: 0 }}>{petName}&apos;s Care Plan</div>
-        {counts && (counts.onTrack > 0 || counts.dueSoon > 0 || counts.overdue > 0) && (
-          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-            {counts.onTrack > 0 && (
-              <span style={{ borderRadius: 20, padding: "3px 9px", fontSize: 10, fontWeight: 700, background: "#E8F9EE", color: "#1B7A3D" }}>
-                {counts.onTrack} On Track
-              </span>
-            )}
-            {counts.dueSoon > 0 && (
-              <span style={{ borderRadius: 20, padding: "3px 9px", fontSize: 10, fontWeight: 700, background: "#FFF3E0", color: "#E65100" }}>
-                {counts.dueSoon} Due Soon
-              </span>
-            )}
-            {counts.overdue > 0 && (
-              <span style={{ borderRadius: 20, padding: "3px 9px", fontSize: 10, fontWeight: 700, background: "#FFEBEE", color: "#C62828" }}>
-                {counts.overdue} Overdue
-              </span>
-            )}
-          </div>
-        )}
-      </div>
+      <div className="sec-lbl" style={{ marginBottom: 0 }}>{petName}&apos;s Care Plan</div>
       <div className="sec-source">Based on lifestage, health & diet analysis</div>
+      {counts && (counts.onTrack > 0 || counts.dueSoon > 0 || counts.overdue > 0) && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+          {counts.onTrack > 0 && (
+            <span style={{ borderRadius: 20, padding: "4px 12px", fontSize: 11, fontWeight: 700, background: "#E8F9EE", color: "#1B7A3D" }}>
+              {counts.onTrack} On Track
+            </span>
+          )}
+          {counts.dueSoon > 0 && (
+            <span style={{ borderRadius: 20, padding: "4px 12px", fontSize: 11, fontWeight: 700, background: "#FFF3E0", color: "#E65100" }}>
+              {counts.dueSoon} Due Soon
+            </span>
+          )}
+          {counts.overdue > 0 && (
+            <span style={{ borderRadius: 20, padding: "4px 12px", fontSize: 11, fontWeight: 700, background: "#FFEBEE", color: "#C62828" }}>
+              {counts.overdue} Overdue
+            </span>
+          )}
+        </div>
+      )}
 
       {bucketOrder.map((bucketKey, bucketIndex) => {
         const sections = buckets[bucketKey];
-        if (sections.length === 0) return null;
+        // Always show "Quick Fixes to Add", hide other empty buckets
+        if (sections.length === 0 && bucketKey !== "add") return null;
 
         const meta = BUCKET_META[bucketKey];
 
@@ -75,9 +74,15 @@ export default function CarePlanCard({
               {meta.label}
             </div>
 
+            {sections.length === 0 && bucketKey === "add" && (
+              <div style={{ fontSize: 12, color: "var(--t2)", padding: "8px 0", lineHeight: 1.5 }}>
+                Recommendations for supplements and food will appear here based on {petName}&apos;s care plan.
+              </div>
+            )}
+
             {sections.map((section) => (
               <div key={section.title} className="care-sec" style={{ marginBottom: 8 }}>
-                <div className="care-hdr">{section.icon} {section.title}</div>
+                <div className="care-hdr">{section.icon ? `${section.icon} ` : ""}{section.title}</div>
 
                 {section.items.map((item) => {
                   const id = itemId(item, section.title);
@@ -101,7 +106,7 @@ export default function CarePlanCard({
                       </div>
 
                       <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5, flexShrink: 0 }}>
-                        <span className={`s-tag ${itemStatusClass(item)}`}>{item.status_tag}</span>
+                        <span className={`s-tag ${itemStatusClass(item)}`}>{normalizeStatusTag(item.status_tag)}</span>
 
                         {canOrder && (
                           <button

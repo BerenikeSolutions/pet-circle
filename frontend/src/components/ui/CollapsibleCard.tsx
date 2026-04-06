@@ -19,7 +19,7 @@ export default function CollapsibleCard({
   const [open, setOpen] = useState(defaultOpen);
 
   return (
-    <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+    <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden" style={{ marginBottom: 12 }}>
       <button
         onClick={() => setOpen(!open)}
         className="w-full flex items-center justify-between p-4 text-left"
@@ -28,7 +28,7 @@ export default function CollapsibleCard({
         <div className="flex items-center gap-2.5 min-w-0">
           {icon && <span className="text-lg shrink-0">{icon}</span>}
           <div className="min-w-0">
-            <div className="font-semibold text-sm truncate">{title}</div>
+            <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "1px", color: "var(--t3)" }} className="truncate">{title}</div>
             {subtitle && <div className="text-xs opacity-70 truncate">{subtitle}</div>}
           </div>
         </div>
