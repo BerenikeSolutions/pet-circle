@@ -995,15 +995,13 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
             }
 
             # ── Conflict resolution: ATTEND TO > CONTINUE > SUGGESTED ────────
-            # Overdue and not-started items always go to Attend To.
-            is_overdue = status_tag in ("Overdue", "Not started")
+            # Core preventive items (vaccines, deworming, tick/flea) never go
+            # to the Add/Suggested bucket.  They are either Attend To (urgent/
+            # overdue/not-started) or Continue (on-track/due-soon).
+            _CORE_TYPES: set[str] = {"vaccine", "deworming", "tick_flea"}
+            is_core = test_type in _CORE_TYPES
 
-            # Vaccines with a single record are valid history (one dose is
-            # meaningful), so they belong in Continue rather than Suggested.
-            is_vaccine_single = (
-                test_type == "vaccine"
-                and classification == Classification.SINGLE
-            )
+            is_overdue = status_tag in ("Overdue", "Not started")
 
             if classification == Classification.PRESCRIPTION_ACTIVE or is_overdue:
                 # Attend To bucket.  Move out of any other bucket.
@@ -1011,7 +1009,7 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
                 continue_items.pop(item_key, None)
                 add_items.pop(item_key, None)
 
-            elif classification == Classification.PERIODIC or is_vaccine_single:
+            elif classification == Classification.PERIODIC or is_core:
                 # Continue bucket — only if not already in Attend To.
                 if item_key not in attend_items:
                     continue_items[item_key] = item
