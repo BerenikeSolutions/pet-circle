@@ -1429,33 +1429,11 @@ async def _delayed_batch_extraction(
                     pass
                 should_finalize_onboarding = False
 
-        # Notify user once per batch with consolidated acknowledgements.
-        # Skipped when we just sent the onboarding finalization message,
-        # so the user doesn't get duplicate "got it / saved / extracting" spam
-        # on top of "That's everything...".
-        if not should_finalize_onboarding:
-            doc_names = "\n".join(f"  - {d.document_name or d.file_path.split('/')[-1]}" for d in pending_docs)
-            pet_species = pet.species if pet else "dog"
-            pet_breed = pet.breed if pet else None
-            received_fun_fact = await get_breed_fun_fact(bg_db, user_id, pet_breed, pet_species)
-            saved_fun_fact = await get_breed_fun_fact(bg_db, user_id, pet_breed, pet_species)
-            extracting_fun_fact = await get_breed_fun_fact(bg_db, user_id, pet_breed, pet_species)
-            await send_text_message(
-                bg_db, from_number,
-                f"Got it — I received *{total}* document{'s' if total != 1 else ''} for *{pet_name}*.\n\n"
-                f"🎉 *Fun fact time!*\n✨ {received_fun_fact}",
-            )
-            await send_text_message(
-                bg_db, from_number,
-                f"✅ The below files are saved for *{pet_name}*:\n{doc_names}\n\n"
-                "Will start extracting health data shortly.\n\n"
-                f"🎉 *Fun fact time!*\n✨ {saved_fun_fact}",
-            )
-            await send_text_message(
-                bg_db, from_number,
-                f"🧪 I will now start extracting health data for *{pet_name}*:\n{doc_names}\n\n"
-                f"🎉 *Fun fact time!*\n✨ {extracting_fun_fact}",
-            )
+        # Per user request, the "Got it — I received N documents", "The below
+        # files are saved", and "I will now start extracting health data"
+        # acknowledgement messages have been removed from the flow entirely.
+        # Extraction proceeds silently and the user sees only the finalization
+        # / care plan message at the end.
 
         success_count = 0
         fail_count = 0
