@@ -27,7 +27,6 @@ Context building:
     - Preventive records (item names, dates, statuses).
     - Reminders (upcoming items and due dates).
     - Documents (upload history and extraction status).
-    - Health score.
 
 Rules:
     - All model config from constants.py.
@@ -63,7 +62,6 @@ from app.models.reminder import Reminder
 from app.models.user import User
 from app.models.weight_history import WeightHistory
 from app.services.diet_service import split_diet_items_by_type
-from app.services.health_score import compute_health_score
 from app.utils.retry import retry_openai_call
 
 logger = logging.getLogger(__name__)
@@ -103,8 +101,27 @@ QUERY_SYSTEM_PROMPT = (
     "PetCircle does not track grooming.\n"
     "- Do NOT help with scheduling vet visits or appointments. PetCircle does not "
     "provide vet visit scheduling. If asked, suggest the parent contact their vet directly.\n"
+    "- Do NOT mention health score, scoring, or numeric wellness ratings in answers, even if asked.\n"
     "- Format responses for WhatsApp (use *bold* for emphasis, keep it readable)."
 )
+
+
+def _is_score_related_text(value: str) -> bool:
+    """Return True when text appears to reference health scoring metrics."""
+    text = (value or "").strip().lower()
+    if not text:
+        return False
+
+    blocked_tokens = (
+        "health score",
+        "overall score",
+        "wellness score",
+        "score/100",
+        "/100",
+        "dragger",
+        "breakdown",
+    )
+    return any(token in text for token in blocked_tokens)
 
 
 def _build_pet_context(db: Session, pet_id: UUID) -> str:
@@ -120,7 +137,6 @@ def _build_pet_context(db: Session, pet_id: UUID) -> str:
         - Preventive records (item name, last done, next due, status).
         - Active reminders (item name, due date, status).
         - Documents (count, types, extraction statuses).
-        - Health score (overall and category breakdown).
 
     All data is read from DB — no hardcoded values.
 
@@ -449,22 +465,21 @@ def _build_pet_context(db: Session, pet_id: UUID) -> str:
             content = ins.content_json
             if isinstance(content, dict):
                 for k, v in content.items():
+                    key_text = str(k)
+                    value_text = str(v)
+                    if _is_score_related_text(key_text) or _is_score_related_text(value_text):
+                        continue
                     context_parts.append(f"- {k}: {v}")
             elif isinstance(content, list):
                 for item in content[:5]:
+                    item_text = str(item)
+                    if _is_score_related_text(item_text):
+                        continue
                     context_parts.append(f"- {item}")
             else:
-                context_parts.append(str(content)[:300])
-
-    # --- Health score (6-category, single source of truth) ---
-    hs = compute_health_score(db, pet_id)
-    context_parts.append("\n=== Health Score ===")
-    context_parts.append(f"Overall Score: {hs['score']}/100 ({hs['label']})")
-    for b in hs["breakdown"]:
-        done_str = f"{b['done']}/{b['total']}" if b["done"] is not None else "N/A"
-        context_parts.append(
-            f"- {b['category']} ({b['weight']}%): {b['score']}/100 [{done_str}]"
-        )
+                content_text = str(content)[:300]
+                if not _is_score_related_text(content_text):
+                    context_parts.append(content_text)
 
     return "\n".join(context_parts)
 

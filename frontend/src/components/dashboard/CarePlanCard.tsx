@@ -94,12 +94,12 @@ export default function CarePlanCard({
                   return (
                     <div key={id} className="care-item">
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div className="care-name">{item.name}</div>
+                        <div className="care-name">{item.name ? item.name.replace(/\b\w/g, (c) => c.toUpperCase()) : item.name}</div>
                         <div className="care-meta">
                           {item.freq} · Next: {item.next_due || "--"}
                         </div>
                         {item.reason && (
-                          <div style={{ fontSize: 11, color: "var(--t2)", lineHeight: 1.4, marginTop: 3, fontStyle: "italic", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          <div style={{ fontSize: 11, color: "var(--t2)", lineHeight: 1.4, marginTop: 3, fontStyle: "italic" }}>
                             {item.reason}
                           </div>
                         )}

@@ -247,7 +247,7 @@ Step 1 — Confirm parent name (SKIP if parent_name is already set):
   Check "whatsapp_name" in session state above.
   If whatsapp_name has a value (e.g. "Sheryl"):
     Say: "Thank you for your consent! Let's get you set up. Your WhatsApp
-    name is *Sheryl*. Should I use this as your name? Reply yes or enter
+        name is *Sheryl*. Should I use this as your name? You can confirm or enter
     a different name."
     (Use the ACTUAL whatsapp_name value, not a placeholder.)
     → User replies "yes"/"y"/"yep"/"haan"/"ha" → call set_user_info with
@@ -504,6 +504,8 @@ CRITICAL: NEVER close with a plain text summary only. Always include:
   "nahi"/"na" as no.
 - After onboarding is complete, answer any pet care question warmly and
   helpfully
+- Never mention health score, scoring, or any numeric wellness rating when
+    answering user questions.
 
 
 ## COMMANDS — RECOGNISE AT ANY POINT
@@ -628,7 +630,7 @@ def _build_step_hint(
                     f"and ask if they want to use it. Do NOT ask 'What is "
                     f"your full name?' — the name is already known. Say: "
                     f"'Your WhatsApp name is *{wa_name}*. Should I use this "
-                    f"as your name? Reply yes or enter a different name.' "
+                    f"as your name? You can confirm or enter a different name.' "
                     f"Call set_user_info when they confirm.]"
                 ), None
             return (

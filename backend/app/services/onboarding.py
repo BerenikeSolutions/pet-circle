@@ -893,7 +893,7 @@ async def _step_meal_details(db, user, text, send_fn):
                 db, mobile,
                 f"Just to confirm — is this what {pet.name} eats?\n\n"
                 f"_{example_shown}_\n\n"
-                f"Reply *yes* if that's right, or tell me what's different "
+                f"You can share any corrections if needed "
                 f"(e.g., 'yes but no egg' or 'yes and also curd').",
             )
             return
@@ -1024,7 +1024,7 @@ async def _step_preventive(db, user, text, send_fn):
             db, mobile,
             f"Just to confirm — is this {pet.name}'s preventive care history?\n\n"
             f"_{example_shown}_\n\n"
-            f"Reply *yes* if that's right, or tell me what's different "
+            f"You can share any corrections if needed "
             f"(e.g., 'yes but deworming was 2 months ago').",
         )
         return
@@ -1163,7 +1163,17 @@ def _upsert_preventive_record(db, pet, master, parsed_date) -> None:
     """
     Create or update a PreventiveRecord for (pet, master), keeping the most
     recent last_done_date. Caller is responsible for committing.
+
+    Computes next_due_date and status so the NOT NULL constraint on
+    PreventiveRecord.status is satisfied.
     """
+    from app.services.preventive_calculator import compute_next_due_date, compute_status
+
+    recurrence_days = master.recurrence_days or 365
+    reminder_before_days = master.reminder_before_days or 30
+    next_due = compute_next_due_date(parsed_date, recurrence_days)
+    status = compute_status(next_due, reminder_before_days)
+
     existing = (
         db.query(PreventiveRecord)
         .filter(
@@ -1175,11 +1185,15 @@ def _upsert_preventive_record(db, pet, master, parsed_date) -> None:
     if existing:
         if not existing.last_done_date or parsed_date > existing.last_done_date:
             existing.last_done_date = parsed_date
+            existing.next_due_date = next_due
+            existing.status = status
     else:
         record = PreventiveRecord(
             pet_id=pet.id,
             preventive_master_id=master.id,
             last_done_date=parsed_date,
+            next_due_date=next_due,
+            status=status,
         )
         db.add(record)
 
@@ -1482,8 +1496,27 @@ async def _ai_resolve_example_confirmation(
         return data.get("result", example_text)
     except Exception as e:
         logger.warning("AI example confirmation parse failed: %s", str(e))
-        # On failure, if reply looks like yes, accept the example.
-        if user_reply.strip().lower() in _YES_INPUTS:
+        # On failure, accept common natural affirmations as confirmation.
+        normalized_reply = re.sub(r"\s+", " ", user_reply.strip().lower())
+        negative_markers = (
+            "not ",
+            "n't",
+            "no ",
+            "wrong",
+            "different",
+            "change",
+        )
+        extra_yes_phrases = (
+            "looks good",
+            "all good",
+            "sounds good",
+            "that's right",
+            "thats right",
+            "correct",
+        )
+        if normalized_reply in _NO_INPUTS or any(marker in normalized_reply for marker in negative_markers):
+            return "__reject__"
+        if normalized_reply in _YES_INPUTS or any(p in normalized_reply for p in extra_yes_phrases):
             return example_text
         return "__reject__"
 

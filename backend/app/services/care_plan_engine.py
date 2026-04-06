@@ -248,7 +248,7 @@ _ITEM_NAME_PATTERNS: list[tuple[str, str]] = [
 # Section presentation metadata per test_type (icon + display title).
 _SECTION_META: dict[str, dict[str, str]] = {
     "vaccine": {"icon": "💉", "title": "Vaccines & Preventive Care"},
-    "tick_flea": {"icon": "🐛", "title": "Tick & Flea Prevention"},
+    "tick_flea": {"icon": "🐛", "title": "Flea & Tick Protection"},
     "deworming": {"icon": "💊", "title": "Deworming"},
     "dental": {"icon": "🦷", "title": "Dental Care"},
     "cbc_chemistry": {"icon": "🩸", "title": "Blood Tests (CBC)"},
@@ -263,11 +263,16 @@ _SECTION_META: dict[str, dict[str, str]] = {
 }
 _DEFAULT_SECTION_META: dict[str, str] = {"icon": "🏥", "title": "Other Care"}
 
+# Map test_types that should be grouped under another section's key.
+# Deworming items appear under the "Vaccines & Preventive Care" section.
+_SECTION_GROUP: dict[str, str] = {
+    "deworming": "vaccine",
+}
+
 # Display order for sections within each bucket.
 _SECTION_ORDER: list[str] = [
     "vaccine",
     "tick_flea",
-    "deworming",
     "dental",
     "food",
     "supplement",
@@ -704,7 +709,7 @@ def _to_sections(
     sections_map: dict[str, CarePlanSectionDict] = {}
 
     for _key, item in items_dict.items():
-        sec_key = item["test_type"]
+        sec_key = _SECTION_GROUP.get(item["test_type"], item["test_type"])
         meta = _SECTION_META.get(sec_key, _DEFAULT_SECTION_META)
         if sec_key not in sections_map:
             sections_map[sec_key] = {
@@ -975,8 +980,9 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
             }
 
             # ── Conflict resolution: ATTEND TO > CONTINUE > SUGGESTED ────────
-            # Overdue and not-started items always go to Attend To.
-            is_overdue = status_tag in ("Overdue", "Not started")
+            # Overdue items go to Attend To; "Not started" items go to
+            # Suggested (Quick Fixes to Add) so the bucket isn't empty.
+            is_overdue = status_tag == "Overdue"
 
             if classification == Classification.PRESCRIPTION_ACTIVE or is_overdue:
                 # Attend To bucket.  Move out of any other bucket.

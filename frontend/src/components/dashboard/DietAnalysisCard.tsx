@@ -67,25 +67,30 @@ export default function DietAnalysisCard({ data, compact = false }: DietAnalysis
           >
             Missing micronutrients
           </div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "nowrap", overflow: "hidden" }}>
-            {missingMicros.map((micro) => (
-              <span
-                key={micro.name}
-                style={{
-                  fontSize: 11,
-                  fontWeight: 600,
-                  padding: "3px 9px",
-                  borderRadius: 20,
-                  background: "var(--ta)",
-                  color: "#b85c00",
-                  whiteSpace: "nowrap",
-                  flexShrink: 0,
-                }}
-                title={micro.reason}
-              >
-                {micro.icon} {micro.name}
-              </span>
-            ))}
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {missingMicros.map((micro) => {
+              const capName = micro.name
+                ? micro.name.charAt(0).toUpperCase() + micro.name.slice(1)
+                : micro.name;
+              return (
+                <span
+                  key={micro.name}
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 600,
+                    padding: "3px 9px",
+                    borderRadius: 20,
+                    background: "var(--ta)",
+                    color: "#b85c00",
+                    whiteSpace: "nowrap",
+                    flexShrink: 0,
+                  }}
+                  title={micro.reason}
+                >
+                  {micro.icon} {capName}
+                </span>
+              );
+            })}
           </div>
         </div>
       )}

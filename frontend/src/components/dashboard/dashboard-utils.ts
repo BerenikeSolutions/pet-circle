@@ -270,9 +270,12 @@ export function buildCarePlanBuckets(data: DashboardData): Record<"continue" | "
     "tick flea": "Flea & Tick Protection",
     "tick & flea": "Flea & Tick Protection",
     "tick and flea": "Flea & Tick Protection",
+    "tick/flea": "Flea & Tick Protection",
     "flea tick": "Flea & Tick Protection",
     "tick flea prevention": "Flea & Tick Protection",
     "tick & flea prevention": "Flea & Tick Protection",
+    "tick/flea prevention": "Flea & Tick Protection",
+    "flea & tick protection": "Flea & Tick Protection",
   };
 
   const PREVENTIVE_SECTIONS = ["vaccines", "vaccine", "preventive", "deworming", "flea", "tick"];
@@ -316,8 +319,7 @@ export function buildCarePlanBuckets(data: DashboardData): Record<"continue" | "
 
 export function normalizeStatusTag(tag: string): string {
   const lower = (tag || "").toLowerCase().trim();
-  if (lower.includes("overdue") || lower.includes("urgent") || lower.includes("red") || lower.includes("missed") || lower.includes("late")) return "Urgent";
-  if (lower.includes("not started")) return "Not started";
+  if (lower.includes("overdue") || lower.includes("urgent") || lower.includes("red") || lower.includes("missed") || lower.includes("late") || lower.includes("not started")) return "Urgent";
   if (lower.includes("soon") || lower.includes("upcoming") || lower.includes("watch") || lower.includes("amber") || lower.includes("yellow")) return "Due soon";
   return "On track";
 }
