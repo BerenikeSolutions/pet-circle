@@ -88,7 +88,7 @@ export default function DashboardView({
   };
 
   return (
-    <div ref={containerRef}>
+    <div ref={containerRef} className="app">
       <ProfileBanner data={data} onGoToReminders={onGoToReminders} />
       <RecognitionCard data={data} onGoToRecords={onGoToRecords} />
       <LifeStageCard data={data} />

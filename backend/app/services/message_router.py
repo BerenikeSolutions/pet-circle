@@ -112,6 +112,40 @@ _batch_document_ids: dict[str, list] = {}
 # Key: str(pet_id), Value: True if batch started during awaiting_documents.
 _batch_is_onboarding: dict[str, bool] = {}
 
+# Tracks whether a user has explicitly asked to keep uploading more documents
+# during the awaiting_documents window. When True, batch extraction will NOT
+# auto-finalize onboarding — the user stays in the upload window until they
+# type 'skip' or the deadline expires.
+# Key: str(user_id), Value: True if user asked to add more files.
+_upload_window_extended: dict[str, bool] = {}
+
+
+def mark_upload_window_extended(user_id) -> None:
+    """Mark that a user explicitly asked to add more documents."""
+    _upload_window_extended[str(user_id)] = True
+
+
+def is_upload_window_extended(user_id) -> bool:
+    """Return True if user asked to keep uploading during awaiting_documents."""
+    return _upload_window_extended.get(str(user_id), False)
+
+
+def clear_upload_window_extended(user_id) -> None:
+    """Clear the 'asked to add more' flag (on finalize or skip)."""
+    _upload_window_extended.pop(str(user_id), None)
+
+
+def get_recent_upload_count(pet_id) -> int:
+    """
+    Return the in-memory count of uploads for a pet within the current batch
+    window. Used to avoid DB race conditions when text messages arrive before
+    async upload processing has committed the Document rows.
+    """
+    pet_key = str(pet_id)
+    cutoff = time.time() - _UPLOAD_BATCH_WINDOW_SECONDS
+    entries = _recent_uploads.get(pet_key, [])
+    return sum(1 for ts in entries if ts > cutoff)
+
 # Seconds to wait after the last upload before starting batch extraction.
 # Gives the user time to finish sending all files in a batch.
 _EXTRACTION_DELAY_SECONDS: int = 15
@@ -200,6 +234,7 @@ async def _auto_finalize_onboarding_after_deadline(user_id, from_number, wait_se
                 return
 
             user._plaintext_mobile = from_number
+            clear_upload_window_extended(user.id)
             await _finalize_onboarding(bg_db, user, send_text_message)
         finally:
             bg_db.close()
@@ -246,6 +281,7 @@ async def sweep_expired_document_windows_once(batch_size: int = 50) -> int:
             try:
                 from_number = decrypt_field(expired_user.mobile_number)
                 expired_user._plaintext_mobile = from_number
+                clear_upload_window_extended(expired_user.id)
                 await _finalize_onboarding(bg_db, expired_user, send_text_message)
                 finalized_count += 1
             except Exception as user_err:
@@ -517,18 +553,6 @@ async def route_message(db: Session, message_data: dict) -> None:
                             from_number=from_number,
                             deadline=user.doc_upload_deadline,
                         )
-                        # User is still in the upload window (didn't skip).
-                        # Clear auto-finalize flag so the pending extraction
-                        # processes documents but does NOT finalize onboarding,
-                        # since the user wants to keep uploading.
-                        pet = (
-                            db.query(Pet)
-                            .filter(Pet.user_id == user.id)
-                            .order_by(Pet.created_at.desc())
-                            .first()
-                        )
-                        if pet:
-                            _batch_is_onboarding.pop(str(pet.id), None)
                 return
 
             # --- Legacy agentic state migration ---
@@ -1254,11 +1278,19 @@ async def _handle_media(db: Session, user, message_data: dict) -> None:
         # deferred extractor doesn't accidentally sweep unrelated pending docs.
         _batch_document_ids.setdefault(pet_key, []).append(document.id)
 
-        # Persist onboarding intent for this batch at upload time.
-        # Once True in a batch, keep it True until that batch is drained.
+        # Persist onboarding intent for this batch at upload time. The
+        # extraction pass later decides whether to finalize onboarding based
+        # on this flag AND whether the user asked to keep uploading more
+        # (see `is_upload_window_extended`).
         if user.onboarding_state == "awaiting_documents":
             _batch_is_onboarding[pet_key] = True
-            _cancel_document_window_timer(user.id)
+            # Keep the deadline timer alive so auto-finalization still fires
+            # at the end of the window if the user goes silent.
+            _schedule_document_window_timer(
+                user_id=user.id,
+                from_number=from_number,
+                deadline=user.doc_upload_deadline,
+            )
         else:
             _batch_is_onboarding.setdefault(pet_key, False)
 
@@ -1363,35 +1395,45 @@ async def _delayed_batch_extraction(
         if user:
             user._plaintext_mobile = from_number
 
-        is_onboarding_upload = bool(_batch_is_onboarding.get(pet_key, False))
-
-        # For onboarding document uploads, send the deterministic transition
-        # message first ("That's everything...") and mark extraction as deferred.
-        # This keeps the flow consistent with the no-document branch.
-        if (
-            is_onboarding_upload
-            and user
+        # Decide whether to finalize onboarding after this batch.
+        #
+        # Rule: if the user uploaded documents during `awaiting_documents` and
+        # did NOT explicitly ask to add more, finalize onboarding now (the
+        # normal "That's everything..." flow).
+        #
+        # If the user explicitly asked to add more (detected earlier and
+        # recorded via `mark_upload_window_extended`), keep them in the upload
+        # window — they'll stay until they type 'skip' or the deadline expires.
+        should_finalize_onboarding = (
+            bool(_batch_is_onboarding.get(pet_key, False))
+            and user is not None
             and user.onboarding_state == "awaiting_documents"
-        ):
+            and not is_upload_window_extended(user.id)
+        )
+        _batch_is_onboarding.pop(pet_key, None)
+
+        if should_finalize_onboarding:
             try:
                 from app.services.onboarding import _finalize_onboarding
+                _cancel_document_window_timer(user.id)
+                clear_upload_window_extended(user.id)
                 await _finalize_onboarding(bg_db, user, send_text_message)
             except Exception as e:
                 logger.warning(
-                    "Could not finalize onboarding before extraction for user=%s: %s",
-                    str(user.id),
-                    str(e),
+                    "Could not finalize onboarding after extraction for user=%s: %s",
+                    str(user.id), str(e),
                 )
                 try:
                     bg_db.rollback()
                 except Exception:
                     pass
-                # If deterministic finalization couldn't run, fall back to the
-                # regular batch acknowledgements to avoid a silent UX gap.
-                is_onboarding_upload = False
+                should_finalize_onboarding = False
 
         # Notify user once per batch with consolidated acknowledgements.
-        if not is_onboarding_upload:
+        # Skipped when we just sent the onboarding finalization message,
+        # so the user doesn't get duplicate "got it / saved / extracting" spam
+        # on top of "That's everything...".
+        if not should_finalize_onboarding:
             doc_names = "\n".join(f"  - {d.document_name or d.file_path.split('/')[-1]}" for d in pending_docs)
             pet_species = pet.species if pet else "dog"
             pet_breed = pet.breed if pet else None

@@ -830,9 +830,27 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
         life_stage = _get_life_stage(age_months, breed_size)
 
         # ── Fetch preventive records with their master items ──────────────────
-        records_by_type: dict[str, list[_Report]] = {}
-        # Track display name per canonical test_type (last seen wins).
-        item_names_by_type: dict[str, str] = {}
+        #
+        # NOTE: items are keyed by an "item_key" — NOT just the canonical
+        # test_type. For most test_types, item_key == test_type. For vaccines,
+        # each distinct master.item_name (e.g. "Rabies Vaccine", "DHPPi",
+        # "Kennel Cough (Nobivac KC)", "Canine Coronavirus (CCoV)") gets its
+        # own key so the dashboard can list each vaccine as a separate row
+        # instead of collapsing them into a single "Vaccines" entry.
+        # The `test_type` stored on each item dict stays as "vaccine" so that
+        # `_to_sections` still groups them under the "Vaccines & Preventive
+        # Care" section.
+
+        def _build_item_key(test_type: str, item_name: str | None) -> str:
+            if test_type == "vaccine" and item_name:
+                return f"vaccine:{item_name.strip().lower()}"
+            return test_type
+
+        records_by_key: dict[str, list[_Report]] = {}
+        # Canonical test_type per item_key (needed for baseline lookup).
+        test_type_by_key: dict[str, str] = {}
+        # Display name per item_key (first-seen per key wins).
+        item_names_by_key: dict[str, str] = {}
 
         record_rows = (
             db.query(PreventiveRecord, PreventiveMaster)
@@ -852,16 +870,18 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
             test_type = _normalize_item_name(master.item_name)
             if test_type == "other":
                 continue
-            if test_type not in records_by_type:
-                records_by_type[test_type] = []
-                item_names_by_type[test_type] = master.item_name
-            records_by_type[test_type].append(
+            item_key = _build_item_key(test_type, master.item_name)
+            if item_key not in records_by_key:
+                records_by_key[item_key] = []
+                test_type_by_key[item_key] = test_type
+                item_names_by_key[item_key] = master.item_name
+            records_by_key[item_key].append(
                 _Report(report_date=record.last_done_date, is_prescription=False)
             )
 
         # ── Fetch active prescriptions scoped to this pet ────────────────────
         # Join via Condition to ensure we only pick up medications for this pet.
-        prescriptions_by_type: dict[str, _Prescription] = {}
+        prescriptions_by_key: dict[str, _Prescription] = {}
 
         active_meds = (
             db.query(ConditionMedication)
@@ -879,39 +899,52 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
             # Food and supplement medications are handled by diet_items; skip.
             if test_type in ("other", "food", "supplement"):
                 continue
-            # Last prescription per type wins (more recent takes precedence).
-            existing = prescriptions_by_type.get(test_type)
+            item_key = _build_item_key(test_type, med.name)
+            test_type_by_key.setdefault(item_key, test_type)
+            item_names_by_key.setdefault(item_key, med.name)
+            # Last prescription per key wins (more recent takes precedence).
+            existing = prescriptions_by_key.get(item_key)
             if existing is None or med.refill_due_date > existing.due_date:
-                prescriptions_by_type[test_type] = _Prescription(
+                prescriptions_by_key[item_key] = _Prescription(
                     due_date=med.refill_due_date,
                     medicine_name=med.name,
                 )
 
-        # ── Determine full set of test_types to classify ─────────────────────
-        # Begin with test_types that have records or prescriptions.
-        all_test_types: set[str] = set(records_by_type.keys()) | set(prescriptions_by_type.keys())
+        # ── Determine full set of item_keys to classify ──────────────────────
+        # Begin with keys that have records or prescriptions.
+        all_item_keys: set[str] = set(records_by_key.keys()) | set(prescriptions_by_key.keys())
         # Add all test_types that exist in the baseline for this life stage,
         # so items with no history appear as Suggested (requirement 9.9).
+        has_any_vaccine_record = any(k.startswith("vaccine:") for k in all_item_keys)
         for ls, tt in BASELINE_PROTOCOL:
-            if ls == life_stage.value:
-                all_test_types.add(tt)
+            if ls != life_stage.value:
+                continue
+            # If the pet already has specific vaccine records, don't add the
+            # generic "vaccine" baseline — that would show a duplicate generic
+            # row alongside the specific DHPPi / Rabies / etc rows.
+            if tt == "vaccine" and has_any_vaccine_record:
+                continue
+            if tt not in all_item_keys:
+                all_item_keys.add(tt)
+                test_type_by_key.setdefault(tt, tt)
 
         today = date.today()
         next_year = today + timedelta(days=_NEXT_YEAR_THRESHOLD_DAYS)
 
-        # Buckets keyed by test_type (conflict resolution applied inline).
+        # Buckets keyed by item_key (conflict resolution applied inline).
         attend_items: dict[str, CarePlanItemDict] = {}
         continue_items: dict[str, CarePlanItemDict] = {}
         add_items: dict[str, CarePlanItemDict] = {}
 
-        for test_type in sorted(all_test_types):
+        for item_key in sorted(all_item_keys):
+            test_type = test_type_by_key.get(item_key, item_key)
             if test_type in ("food", "supplement", "other"):
                 continue  # handled separately below
 
-            reports = records_by_type.get(test_type, [])
+            reports = records_by_key.get(item_key, [])
             filtered = _filter_redundant_reports(reports)
             baseline_days = _get_baseline_protocol(life_stage, test_type)
-            prescription = prescriptions_by_type.get(test_type)
+            prescription = prescriptions_by_key.get(item_key)
 
             classification = _classify_test(filtered, baseline_days, prescription)
             next_due = _compute_next_due(classification, filtered, baseline_days, prescription)
@@ -920,7 +953,7 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
             if next_due is not None and next_due > next_year:
                 continue
 
-            name = item_names_by_type.get(test_type, test_type.replace("_", " ").title())
+            name = item_names_by_key.get(item_key, test_type.replace("_", " ").title())
             freq_label = _days_to_freq_label(baseline_days)
             status_tag = _status_tag(next_due, classification)
 
@@ -938,20 +971,20 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
             # ── Conflict resolution: ATTEND TO > CONTINUE > SUGGESTED ────────
             if classification == Classification.PRESCRIPTION_ACTIVE:
                 # Attend To bucket.  Move out of any other bucket.
-                attend_items[test_type] = item
-                continue_items.pop(test_type, None)
-                add_items.pop(test_type, None)
+                attend_items[item_key] = item
+                continue_items.pop(item_key, None)
+                add_items.pop(item_key, None)
 
             elif classification == Classification.PERIODIC:
                 # Continue bucket — only if not already in Attend To.
-                if test_type not in attend_items:
-                    continue_items[test_type] = item
-                    add_items.pop(test_type, None)
+                if item_key not in attend_items:
+                    continue_items[item_key] = item
+                    add_items.pop(item_key, None)
 
             else:
                 # Suggested bucket — only if not already in a higher bucket.
-                if test_type not in attend_items and test_type not in continue_items:
-                    add_items[test_type] = item
+                if item_key not in attend_items and item_key not in continue_items:
+                    add_items[item_key] = item
 
         # ── Add orderable food / supplements to Continue bucket ──────────────
         # Requirement 9.12: place ongoing food and supplements in Continue.

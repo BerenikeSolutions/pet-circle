@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CarePlanItem } from "@/lib/api";
 import ProfileBanner from "./ProfileBanner";
-import CompactRecordsCard from "./CompactRecordsCard";
+import RecognitionCard from "./RecognitionCard";
 import AnalysisSummaryCard from "./AnalysisSummaryCard";
 import CarePlanTracker from "./CarePlanTracker";
 import CarePlanCard from "./CarePlanCard";
@@ -33,7 +33,6 @@ export default function ReturningDashboardView({
 
   const buckets = useMemo(() => buildCarePlanBuckets(data), [data]);
   const carePlanCounts = useMemo(() => computeCarePlanCounts(data), [data]);
-  const reportCount = data.recognition?.report_count ?? data.documents?.length ?? 0;
 
   useEffect(() => {
     if (floaterUnlocked) return;
@@ -73,9 +72,9 @@ export default function ReturningDashboardView({
   };
 
   return (
-    <div ref={containerRef}>
+    <div ref={containerRef} className="app">
       <ProfileBanner data={data} onGoToReminders={onGoToReminders} />
-      <CompactRecordsCard reportCount={reportCount} onGoToRecords={onGoToRecords} />
+      <RecognitionCard data={data} onGoToRecords={onGoToRecords} />
       <AnalysisSummaryCard data={data} onGoToTrends={onGoToTrends} />
       <CarePlanTracker
         petName={data.pet.name}

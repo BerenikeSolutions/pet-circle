@@ -49,19 +49,17 @@ export default function RecognitionCard({ data, onGoToRecords }: RecognitionCard
             borderTop: index === 0 ? "1px solid var(--border)" : "none",
           }}
         >
-          <span style={{ fontSize: 16, flexShrink: 0 }}>{bullet.icon || "•"}</span>
+          <span style={{ fontSize: 16, flexShrink: 0, alignSelf: "flex-start", marginTop: 1 }}>{bullet.icon || "•"}</span>
           <span
             style={{
               fontSize: 13,
               color: "var(--t1)",
               fontWeight: 500,
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
+              lineHeight: 1.4,
+              wordBreak: "break-word",
             }}
-            title={bullet.label}
           >
-            {bullet.label.replace("active conditions", "active health conditions")}
+            {bullet.label}
           </span>
         </div>
       ))}

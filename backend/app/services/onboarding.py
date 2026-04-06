@@ -1526,13 +1526,16 @@ async def _generate_doc_upload_reply(
     client = _get_openai_onboarding_client()
     prompt = (
         "You are a friendly pet care assistant helping a user upload health records "
-        f"for their pet {pet_name} during onboarding. "
-        f"They have uploaded {docs_uploaded} file(s) so far and can upload {remaining} more. "
-        f"Accepted formats: JPEG, PNG, PDF. They can type 'skip' to continue without uploading.\n\n"
+        f"for their pet {pet_name} during onboarding.\n\n"
+        f"FACTS (use these EXACT numbers — do NOT invent or change them):\n"
+        f"- Files already uploaded: {docs_uploaded}\n"
+        f"- Files they can still upload: {remaining}\n"
+        f"- Accepted formats: JPEG, PNG, PDF\n\n"
         f"The user said: \"{user_message}\"\n\n"
         "Reply in 1-2 short, warm sentences. Address what they said naturally. "
-        "If they're asking whether they can add more, tell them how many more they can send. "
-        "If remaining is 0, let them know they've hit the limit and can type skip to continue. "
+        f"If they're asking whether they can add more, tell them they can send {remaining} more. "
+        "If remaining is 0, let them know they've hit the upload limit. "
+        "Do NOT mention 'skip', 'skipping', or any way to exit/continue the upload step. "
         "Do NOT use markdown headings. Use *bold* sparingly for key info only."
     )
     try:
@@ -1549,9 +1552,23 @@ async def _generate_doc_upload_reply(
         if remaining > 0:
             return (
                 f"You can still upload *{remaining} more* file(s) for {pet_name} "
-                f"(JPEG, PNG, or PDF). Or type *skip* to continue."
+                f"(JPEG, PNG, or PDF)."
             )
-        return f"You've uploaded all {docs_uploaded} files for {pet_name}. Type *skip* to continue."
+        return f"You've uploaded all {docs_uploaded} files for {pet_name}."
+
+
+_ADD_MORE_KEYWORDS: tuple[str, ...] = (
+    "more", "add", "another", "one more", "also", "wait",
+    "hold on", "hold", "can i", "let me", "send more", "upload more",
+    "additional", "extra",
+)
+
+
+def _is_add_more_intent(text_lower: str) -> bool:
+    """Detect whether the user is asking to upload additional documents."""
+    if not text_lower:
+        return False
+    return any(kw in text_lower for kw in _ADD_MORE_KEYWORDS)
 
 
 async def _step_awaiting_documents(db, user, text_lower, send_fn):
@@ -1560,26 +1577,59 @@ async def _step_awaiting_documents(db, user, text_lower, send_fn):
 
     Accepts "skip" to exit immediately. If the deadline has passed,
     auto-transitions to complete. Otherwise prompts for uploads.
+
+    If the user asks to add more documents (detected via keywords), the
+    upload window is marked as "extended" so batch extraction will NOT
+    auto-finalize onboarding — the user stays in the upload window until
+    they explicitly skip or the deadline expires.
     """
     mobile = user._plaintext_mobile
 
     # Check if deadline has expired.
     if user.doc_upload_deadline and datetime.now(UTC) > user.doc_upload_deadline:
+        try:
+            from app.services.message_router import clear_upload_window_extended
+            clear_upload_window_extended(user.id)
+        except Exception:
+            pass
         await _finalize_onboarding(db, user, send_fn)
         return
 
     # "skip" exits the upload window immediately.
     if _is_doc_skip_intent(text_lower):
+        try:
+            from app.services.message_router import clear_upload_window_extended
+            clear_upload_window_extended(user.id)
+        except Exception:
+            pass
         await _finalize_onboarding(db, user, send_fn)
         return
 
-    # Any other text — generate a natural response via GPT.
+    # Count uploads using BOTH the DB and the in-memory batch tracker.
+    # The in-memory count avoids a race where a text message arrives before
+    # the async upload pipeline has committed the Document rows.
     pet = db.query(Pet).filter(Pet.user_id == user.id).order_by(Pet.created_at.desc()).first()
     pet_name = pet.name if pet else "your pet"
-    docs_uploaded = 0
+    db_count = 0
+    in_memory_count = 0
     if pet:
-        docs_uploaded = db.query(Document).filter(Document.pet_id == pet.id).count()
+        db_count = db.query(Document).filter(Document.pet_id == pet.id).count()
+        try:
+            from app.services.message_router import get_recent_upload_count
+            in_memory_count = get_recent_upload_count(pet.id)
+        except Exception:
+            in_memory_count = 0
+    docs_uploaded = max(db_count, in_memory_count)
     remaining = max(0, MAX_PENDING_DOCS_PER_PET - docs_uploaded)
+
+    # If the user is asking to add more, mark the window as extended so the
+    # batch extractor won't finalize onboarding behind their back.
+    if _is_add_more_intent(text_lower):
+        try:
+            from app.services.message_router import mark_upload_window_extended
+            mark_upload_window_extended(user.id)
+        except Exception as e:
+            logger.warning("Failed to mark upload window extended: %s", str(e))
 
     reply = await _generate_doc_upload_reply(pet_name, text_lower, docs_uploaded, remaining)
     await send_fn(db, mobile, reply)

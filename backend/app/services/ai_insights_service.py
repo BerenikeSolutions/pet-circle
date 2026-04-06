@@ -35,7 +35,6 @@ from app.config import settings
 from app.core.constants import OPENAI_QUERY_MODEL
 from app.models.condition import Condition
 from app.models.diet_item import DietItem
-from app.models.document import Document
 from app.models.pet import Pet
 from app.models.pet_ai_insight import PetAiInsight
 from app.models.preventive_record import PreventiveRecord
@@ -553,16 +552,6 @@ async def generate_recognition_bullets(db: Session, pet: Pet) -> list[Bullet]:
     if not pet:
         return []
 
-    report_count = (
-        db.query(func.count(Document.id))
-        .filter(
-            Document.pet_id == pet.id,
-            Document.extraction_status == "success",
-        )
-        .scalar()
-        or 0
-    )
-
     active_condition_count = (
         db.query(func.count(Condition.id))
         .filter(
@@ -593,13 +582,12 @@ async def generate_recognition_bullets(db: Session, pet: Pet) -> list[Bullet]:
     bullets: list[Bullet] = []
 
     if active_condition_count > 0:
-        report_phrase = f" from {report_count} reviewed reports" if report_count > 0 else ""
         bullets.append(
             {
                 "icon": "🩺",
                 "label": (
-                    f"Found {active_condition_count} active health conditions"
-                    f"{report_phrase}."
+                    f"{active_condition_count} health condition"
+                    f"{'s' if active_condition_count != 1 else ''} being managed"
                 ),
             }
         )
@@ -609,7 +597,8 @@ async def generate_recognition_bullets(db: Session, pet: Pet) -> list[Bullet]:
             {
                 "icon": "✅",
                 "label": (
-                    f"{on_schedule_preventive_count} preventive items are currently on schedule."
+                    f"{on_schedule_preventive_count} preventive care item"
+                    f"{'s' if on_schedule_preventive_count != 1 else ''} are tracked"
                 ),
             }
         )
