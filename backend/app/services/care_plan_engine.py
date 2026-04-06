@@ -267,12 +267,12 @@ _DEFAULT_SECTION_META: dict[str, str] = {"icon": "🏥", "title": "Other Care"}
 # Deworming items appear under the "Vaccines & Preventive Care" section.
 _SECTION_GROUP: dict[str, str] = {
     "deworming": "vaccine",
+    "tick_flea": "vaccine",
 }
 
 # Display order for sections within each bucket.
 _SECTION_ORDER: list[str] = [
     "vaccine",
-    "tick_flea",
     "dental",
     "food",
     "supplement",

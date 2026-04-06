@@ -106,7 +106,9 @@ export default function CarePlanCard({
                       </div>
 
                       <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5, flexShrink: 0 }}>
-                        <span className={`s-tag ${itemStatusClass(item)}`}>{normalizeStatusTag(item.status_tag)}</span>
+                        {item.test_type !== "food" && (
+                          <span className={`s-tag ${itemStatusClass(item)}`}>{normalizeStatusTag(item.status_tag)}</span>
+                        )}
 
                         {canOrder && (
                           <button

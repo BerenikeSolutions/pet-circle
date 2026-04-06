@@ -279,6 +279,7 @@ export function buildCarePlanBuckets(data: DashboardData): Record<"continue" | "
   };
 
   const PREVENTIVE_SECTIONS = ["vaccines", "vaccine", "preventive", "deworming", "flea", "tick"];
+  const FOOD_SECTIONS = ["diet", "food"];
 
   const normalizeSectionTitle = (title: string): string => {
     const mapped = SECTION_TITLE_MAP[title.toLowerCase().trim()];
@@ -288,6 +289,11 @@ export function buildCarePlanBuckets(data: DashboardData): Record<"continue" | "
   const isPreventiveSection = (title: string): boolean => {
     const lower = title.toLowerCase();
     return PREVENTIVE_SECTIONS.some((kw) => lower.includes(kw));
+  };
+
+  const isFoodSection = (title: string): boolean => {
+    const lower = title.toLowerCase();
+    return FOOD_SECTIONS.some((kw) => lower.includes(kw));
   };
 
   const sanitizeSection = (bucket: "continue" | "attend" | "add", section: CarePlanSection): CarePlanSection => {
@@ -312,8 +318,12 @@ export function buildCarePlanBuckets(data: DashboardData): Record<"continue" | "
 
   return {
     continue: source.continue.map((section) => sanitizeSection("continue", section)),
-    attend: source.attend.map((section) => sanitizeSection("attend", section)),
-    add: source.add.map((section) => sanitizeSection("add", section)),
+    attend: source.attend
+      .map((section) => sanitizeSection("attend", section))
+      .filter((section) => !isFoodSection(section.title)),
+    add: source.add
+      .map((section) => sanitizeSection("add", section))
+      .filter((section) => !isFoodSection(section.title)),
   };
 }
 
@@ -339,9 +349,11 @@ export function computeCarePlanCounts(
   let dueSoon = 0;
   let overdue = 0;
 
+  const EXCLUDED_TYPES = new Set(["food", "supplement"]);
   for (const sections of Object.values(buckets)) {
     for (const section of sections) {
       for (const item of section.items) {
+        if (EXCLUDED_TYPES.has(item.test_type || "")) continue;
         const cls = itemStatusClass(item);
         if (cls === "s-tag-r") overdue += 1;
         else if (cls === "s-tag-y") dueSoon += 1;
