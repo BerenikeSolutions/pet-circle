@@ -156,7 +156,7 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
             }}
           />
         ))}
-        <div className="stage-marker" style={{ left: `${markerPct}%` }} />
+        <div className="stage-marker" style={{ left: `clamp(12px, ${markerPct}%, calc(100% - 12px))` }} />
       </div>
 
       <div
@@ -167,7 +167,7 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
           marginBottom: 8,
         }}
       >
-        <div className="stage-caption" style={{ left: `${markerPct}%` }}>
+        <div className="stage-caption" style={{ left: `clamp(60px, ${markerPct}%, calc(100% - 60px))` }}>
           {data.pet.name} is here · {ageLabel}
         </div>
       </div>

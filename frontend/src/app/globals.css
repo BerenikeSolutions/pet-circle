@@ -210,7 +210,9 @@ body {
 .stage-caption {
   position: absolute;
   transform: translateX(-50%);
-  white-space: nowrap;
+  max-width: min(92%, 240px);
+  text-align: center;
+  line-height: 1.2;
   font-size: 12px;
   color: var(--orange);
   font-weight: 600;

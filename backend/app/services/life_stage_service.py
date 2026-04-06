@@ -276,27 +276,51 @@ async def get_life_stage_data(db: Session, pet: Pet) -> LifeStageData:
     breed_size = _get_breed_size(weight_kg, pet.breed)
     stage = _get_life_stage(age_months, breed_size)
     boundaries = BREED_SIZE_BOUNDARIES[breed_size]
+    documented_risks = _collect_documented_risks(db, pet)
+    risk_keywords = _risk_keywords(documented_risks)
+    has_specific_risks = any(
+        not risk.lower().startswith("life-stage transition risk")
+        for risk in documented_risks
+    )
 
     existing_rows = db.query(PetLifeStageTrait).filter_by(pet_id=pet.id).all()
-    current_row = next((row for row in existing_rows if row.life_stage == stage.value), None)
+    exact_row = next(
+        (
+            row
+            for row in existing_rows
+            if row.life_stage == stage.value and row.breed_size == breed_size.value
+        ),
+        None,
+    )
 
-    if current_row and current_row.breed_size == breed_size.value:
-        return LifeStageData(
-            stage=stage.value,
-            age_months=age_months,
-            breed_size=breed_size.value,
-            stage_boundaries={
-                "junior_start": int(boundaries["junior_start"]),
-                "adult_start": int(boundaries["adult_start"]),
-                "senior_start": int(boundaries["senior_start"]),
-            },
-            traits=current_row.traits if isinstance(current_row.traits, list) else [],
-            essential_care=(
-                current_row.essential_care if isinstance(current_row.essential_care, list) else []
-            ),
+    if exact_row:
+        cached_traits = exact_row.traits if isinstance(exact_row.traits, list) else []
+        cached_essential = exact_row.essential_care if isinstance(exact_row.essential_care, list) else []
+        essential_ok = (
+            True
+            if not has_specific_risks
+            else bool(cached_essential)
+            and all(_is_risk_tied_care_item(item, risk_keywords) for item in cached_essential)
         )
 
-    documented_risks = _collect_documented_risks(db, pet)
+        if essential_ok:
+            return LifeStageData(
+                stage=stage.value,
+                age_months=age_months,
+                breed_size=breed_size.value,
+                stage_boundaries={
+                    "junior_start": int(boundaries["junior_start"]),
+                    "adult_start": int(boundaries["adult_start"]),
+                    "senior_start": int(boundaries["senior_start"]),
+                },
+                traits=cached_traits,
+                essential_care=cached_essential,
+            )
+
+        logger.info(
+            "Refreshing cached life-stage traits for pet=%s due to quality/risk mismatch",
+            pet.id,
+        )
 
     try:
         generated = await _generate_life_stage_traits_gpt(
@@ -320,7 +344,6 @@ async def get_life_stage_data(db: Session, pet: Pet) -> LifeStageData:
             essential_care=[],
         )
 
-    risk_keywords = _risk_keywords(documented_risks)
     filtered_traits = [t for t in generated.traits if _is_stage_specific_trait(t.get("label", ""))]
     filtered_essential = [
         item for item in generated.essential_care
@@ -333,18 +356,24 @@ async def get_life_stage_data(db: Session, pet: Pet) -> LifeStageData:
     filtered_essential = filtered_essential[:_MAX_ESSENTIAL_CARE_ITEMS]
 
     for row in existing_rows:
-        if row.life_stage != stage.value or row.breed_size != breed_size.value:
+        if row is not exact_row:
             db.delete(row)
 
-    cache_row = PetLifeStageTrait(
-        pet_id=pet.id,
-        life_stage=stage.value,
-        breed_size=breed_size.value,
-        traits=filtered_traits,
-        essential_care=filtered_essential,
-        generated_at=datetime.now(UTC).replace(tzinfo=None),
-    )
-    db.add(cache_row)
+    if exact_row:
+        exact_row.breed_size = breed_size.value
+        exact_row.traits = filtered_traits
+        exact_row.essential_care = filtered_essential
+        exact_row.generated_at = datetime.now(UTC).replace(tzinfo=None)
+    else:
+        cache_row = PetLifeStageTrait(
+            pet_id=pet.id,
+            life_stage=stage.value,
+            breed_size=breed_size.value,
+            traits=filtered_traits,
+            essential_care=filtered_essential,
+            generated_at=datetime.now(UTC).replace(tzinfo=None),
+        )
+        db.add(cache_row)
     db.commit()
 
     return LifeStageData(
