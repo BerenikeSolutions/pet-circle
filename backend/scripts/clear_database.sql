@@ -29,8 +29,10 @@ TRUNCATE TABLE shown_fun_facts CASCADE;
 
 -- AI insights & agent sessions
 TRUNCATE TABLE pet_ai_insights CASCADE;
+TRUNCATE TABLE pet_life_stage_traits CASCADE;
 TRUNCATE TABLE agent_onboarding_sessions CASCADE;
 TRUNCATE TABLE agent_order_sessions CASCADE;
+TRUNCATE TABLE deferred_care_plan_pending CASCADE;
 
 -- Flags & conflicts
 TRUNCATE TABLE conflict_flags CASCADE;

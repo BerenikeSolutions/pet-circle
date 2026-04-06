@@ -40,6 +40,7 @@ from app.core.constants import (
     DASHBOARD_TOKEN_EXPIRY_DAYS,
     DOC_UPLOAD_WINDOW_SECONDS,
     GREETINGS,
+    MAX_PENDING_DOCS_PER_PET,
     MAX_PET_WEIGHT_KG,
     MAX_PETS_PER_USER,
 )
@@ -941,10 +942,19 @@ async def _step_preventive(db, user, text, send_fn):
         if provided:
             ack = f"Got it — {' and '.join(provided)} noted! "
 
+        # Build examples only for missing categories
+        missing_examples = {
+            "vaccines": "vaccines last Dec",
+            "deworming": "deworming 3 months ago",
+            "flea_tick": "flea drops 2 months ago",
+            "blood_test": "no blood test yet",
+        }
+        eg_parts = [missing_examples[m] for m in missing if m in missing_examples]
+        eg_str = f" (e.g., {', '.join(eg_parts)})" if eg_parts else ""
+
         await send_fn(
             db, mobile,
-            f"{ack}What about {missing_str}? "
-            f"(e.g., flea drops 2 months ago, no blood test yet)",
+            f"{ack}What about {missing_str}?{eg_str}",
         )
         return
 
@@ -1371,6 +1381,41 @@ async def _parse_grooming_input(text: str) -> list[tuple[str, int, str]]:
         return [(text.strip(), 1, "month")]
 
 
+async def _generate_doc_upload_reply(
+    pet_name: str, user_message: str, docs_uploaded: int, remaining: int,
+) -> str:
+    """Generate a natural GPT reply for text messages during the document upload window."""
+    client = _get_openai_onboarding_client()
+    prompt = (
+        "You are a friendly pet care assistant helping a user upload health records "
+        f"for their pet {pet_name} during onboarding. "
+        f"They have uploaded {docs_uploaded} file(s) so far and can upload {remaining} more. "
+        f"Accepted formats: JPEG, PNG, PDF. They can type 'skip' to continue without uploading.\n\n"
+        f"The user said: \"{user_message}\"\n\n"
+        "Reply in 1-2 short, warm sentences. Address what they said naturally. "
+        "If they're asking whether they can add more, tell them how many more they can send. "
+        "If remaining is 0, let them know they've hit the limit and can type skip to continue. "
+        "Do NOT use markdown headings. Use *bold* sparingly for key info only."
+    )
+    try:
+        response = await retry_openai_call(
+            client.chat.completions.create,
+            model="gpt-4.1-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7,
+            max_tokens=150,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.warning("Doc upload reply GPT failed, using fallback: %s", str(e))
+        if remaining > 0:
+            return (
+                f"You can still upload *{remaining} more* file(s) for {pet_name} "
+                f"(JPEG, PNG, or PDF). Or type *skip* to continue."
+            )
+        return f"You've uploaded all {docs_uploaded} files for {pet_name}. Type *skip* to continue."
+
+
 async def _step_awaiting_documents(db, user, text_lower, send_fn):
     """
     Handle messages during the post-onboarding document upload window.
@@ -1390,14 +1435,16 @@ async def _step_awaiting_documents(db, user, text_lower, send_fn):
         await _finalize_onboarding(db, user, send_fn)
         return
 
-    # Any other text — remind user to upload or skip.
+    # Any other text — generate a natural response via GPT.
     pet = db.query(Pet).filter(Pet.user_id == user.id).order_by(Pet.created_at.desc()).first()
-    pet_label = f"for *{pet.name}*" if pet else ""
-    await send_fn(
-        db, mobile,
-        f"Upload health records {pet_label} — vaccination cards, prescriptions, "
-        f"lab reports. Up to *5 files* (JPEG, PNG, or PDF). Or type *skip* to continue.",
-    )
+    pet_name = pet.name if pet else "your pet"
+    docs_uploaded = 0
+    if pet:
+        docs_uploaded = db.query(Document).filter(Document.pet_id == pet.id).count()
+    remaining = max(0, MAX_PENDING_DOCS_PER_PET - docs_uploaded)
+
+    reply = await _generate_doc_upload_reply(pet_name, text_lower, docs_uploaded, remaining)
+    await send_fn(db, mobile, reply)
 
 
 def _get_active_reminders_text(db: Session, pet_id) -> str:
