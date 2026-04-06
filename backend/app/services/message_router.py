@@ -2024,6 +2024,7 @@ async def _send_deferred_care_plan(
         diet_items = db.query(DietItem).filter(DietItem.pet_id == pet.id).all()
 
         care_plan_msg = await _generate_care_plan_message(
+            db=db,
             pet=pet,
             diet_count=diet_count,
             supplement_count=supplement_count,

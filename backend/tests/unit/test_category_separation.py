@@ -78,6 +78,72 @@ def test_care_plan_fallback_no_new_supp_when_common_stack_already_present():
     assert "don't suggest adding anything new" in lowered
 
 
+def test_care_plan_uses_dashboard_missing_micros_when_available():
+    pet = SimpleNamespace(name="Buddy", breed="Labrador", age_text="4 years", dob=None)
+    diet_items = [SimpleNamespace(type="packaged", label="Royal Canin Adult")]
+
+    with patch(
+        "app.services.onboarding.get_diet_summary",
+        new=AsyncMock(return_value={
+            "missing_micros": [
+                {"name": "Vitamin D3", "reason": "Deficient"},
+                {"name": "Glucosamine", "reason": "Joint support"},
+            ]
+        }),
+    ):
+        message = asyncio.run(
+            _generate_care_plan_message(
+                pet=pet,
+                diet_count=1,
+                supplement_count=0,
+                record_count=1,
+                docs_uploaded=0,
+                conditions=[],
+                diet_items=diet_items,
+                db=object(),
+            )
+        )
+
+    lowered = message.lower()
+    assert "vitamin d3" in lowered
+    assert "glucosamine" in lowered
+    assert "diet analysis" in lowered
+
+
+def test_dashboard_missing_micros_filters_existing_supplements():
+    pet = SimpleNamespace(name="Buddy", breed="Labrador", age_text="4 years", dob=None)
+    diet_items = [
+        SimpleNamespace(type="packaged", label="Royal Canin Adult"),
+        SimpleNamespace(type="supplement", label="Probiotic Blend"),
+    ]
+
+    with patch(
+        "app.services.onboarding.get_diet_summary",
+        new=AsyncMock(return_value={
+            "missing_micros": [
+                {"name": "Probiotics", "reason": "Digestive support"},
+                {"name": "Vitamin D3", "reason": "Deficient"},
+            ]
+        }),
+    ):
+        message = asyncio.run(
+            _generate_care_plan_message(
+                pet=pet,
+                diet_count=1,
+                supplement_count=1,
+                record_count=1,
+                docs_uploaded=0,
+                conditions=[],
+                diet_items=diet_items,
+                db=object(),
+            )
+        )
+
+    lowered = message.lower()
+    assert "vitamin d3" in lowered
+    assert "probiotics" not in lowered
+
+
 def test_filter_recommendations_excludes_existing_names():
     items = [
         {"name": "Omega-3 Fish Oil", "description": "", "reason": ""},

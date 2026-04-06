@@ -57,6 +57,7 @@ from app.models.reminder import Reminder
 from app.models.user import User
 from app.services.diet_service import add_diet_item, split_diet_items_by_type
 from app.services.hygiene_service import add_hygiene_item
+from app.services.nutrition_service import get_diet_summary
 from app.services.preventive_seeder import seed_preventive_master
 from app.utils.breed_normalizer import normalize_breed, normalize_breed_with_ai
 from app.utils.date_utils import (
@@ -2212,6 +2213,7 @@ async def _finalize_onboarding(db, user, send_fn):
 
     # Try GPT-generated message, fall back to templates.
     care_plan_msg = await _generate_care_plan_message(
+        db=db,
         pet=pet,
         diet_count=diet_count,
         supplement_count=supplement_count,
@@ -2316,13 +2318,14 @@ async def _generate_care_plan_message(
     record_count: int, docs_uploaded: int,
     conditions: list[Condition] | None = None,
     diet_items: list | None = None,
+    db: Session | None = None,
 ) -> str:
     """
     Generate the "care plan ready" message.
 
-    Supplement recommendation is AI-generated (gpt-4.1-mini) based on
-    the pet's actual breed, age, diet, and conditions. Falls back to a
-    deterministic sentence if OpenAI is unavailable.
+    Supplement recommendation is derived from the same diet-summary
+    micronutrient gaps used by the dashboard quick fixes. Falls back to
+    AI generation, then deterministic rules if needed.
 
     Follows flow.txt prompt rules:
     - Open with "[pet name]'s care plan is ready! 🐾"
@@ -2333,7 +2336,8 @@ async def _generate_care_plan_message(
     - Warm, conversational, WhatsApp-friendly tone
     """
     # Build flags for deterministic variation selection.
-    has_food = diet_count > 0
+    split_items = split_diet_items_by_type(diet_items or [])
+    has_food = bool(split_items["foods"])
     has_preventive = record_count > 0
     has_breed = bool(pet.breed)
     has_age = bool(pet.age_text or pet.dob)
@@ -2352,12 +2356,62 @@ async def _generate_care_plan_message(
     else:
         condition_line = "No active health conditions flagged."
 
-    # AI-generated supplement recommendation, with deterministic fallback.
-    supplement_rec = await _ai_supplement_recommendation(pet, diet_items, conditions)
+    # Keep chat supplement recommendations aligned with dashboard quick fixes
+    # by deriving from the same missing_micros payload first.
+    supplement_rec = None
+    if has_food and db is not None:
+        try:
+            diet_summary = await get_diet_summary(db, pet)
+        except Exception as e:
+            logger.warning("Diet summary lookup failed for care-plan message: %s", str(e))
+            diet_summary = {"missing_micros": []}
+
+        missing_micros = (diet_summary or {}).get("missing_micros") or []
+        existing_supp_labels = {
+            label.lower() for label in split_items["supplements"] if label
+        }
+
+        micro_aliases = {
+            "omega-3": ("omega", "fish oil", "omega 3", "salmon oil"),
+            "probiotics": ("probiotic", "gut", "lactobacillus", "fortiflora"),
+            "glucosamine": ("glucosamine", "chondroitin", "joint"),
+            "vitamin d3": ("vitamin d3", "d3", "calcitriol"),
+            "vitamin e": ("vitamin e", "tocopherol"),
+        }
+
+        def _already_covered_by_existing_supplements(micro_name: str) -> bool:
+            aliases = micro_aliases.get(micro_name.lower(), (micro_name.lower(),))
+            return any(
+                any(alias in existing for alias in aliases)
+                for existing in existing_supp_labels
+            )
+
+        top_names = [
+            str(m.get("name", "")).strip()
+            for m in missing_micros
+            if m.get("name") and not _already_covered_by_existing_supplements(str(m.get("name", "")).strip())
+        ][:2]
+        if top_names:
+            if len(top_names) == 1:
+                supplement_rec = (
+                    f"We'd suggest adding {top_names[0]} supplement based on {name}'s current diet analysis."
+                )
+            else:
+                supplement_rec = (
+                    f"We'd suggest adding {top_names[0]} and {top_names[1]} supplements based on {name}'s current diet analysis."
+                )
+        elif missing_micros and existing_supp_labels:
+            supplement_rec = (
+                f"{name} is already on a strong supplement routine, so we don't suggest "
+                f"adding anything new right now."
+            )
+
+    # If dashboard-driven gaps are unavailable, fall back to AI then deterministic rules.
+    if not supplement_rec:
+        supplement_rec = await _ai_supplement_recommendation(pet, diet_items, conditions)
     if not supplement_rec:
         # Check which supplements the user is already giving to avoid
         # recommending something they already take.
-        split_items = split_diet_items_by_type(diet_items or [])
         existing_supp_labels = {
             label.lower() for label in split_items["supplements"] if label
         }
