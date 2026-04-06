@@ -209,6 +209,17 @@ FAREWELLS: frozenset[str] = frozenset({
     "bye", "goodbye", "good bye", "see you", "cya", "later",
 })
 
+# --- "Nothing more" / "That's all" Variations ---
+# Messages indicating the user has nothing else to add. Used to intercept
+# these when a deferred care plan is still being prepared.
+NOTHING_MORE_PHRASES: frozenset[str] = frozenset({
+    "nothing more", "nothing else", "no nothing", "nope", "no",
+    "nah", "nahi", "bas", "that's all", "thats all", "that's it",
+    "thats it", "nothing", "no more", "none", "i'm done", "im done",
+    "done", "all done", "that is all", "that is it", "no thanks",
+    "no thank you", "nothing much", "not really", "na",
+})
+
 HELP_COMMANDS: frozenset[str] = frozenset({
     "help", "menu", "commands", "what can you do",
 })

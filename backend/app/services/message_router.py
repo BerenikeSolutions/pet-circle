@@ -36,6 +36,7 @@ from app.core.constants import (
     FAREWELLS,
     GREETINGS,
     HELP_COMMANDS,
+    NOTHING_MORE_PHRASES,
     MAX_CONCURRENT_EXTRACTIONS,
     MAX_PENDING_DOCS_PER_PET,
     MAX_PETS_PER_USER,
@@ -664,6 +665,25 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
     # --- Guard: empty text should not trigger GPT ---
     if not text:
         return
+
+    # --- "Nothing more" while care plan is being prepared ---
+    # If user says "nothing more" / "that's all" etc. and their care plan
+    # hasn't been delivered yet (deferred extraction), let them know.
+    if text_lower in NOTHING_MORE_PHRASES:
+        pet = (
+            db.query(Pet)
+            .filter(Pet.user_id == user.id, Pet.is_deleted == False)
+            .order_by(Pet.created_at.desc())
+            .first()
+        )
+        if pet and _has_pending_deferred_care_plan(db, pet.id, user=user):
+            await send_text_message(
+                db, from_number,
+                f"{pet.name}'s care plan is still being prepared — "
+                f"we're finishing up the health analysis from your uploaded documents. "
+                f"You'll receive it shortly! 🐾",
+            )
+            return
 
     # --- Check for pending reschedule before any other routing ---
     # If user recently pressed "Reschedule" on a reminder, route the

@@ -54,7 +54,6 @@ from app.models.contact import Contact
 from app.models.diagnostic_test_result import DiagnosticTestResult
 from app.models.diet_item import DietItem
 from app.models.document import Document
-from app.models.hygiene_preference import HygienePreference
 from app.models.pet import Pet
 from app.models.pet_ai_insight import PetAiInsight
 from app.models.pet_life_stage_trait import PetLifeStageTrait
@@ -88,7 +87,7 @@ QUERY_SYSTEM_PROMPT = (
     "You are PetCircle, a friendly and knowledgeable pet health assistant on WhatsApp. "
     "You answer the pet parent's questions using ONLY the pet data provided below. "
     "You have access to the pet's full health profile including conditions, medications, "
-    "diagnostic results, diet, hygiene schedule, weight history, vet contacts, and "
+    "diagnostic results, diet, weight history, vet contacts, and "
     "preventive care records.\n\n"
     "Rules:\n"
     "- Answer using ONLY the provided data. Never use external knowledge.\n"
@@ -100,6 +99,10 @@ QUERY_SYSTEM_PROMPT = (
     "- When discussing conditions or medications, present facts from the records "
     "without interpreting severity or recommending changes.\n"
     "- For overdue items, gently remind the parent without being alarmist.\n"
+    "- Do NOT provide grooming information, grooming schedules, or grooming advice. "
+    "PetCircle does not track grooming.\n"
+    "- Do NOT help with scheduling vet visits or appointments. PetCircle does not "
+    "provide vet visit scheduling. If asked, suggest the parent contact their vet directly.\n"
     "- Format responses for WhatsApp (use *bold* for emphasis, keep it readable)."
 )
 
@@ -363,27 +366,6 @@ def _build_pet_context(db: Session, pet_id: UUID) -> str:
             context_parts.append("- No supplements recorded.")
     else:
         context_parts.append("No diet information recorded.")
-
-    # --- Hygiene Schedule ---
-    hygiene = (
-        db.query(HygienePreference)
-        .filter(HygienePreference.pet_id == pet_id)
-        .all()
-    )
-
-    context_parts.append("\n=== Hygiene & Grooming ===")
-    if hygiene:
-        for h in hygiene:
-            line = f"- {h.name} ({h.category})"
-            if h.freq and h.unit:
-                line += f", every {h.freq} {h.unit}"
-            if h.last_done:
-                line += f", last done: {h.last_done}"
-            if h.reminder:
-                line += " [reminder on]"
-            context_parts.append(line)
-    else:
-        context_parts.append("No hygiene preferences set.")
 
     # --- Vet & Healthcare Contacts ---
     contacts = (
