@@ -501,6 +501,7 @@ export interface DashboardData {
   care_plan_v2?: CarePlanV2;
   diet_summary?: DietSummary;
   recognition?: Recognition;
+  is_first_visit?: boolean;
 }
 
 // --- Admin Types ---

@@ -312,10 +312,19 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
     # --- Record dashboard visit for nudge level tracking (N8) ---
     # Best-effort: never crash the dashboard load on a logging failure.
     # user_id is resolved via pet.user_id (DashboardToken has no user_id FK).
+    # Count previous visits BEFORE inserting new one to determine first visit.
+    is_first_visit = True
     try:
         from app.models.dashboard_visit import DashboardVisit
         _visit_pet = db.query(Pet).filter(Pet.id == pet_id).first()
         if _visit_pet:
+            previous_visit_count = (
+                db.query(func.count(DashboardVisit.id))
+                .filter(DashboardVisit.pet_id == pet_id)
+                .scalar()
+                or 0
+            )
+            is_first_visit = previous_visit_count == 0
             visit = DashboardVisit(
                 user_id=_visit_pet.user_id,
                 pet_id=pet_id,
@@ -740,6 +749,7 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         "care_plan_v2": care_plan_v2,
         "diet_summary": diet_summary,
         "recognition": recognition_payload,
+        "is_first_visit": is_first_visit,
         # Internal pet_id exposed only for intra-service use (not sent to frontend).
         # Allows callers to avoid a second validate_dashboard_token() call.
         "_pet_id": str(pet_id),

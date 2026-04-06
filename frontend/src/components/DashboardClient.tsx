@@ -256,7 +256,7 @@ function DashboardInner({ token }: { token: string }) {
   const renderView = () => {
     switch (view) {
       case "dashboard": {
-        const isReturning = (data.documents?.length ?? 0) > 0;
+        const isReturning = data.is_first_visit === false;
         const ViewComponent = isReturning ? ReturningDashboardView : DashboardView;
         return (
           <ViewComponent
