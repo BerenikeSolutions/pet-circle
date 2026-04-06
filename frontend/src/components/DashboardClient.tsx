@@ -285,7 +285,7 @@ function DashboardInner({ token }: { token: string }) {
           />
         );
       case "reminders":
-        return <RemindersView data={data} onBack={() => setView("dashboard")} />;
+        return <RemindersView data={data} token={token} onBack={() => setView("dashboard")} />;
       case "cart":
         return (
           <CartView

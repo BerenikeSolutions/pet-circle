@@ -100,6 +100,7 @@ export default function DashboardView({
         petName={data.pet.name}
         buckets={buckets}
         counts={carePlanCounts}
+        onEditReminders={onGoToReminders}
         cartQtyByItem={Object.fromEntries(
           Object.values(buckets)
             .flatMap((sections) => sections)

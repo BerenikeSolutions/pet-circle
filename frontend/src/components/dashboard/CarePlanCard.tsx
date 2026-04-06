@@ -9,6 +9,7 @@ interface CarePlanCardProps {
   cartQtyByItem: Record<string, number>;
   addedIds: Record<string, boolean>;
   onAddToCart: (item: CarePlanItem, sectionTitle: string) => void;
+  onEditReminders?: () => void;
   counts?: { onTrack: number; dueSoon: number; overdue: number };
 }
 
@@ -22,13 +23,36 @@ export default function CarePlanCard({
   cartQtyByItem,
   addedIds,
   onAddToCart,
+  onEditReminders,
   counts,
 }: CarePlanCardProps) {
   const bucketOrder: Array<"continue" | "attend" | "add"> = ["continue", "attend", "add"];
 
   return (
     <div className="card">
-      <div className="sec-lbl" style={{ marginBottom: 0 }}>{petName}&apos;s Care Plan</div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+        <div className="sec-lbl" style={{ marginBottom: 0 }}>{petName}&apos;s Care Plan</div>
+        {onEditReminders && (
+          <button
+            type="button"
+            onClick={onEditReminders}
+            style={{
+              border: "1px solid #ffd9c2",
+              background: "#fff4ec",
+              color: "#c54c0b",
+              borderRadius: 999,
+              padding: "5px 12px",
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: "pointer",
+              flexShrink: 0,
+            }}
+            aria-label="Edit care reminders"
+          >
+            Edit
+          </button>
+        )}
+      </div>
       <div className="sec-source">Based on lifestage, health & diet analysis</div>
       {counts && (counts.onTrack > 0 || counts.dueSoon > 0 || counts.overdue > 0) && (
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>

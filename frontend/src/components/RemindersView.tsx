@@ -1,11 +1,40 @@
 'use client';
 
-import { useState } from 'react';
-import type { DashboardData } from '@/lib/api';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  getPreventiveMedicineOptions,
+  type DashboardData,
+  updateMedicineName,
+  updatePreventiveDate,
+  updatePreventiveFrequency,
+} from '@/lib/api';
 
 interface RemindersViewProps {
   data: DashboardData;
+  token: string;
   onBack: () => void;
+}
+
+interface ReminderItem {
+  id: string;
+  itemName: string;
+  section: string;
+  recurrenceDays: number;
+  freqLabel: string;
+  lastISO: string;
+  nextISO: string | null;
+  status?: string;
+  medicineName?: string;
+  isMedicineEligible: boolean;
+}
+
+interface EditVals {
+  freqLabel: string;
+  lastISO: string;
+  medicineChoice: string;
+  customMedicine: string;
+  medicineOptions: string[];
+  loadingMedicineOptions: boolean;
 }
 
 const FREQ_OPTIONS = [
@@ -15,125 +44,241 @@ const FREQ_OPTIONS = [
   { label: 'Every 3 months', days: 90 },
   { label: 'Every 6 months', days: 180 },
   { label: 'Annual', days: 365 },
-  { label: 'One-time', days: null },
 ];
 
-// Convert date to ISO string (YYYY-MM-DD)
-function toISO(dateStr: string | null): string {
+const MEDICINE_OTHER = 'Other';
+
+function formatISO(dateStr: string | null | undefined): string {
   if (!dateStr) return '';
-  const date = new Date(dateStr);
-  if (isNaN(date.getTime())) return '';
-  return date.toISOString().split('T')[0];
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toISOString().split('T')[0];
 }
 
-// Compute next due date based on last done and frequency
-function computeNextDue(lastDoneISO: string, freqLabel: string): string {
-  const opt = FREQ_OPTIONS.find(f => f.label === freqLabel);
-  if (!opt || !opt.days || !lastDoneISO) return '—';
+function displayDate(isoDate: string | null | undefined): string {
+  if (!isoDate) return '-';
+  const d = new Date(isoDate);
+  if (Number.isNaN(d.getTime())) return '-';
+  return d.toLocaleDateString('en-GB', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+}
+
+function recurrenceLabel(days: number): string {
+  const found = FREQ_OPTIONS.find((f) => f.days === days);
+  if (found) return found.label;
+  return `Every ${days} days`;
+}
+
+function recurrenceDays(label: string, fallback: number): number {
+  const found = FREQ_OPTIONS.find((f) => f.label === label);
+  if (found?.days) return found.days;
+  const dynamicMatch = label.match(/^Every\s+(\d+)\s+days$/i);
+  if (dynamicMatch) {
+    const parsed = Number.parseInt(dynamicMatch[1], 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return fallback;
+}
+
+function computeNextISO(lastDoneISO: string, days: number): string | null {
+  if (!lastDoneISO || !days) return null;
   const d = new Date(lastDoneISO);
-  d.setDate(d.getDate() + opt.days);
-  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  if (Number.isNaN(d.getTime())) return null;
+  d.setDate(d.getDate() + days);
+  return d.toISOString().split('T')[0];
 }
 
-// Get color class for status
+function computeNextDue(lastDoneISO: string, days: number): string {
+  const next = computeNextISO(lastDoneISO, days);
+  return next ? displayDate(next) : '-';
+}
+
+function isMedicineItem(name: string): boolean {
+  const n = name.toLowerCase();
+  return n.includes('deworm') || n.includes('flea') || n.includes('tick');
+}
+
+function mapStatusFromNext(nextISO: string | null, fallback: string): string {
+  if (!nextISO) return fallback;
+  const next = new Date(nextISO);
+  if (Number.isNaN(next.getTime())) return fallback;
+  const now = new Date();
+  now.setHours(0, 0, 0, 0);
+  const ms = next.getTime() - now.getTime();
+  const days = Math.floor(ms / 86400000);
+  if (days < 0) return 'overdue';
+  if (days <= 30) return 'upcoming';
+  return 'up_to_date';
+}
+
 const dotClass: Record<string, { bg: string; border: string }> = {
   red: { bg: '#FF3B30', border: '#FF3B30' },
   orange: { bg: '#FF9500', border: '#FF9500' },
   green: { bg: '#34C759', border: '#34C759' },
 };
 
-// Map reminder status to dot color
 function getStatusDot(status: string | undefined): { bg: string; border: string } {
   if (!status) return dotClass.orange;
   if (status.toLowerCase() === 'red') return dotClass.red;
   if (status.toLowerCase() === 'overdue') return dotClass.red;
   if (status.toLowerCase() === 'upcoming') return dotClass.orange;
   if (status.toLowerCase() === 'done') return dotClass.green;
+  if (status.toLowerCase() === 'up_to_date') return dotClass.green;
   return dotClass.orange;
 }
 
-interface ReminderItem {
-  id: string;
-  freq: string;
-  lastDone?: string;
-  nextDue?: string;
-  status?: string;
-  name: string;
-  section: string;
-}
+export default function RemindersView({ data, token, onBack }: RemindersViewProps) {
+  const baseItems = useMemo<ReminderItem[]>(() => {
+    return (data.preventive_records || [])
+      .filter((r) => !!r.is_core)
+      .sort((a, b) => {
+        const ad = a.next_due_date ? new Date(a.next_due_date).getTime() : Number.MAX_SAFE_INTEGER;
+        const bd = b.next_due_date ? new Date(b.next_due_date).getTime() : Number.MAX_SAFE_INTEGER;
+        return ad - bd;
+      })
+      .map((r) => {
+        const recurrence = r.custom_recurrence_days || r.recurrence_days;
+        return {
+          id: r.item_name.toLowerCase(),
+          itemName: r.item_name,
+          section: 'Vaccines & Preventive Care',
+          recurrenceDays: recurrence,
+          freqLabel: recurrenceLabel(recurrence),
+          lastISO: formatISO(r.last_done_date),
+          nextISO: formatISO(r.next_due_date) || null,
+          status: r.status,
+          medicineName: r.medicine_name || undefined,
+          isMedicineEligible: isMedicineItem(r.item_name),
+        };
+      });
+  }, [data.preventive_records]);
 
-interface EditVals {
-  freq: string;
-  lastISO: string;
-}
-
-export default function RemindersView({ data, onBack }: RemindersViewProps) {
-  const pet = data.pet || { carePlan: [] };
-  const carePlanV2 = data.care_plan_v2;
-
-  // Flatten care plan sections into single array
-  const flattenCarePlan = () => {
-    if (!carePlanV2) return [];
-    const allSections = [
-      ...(carePlanV2.continue || []),
-      ...(carePlanV2.attend || []),
-      ...(carePlanV2.add || []),
-    ];
-    return allSections;
-  };
-  // Extract and filter reminder items from care plan
-  const [items, setItems] = useState<ReminderItem[]>(() => {
-    const carePlanSections = flattenCarePlan();
-    return carePlanSections.flatMap(
-      (s: any) => (s.items || [])
-        .filter((i: any) => i.freq?.toLowerCase() !== 'daily')
-        .map((i: any) => ({ ...i, section: s.section }))
-    );
-  });
-
+  const [items, setItems] = useState<ReminderItem[]>(baseItems);
+  const editRequestIdRef = useRef(0);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editVals, setEditVals] = useState<EditVals>({
-    freq: '',
+    freqLabel: '',
     lastISO: '',
+    medicineChoice: '',
+    customMedicine: '',
+    medicineOptions: [],
+    loadingMedicineOptions: false,
   });
-  const [confirmDel, setConfirmDel] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string>('');
 
-  // Get unique sections
-  const sections = Array.from(new Set(items.map((i: ReminderItem) => i.section)));
+  useEffect(() => {
+    if (editingId) return;
+    setItems(baseItems);
+  }, [baseItems, editingId]);
 
-  // Start editing an item
-  const startEdit = (item: ReminderItem) => {
+  const sections = Array.from(new Set(items.map((i) => i.section)));
+
+  const freqOptions = useMemo(() => {
+    const labels = FREQ_OPTIONS.map((f) => f.label);
+    if (editVals.freqLabel && !labels.includes(editVals.freqLabel)) {
+      return [editVals.freqLabel, ...labels];
+    }
+    return labels;
+  }, [editVals.freqLabel]);
+
+  const startEdit = async (item: ReminderItem) => {
+    const reqId = ++editRequestIdRef.current;
     setEditingId(item.id);
+    setSaveError('');
+
+    let options: string[] = [];
+    let medicineChoice = item.medicineName || '';
+    let customMedicine = '';
+
+    if (item.isMedicineEligible) {
+      setEditVals((prev) => ({ ...prev, loadingMedicineOptions: true }));
+      try {
+        const res = await getPreventiveMedicineOptions(token, item.itemName);
+        if (editRequestIdRef.current !== reqId) return;
+        options = res.options || [];
+        if (item.medicineName && !options.includes(item.medicineName)) {
+          medicineChoice = MEDICINE_OTHER;
+          customMedicine = item.medicineName;
+        }
+      } catch {
+        if (editRequestIdRef.current !== reqId) return;
+        options = [];
+      }
+    }
+
+    if (editRequestIdRef.current !== reqId) return;
+
     setEditVals({
-      freq: item.freq,
-      lastISO: toISO(item.lastDone || null),
+      freqLabel: item.freqLabel,
+      lastISO: item.lastISO,
+      medicineChoice,
+      customMedicine,
+      medicineOptions: options,
+      loadingMedicineOptions: false,
     });
   };
 
-  // Save edit
-  const saveEdit = () => {
-    const nextDue = computeNextDue(editVals.lastISO, editVals.freq);
-    const lastDisplay = editVals.lastISO
-      ? new Date(editVals.lastISO).toLocaleDateString('en-GB', {
-          day: '2-digit',
-          month: 'short',
-          year: 'numeric',
-        })
-      : '—';
-    setItems((prev: ReminderItem[]) =>
-      prev.map((i: ReminderItem) =>
-        i.id === editingId
-          ? { ...i, freq: editVals.freq, lastDone: lastDisplay, nextDue }
-          : i
-      )
-    );
-    setEditingId(null);
-  };
+  const saveEdit = async (item: ReminderItem) => {
+    const nextDays = recurrenceDays(editVals.freqLabel, item.recurrenceDays);
+    const selectedMedicine =
+      editVals.medicineChoice === MEDICINE_OTHER
+        ? editVals.customMedicine.trim()
+        : editVals.medicineChoice.trim();
 
-  // Delete item
-  const deleteItem = (id: string) => {
-    setItems((prev: ReminderItem[]) => prev.filter((i: ReminderItem) => i.id !== id));
-    setConfirmDel(null);
+    if (item.isMedicineEligible && editVals.medicineChoice === MEDICINE_OTHER && !selectedMedicine) {
+      setSaveError('Please enter medicine name for Other.');
+      return;
+    }
+
+    setSaveError('');
+    setSaving(true);
+    let wroteAnyField = false;
+    try {
+      if (nextDays !== item.recurrenceDays) {
+        await updatePreventiveFrequency(token, item.itemName, nextDays);
+        wroteAnyField = true;
+      }
+
+      if (editVals.lastISO && editVals.lastISO !== item.lastISO) {
+        await updatePreventiveDate(token, item.itemName, editVals.lastISO);
+        wroteAnyField = true;
+      }
+
+      if (item.isMedicineEligible && selectedMedicine && selectedMedicine !== (item.medicineName || '')) {
+        await updateMedicineName(token, item.itemName, selectedMedicine);
+        wroteAnyField = true;
+      }
+
+      const nextISO = computeNextISO(editVals.lastISO, nextDays);
+      setItems((prev) =>
+        prev.map((entry) =>
+          entry.id !== item.id
+            ? entry
+            : {
+                ...entry,
+                recurrenceDays: nextDays,
+                freqLabel: recurrenceLabel(nextDays),
+                lastISO: editVals.lastISO,
+                nextISO,
+                status: mapStatusFromNext(nextISO, entry.status || 'upcoming'),
+                medicineName: selectedMedicine || entry.medicineName,
+              }
+        )
+      );
+      setEditingId(null);
+    } catch (err: unknown) {
+      if (wroteAnyField) {
+        setSaveError('Some changes may have been saved. Please reopen this reminder to confirm latest values.');
+      } else {
+        setSaveError(err instanceof Error ? err.message : 'Could not save changes.');
+      }
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -144,7 +289,6 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
         paddingBottom: 80,
       }}
     >
-      {/* Header */}
       <div
         style={{
           padding: '12px 16px',
@@ -159,11 +303,12 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
           style={{
             background: 'none',
             border: 'none',
-            fontSize: 20,
+            fontSize: 14,
             cursor: 'pointer',
+            fontWeight: 600,
           }}
         >
-          ←
+          Back
         </button>
         <div>
           <div
@@ -178,7 +323,6 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
         </div>
       </div>
 
-      {/* Empty state */}
       {items.length === 0 && (
         <div
           className="card"
@@ -194,11 +338,10 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
         </div>
       )}
 
-      {/* Grouped sections */}
       {sections
-        .filter((sec: string) => items.some((i: ReminderItem) => i.section === sec))
-        .map((sec: string) => {
-          const secItems = items.filter((i: ReminderItem) => i.section === sec);
+        .filter((sec) => items.some((i) => i.section === sec))
+        .map((sec) => {
+          const secItems = items.filter((i) => i.section === sec);
           return (
             <div key={sec} className="card" style={{ margin: '12px' }}>
               <div
@@ -215,7 +358,7 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
                 {sec}
               </div>
 
-              {secItems.map((item: ReminderItem) => {
+              {secItems.map((item) => {
                 const statusDot = getStatusDot(item.status);
                 return (
                   <div
@@ -231,9 +374,7 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
                       borderBottom: '1px solid var(--border, #e0e0e0)',
                     }}
                   >
-                    {/* Main row */}
                     <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-                      {/* Status dot */}
                       <div
                         style={{
                           width: 12,
@@ -245,7 +386,6 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
                         }}
                       />
 
-                      {/* Item info */}
                       <div style={{ flex: 1 }}>
                         <div
                           style={{
@@ -255,53 +395,55 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
                             lineHeight: 1.3,
                           }}
                         >
-                          {item.name}
+                          {item.itemName}
                         </div>
 
                         {editingId !== item.id && (
-                          <div
-                            style={{
-                              display: 'flex',
-                              gap: 12,
-                              marginTop: 4,
-                              fontSize: 11,
-                              color: 'var(--t3, #999)',
-                            }}
-                          >
-                            <span>
-                              Freq:{' '}
-                              <strong style={{ color: 'var(--t2, #666)' }}>
-                                {item.freq}
-                              </strong>
-                            </span>
-                            <span>
-                              Last:{' '}
-                              <strong style={{ color: 'var(--t2, #666)' }}>
-                                {item.lastDone || '—'}
-                              </strong>
-                            </span>
-                            <span>
-                              Next:{' '}
-                              <strong
+                          <>
+                            <div
+                              style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+                                columnGap: 10,
+                                rowGap: 4,
+                                marginTop: 4,
+                                fontSize: 11,
+                                color: 'var(--t3, #999)',
+                                lineHeight: 1.35,
+                              }}
+                            >
+                              <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
+                                Freq: <strong style={{ color: 'var(--t2, #666)' }}>{item.freqLabel}</strong>
+                              </span>
+                              <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
+                                Last: <strong style={{ color: 'var(--t2, #666)' }}>{displayDate(item.lastISO)}</strong>
+                              </span>
+                              <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
+                                Next: <strong style={{ color: item.status === 'red' ? 'var(--red, #FF3B30)' : 'var(--t2, #666)' }}>{displayDate(item.nextISO)}</strong>
+                              </span>
+                            </div>
+
+                            {item.isMedicineEligible && item.medicineName && (
+                              <div
                                 style={{
-                                  color:
-                                    item.status === 'red'
-                                      ? 'var(--red, #FF3B30)'
-                                      : 'var(--t2, #666)',
+                                  marginTop: 4,
+                                  fontSize: 11,
+                                  color: 'var(--t3, #999)',
+                                  lineHeight: 1.35,
                                 }}
                               >
-                                {item.nextDue || '—'}
-                              </strong>
-                            </span>
-                          </div>
+                                Medicine: <strong style={{ color: 'var(--t2, #666)', overflowWrap: 'anywhere' }}>{item.medicineName}</strong>
+                              </div>
+                            )}
+                          </>
                         )}
                       </div>
 
-                      {/* Action buttons */}
                       <div style={{ display: 'flex', gap: 5, flexShrink: 0 }}>
                         {editingId === item.id ? (
                           <button
-                            onClick={saveEdit}
+                            onClick={() => void saveEdit(item)}
+                            disabled={saving}
                             style={{
                               fontSize: 11,
                               fontWeight: 600,
@@ -310,15 +452,16 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
                               border: 'none',
                               borderRadius: 8,
                               padding: '3px 8px',
-                              cursor: 'pointer',
+                              cursor: saving ? 'not-allowed' : 'pointer',
                               fontFamily: 'inherit',
+                              opacity: saving ? 0.7 : 1,
                             }}
                           >
-                            Save
+                            {saving ? 'Saving...' : 'Save'}
                           </button>
                         ) : (
                           <button
-                            onClick={() => startEdit(item)}
+                            onClick={() => void startEdit(item)}
                             style={{
                               fontSize: 11,
                               fontWeight: 600,
@@ -335,85 +478,9 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
                           </button>
                         )}
 
-                        {confirmDel !== item.id && editingId !== item.id && (
-                          <button
-                            onClick={() => setConfirmDel(item.id)}
-                            style={{
-                              fontSize: 11,
-                              fontWeight: 600,
-                              color: '#c0392b',
-                              background: 'var(--tr, transparent)',
-                              border: 'none',
-                              borderRadius: 8,
-                              padding: '3px 8px',
-                              cursor: 'pointer',
-                              fontFamily: 'inherit',
-                            }}
-                          >
-                            🗑
-                          </button>
-                        )}
                       </div>
                     </div>
 
-                    {/* Delete confirmation */}
-                    {confirmDel === item.id && (
-                      <div
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 8,
-                          marginTop: 8,
-                          background: 'var(--tr, rgba(0,0,0,0.05))',
-                          borderRadius: 8,
-                          padding: '8px 10px',
-                        }}
-                      >
-                        <span
-                          style={{
-                            fontSize: 12,
-                            color: '#c0392b',
-                            flex: 1,
-                          }}
-                        >
-                          Remove this reminder?
-                        </span>
-                        <button
-                          onClick={() => deleteItem(item.id)}
-                          style={{
-                            fontSize: 11,
-                            fontWeight: 700,
-                            background: '#c0392b',
-                            color: '#fff',
-                            border: 'none',
-                            borderRadius: 7,
-                            padding: '4px 10px',
-                            cursor: 'pointer',
-                            fontFamily: 'inherit',
-                          }}
-                        >
-                          Remove
-                        </button>
-                        <button
-                          onClick={() => setConfirmDel(null)}
-                          style={{
-                            fontSize: 11,
-                            fontWeight: 600,
-                            background: 'var(--white, #fff)',
-                            color: 'var(--t2, #666)',
-                            border: '1px solid var(--border, #e0e0e0)',
-                            borderRadius: 7,
-                            padding: '4px 10px',
-                            cursor: 'pointer',
-                            fontFamily: 'inherit',
-                          }}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    )}
-
-                    {/* Edit form */}
                     {editingId === item.id && (
                       <div
                         style={{
@@ -421,7 +488,6 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
                           paddingLeft: 18,
                         }}
                       >
-                        {/* Frequency select */}
                         <div style={{ marginBottom: 8 }}>
                           <div
                             style={{
@@ -436,10 +502,8 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
                             Frequency
                           </div>
                           <select
-                            value={editVals.freq}
-                            onChange={e =>
-                              setEditVals(v => ({ ...v, freq: e.target.value }))
-                            }
+                            value={editVals.freqLabel}
+                            onChange={(e) => setEditVals((v) => ({ ...v, freqLabel: e.target.value }))}
                             style={{
                               width: '100%',
                               fontSize: 13,
@@ -452,15 +516,14 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
                               color: 'var(--t1, #000)',
                             }}
                           >
-                            {FREQ_OPTIONS.map(f => (
-                              <option key={f.label} value={f.label}>
-                                {f.label}
+                            {freqOptions.map((label) => (
+                              <option key={label} value={label}>
+                                {label}
                               </option>
                             ))}
                           </select>
                         </div>
 
-                        {/* Date input */}
                         <div style={{ marginBottom: 8 }}>
                           <div
                             style={{
@@ -477,12 +540,7 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
                           <input
                             type="date"
                             value={editVals.lastISO}
-                            onChange={e =>
-                              setEditVals(v => ({
-                                ...v,
-                                lastISO: e.target.value,
-                              }))
-                            }
+                            onChange={(e) => setEditVals((v) => ({ ...v, lastISO: e.target.value }))}
                             style={{
                               width: '100%',
                               fontSize: 13,
@@ -497,7 +555,83 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
                           />
                         </div>
 
-                        {/* Auto-computed next due */}
+                        {item.isMedicineEligible && (
+                          <>
+                            <div style={{ marginBottom: 8 }}>
+                              <div
+                                style={{
+                                  fontSize: 10,
+                                  color: 'var(--t3, #999)',
+                                  marginBottom: 3,
+                                  fontWeight: 600,
+                                  textTransform: 'uppercase',
+                                  letterSpacing: '0.5px',
+                                }}
+                              >
+                                Medicine
+                              </div>
+                              <select
+                                value={editVals.medicineChoice}
+                                onChange={(e) => setEditVals((v) => ({ ...v, medicineChoice: e.target.value }))}
+                                disabled={editVals.loadingMedicineOptions}
+                                style={{
+                                  width: '100%',
+                                  fontSize: 13,
+                                  border: '1px solid var(--border, #e0e0e0)',
+                                  borderRadius: 6,
+                                  padding: '5px 8px',
+                                  fontFamily: 'inherit',
+                                  background: 'var(--white, #fff)',
+                                  outline: 'none',
+                                  color: 'var(--t1, #000)',
+                                }}
+                              >
+                                <option value="">Select medicine</option>
+                                {editVals.medicineOptions.map((option) => (
+                                  <option key={option} value={option}>
+                                    {option}
+                                  </option>
+                                ))}
+                                <option value={MEDICINE_OTHER}>{MEDICINE_OTHER}</option>
+                              </select>
+                            </div>
+
+                            {editVals.medicineChoice === MEDICINE_OTHER && (
+                              <div style={{ marginBottom: 8 }}>
+                                <div
+                                  style={{
+                                    fontSize: 10,
+                                    color: 'var(--t3, #999)',
+                                    marginBottom: 3,
+                                    fontWeight: 600,
+                                    textTransform: 'uppercase',
+                                    letterSpacing: '0.5px',
+                                  }}
+                                >
+                                  Enter medicine name
+                                </div>
+                                <input
+                                  type="text"
+                                  value={editVals.customMedicine}
+                                  onChange={(e) => setEditVals((v) => ({ ...v, customMedicine: e.target.value }))}
+                                  placeholder="Type medicine name"
+                                  style={{
+                                    width: '100%',
+                                    fontSize: 13,
+                                    border: '1px solid var(--border, #e0e0e0)',
+                                    borderRadius: 6,
+                                    padding: '5px 8px',
+                                    fontFamily: 'inherit',
+                                    background: 'var(--white, #fff)',
+                                    outline: 'none',
+                                    color: 'var(--t1, #000)',
+                                  }}
+                                />
+                              </div>
+                            )}
+                          </>
+                        )}
+
                         <div
                           style={{
                             background: 'var(--ta, rgba(255, 149, 0, 0.1))',
@@ -524,9 +658,13 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
                               color: '#b85c00',
                             }}
                           >
-                            {computeNextDue(editVals.lastISO, editVals.freq)}
+                            {computeNextDue(editVals.lastISO, recurrenceDays(editVals.freqLabel, item.recurrenceDays))}
                           </span>
                         </div>
+
+                        {saveError && (
+                          <div style={{ marginTop: 8, fontSize: 11, color: '#c0392b' }}>{saveError}</div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -536,7 +674,6 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
           );
         })}
 
-      {/* Home floater */}
       <button
         onClick={onBack}
         style={{
@@ -548,7 +685,7 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
           borderRadius: '50%',
           background: '#000',
           color: '#fff',
-          fontSize: 24,
+          fontSize: 16,
           border: 'none',
           cursor: 'pointer',
           display: 'flex',
@@ -557,7 +694,7 @@ export default function RemindersView({ data, onBack }: RemindersViewProps) {
           boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
         }}
       >
-        🏠
+        Home
       </button>
     </div>
   );

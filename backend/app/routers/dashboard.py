@@ -28,6 +28,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from fastapi.responses import Response as FastAPIResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
 from app.core.rate_limiter import check_dashboard_rate_limit
@@ -39,6 +40,7 @@ from app.models.condition_monitoring import ConditionMonitoring
 from app.models.contact import Contact
 from app.models.nudge import Nudge
 from app.models.pet import Pet
+from app.models.product_catalog import ProductCatalog
 from app.services.ai_insights_service import (
     get_or_generate_insight,
     get_or_generate_nutrition_importance,
@@ -1206,6 +1208,75 @@ class MedicineNameRequest(BaseModel):
     medicine_name: str = Field(..., min_length=1, max_length=200)
 
 
+@router.get("/{token}/preventive-medicine-options")
+def dashboard_get_preventive_medicine_options(
+    token: str,
+    item_name: str,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """
+    Return product catalog medicine options for medicine-dependent preventive items.
+
+    For now, this is scoped to deworming and flea/tick care reminders.
+    """
+    try:
+        _get_pet_for_dashboard_token(db, token)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+
+        item_name_norm = (item_name or "").strip().lower()
+        if not item_name_norm:
+            raise HTTPException(status_code=400, detail="item_name is required")
+
+        is_deworming = "deworm" in item_name_norm
+        is_flea_tick = "flea" in item_name_norm or "tick" in item_name_norm
+
+        categories: list[str] = []
+        if is_deworming:
+            categories.append("deworming")
+        if is_flea_tick:
+            categories.append("flea_tick")
+
+        if not categories:
+            return {"item_name": item_name, "options": []}
+
+        rows = (
+            db.query(ProductCatalog.brand, ProductCatalog.product_name)
+            .filter(
+                ProductCatalog.category.in_(categories),
+                ProductCatalog.product_name.isnot(None),
+            )
+            .order_by(
+                sqlfunc.lower(ProductCatalog.brand),
+                sqlfunc.lower(ProductCatalog.product_name),
+            )
+            .all()
+        )
+
+        options: list[str] = []
+        seen: set[str] = set()
+        for brand, product_name in rows:
+            brand_text = (brand or "").strip()
+            product_text = (product_name or "").strip()
+            if not product_text:
+                continue
+            label = f"{brand_text} {product_text}".strip()
+            dedupe_key = label.lower()
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            options.append(label)
+
+        return {"item_name": item_name, "options": options}
+    except HTTPException:
+        raise
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+    except Exception as e:
+        logger.error("Preventive medicine options error: %s", str(e), exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not load medicine options.")
+
+
 @router.patch("/{token}/preventive-medicine")
 def dashboard_update_medicine_name(
     token: str,
@@ -1236,6 +1307,9 @@ def dashboard_update_medicine_name(
             raise HTTPException(status_code=404, detail="Preventive record not found.")
 
         record, master = result
+
+        if not master.medicine_dependent:
+            raise HTTPException(status_code=400, detail="This preventive item does not support medicine updates.")
 
         pet = db.query(Pet).filter(Pet.id == dt.pet_id).first()
         species = pet.species if pet else "dog"
