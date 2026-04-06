@@ -134,6 +134,7 @@ async def parse_date_with_ai(raw_date: str) -> date:
 
     client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
+    today_str = date.today().isoformat()
     try:
         response = await client.chat.completions.create(
             model=OPENAI_QUERY_MODEL,
@@ -143,10 +144,13 @@ async def parse_date_with_ai(raw_date: str) -> date:
                 {
                     "role": "system",
                     "content": (
-                        "You are a date parser. Extract the date from the user's input "
+                        f"You are a date parser. Today's date is {today_str}. "
+                        "Extract the date from the user's input "
                         "and return ONLY the date in YYYY-MM-DD format. "
                         "If only month and year are given, use 01 as the day. "
                         "If only a year is given, use 01-01 as month and day. "
+                        "For relative dates like 'last Dec', '2 months ago', 'last year', "
+                        "resolve them to absolute dates using today's date as reference. "
                         "If you cannot determine a valid date, respond with ERROR."
                     ),
                 },

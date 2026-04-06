@@ -1757,10 +1757,16 @@ async def _parse_preventive_care(text: str) -> dict:
         missing (list[str])         — which of the 4 categories were not mentioned
     """
     client = _get_openai_onboarding_client()
+    today_str = date.today().isoformat()
     prompt = (
+        f"Today's date is {today_str}. "
         "Extract preventive care information from this message about a pet. "
         "Look for four categories: vaccines, deworming, flea & tick treatment, and blood tests. "
-        "For each, extract the approximate date or timeframe when it was last done.\n\n"
+        "For each, extract the approximate date or timeframe when it was last done. "
+        "IMPORTANT: Convert ALL relative dates (e.g. 'last Dec', '2 months ago', 'Jan') "
+        "to absolute dates in 'Month YYYY' or 'DD Month YYYY' format using today's date as reference. "
+        "For example, if today is 2026-04-06 and user says 'last Dec', return 'December 2025'. "
+        "If user says '3 months ago', return 'January 2026'. Never return relative phrases.\n\n"
         "VACCINE RULES:\n"
         "- If the user names a specific vaccine (rabies, DHPPi, 7-in-1, 9-in-1, "
         "kennel cough, bordetella, feline core, FVRCP, FeLV, FIV, leptospirosis, "
