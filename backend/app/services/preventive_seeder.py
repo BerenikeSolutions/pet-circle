@@ -2,8 +2,12 @@
 PetCircle Phase 1 — Preventive Master Seeder (Module 6)
 
 Seeds the frozen preventive master table with standard preventive
-health items for dogs and cats, organized into three dashboard
-Activity Ring circles: Health, Nutrition, and Hygiene.
+health items.
+
+Current scope:
+    - Dog items only.
+    - Excludes grooming items.
+    - Excludes dental and fecal test items.
 
 Rules:
     - Insert only if table is empty (idempotent — safe to re-run).
@@ -12,12 +16,8 @@ Rules:
       application logic — the seeder is the only place these appear.
     - This table is frozen after seeding. No runtime modifications.
 
-Circle groupings:
-    Health:    Rabies Vaccine, Core Vaccine, Feline Core, Deworming,
-               Annual Checkup, Preventive Blood Test, Chronic Care
-    Nutrition: Food Ordering, Nutrition Planning, Supplements
-    Hygiene:   Bath & Grooming, Tick/Flea, Nail Trimming,
-               Ear Cleaning, Dental Check
+Circle groupings are defined in SEED_DATA, and the effective seeded set is
+filtered by current scope rules in seed_preventive_master().
 """
 
 import logging
@@ -562,9 +562,8 @@ def seed_preventive_master(db: Session) -> int:
     This function is idempotent — it only inserts if the table is empty.
     If any rows already exist, it skips seeding entirely and logs a message.
 
-    The items expand to rows per species because species='both' items are
-    stored as separate 'dog' and 'cat' rows to match the
-    UNIQUE(item_name, species) constraint.
+    The effective seed scope is dog-only and excludes grooming/dental/fecal
+    entries.
 
     Args:
         db: SQLAlchemy database session.
@@ -583,9 +582,26 @@ def seed_preventive_master(db: Session) -> int:
         )
         return 0
 
-    # Insert all seed rows.
+    excluded_item_names = {
+        "Bath & Grooming",
+        "Nail Trimming",
+        "Ear Cleaning",
+        "Dental Check",
+        "Fecal Test",
+        "Fecal Examination",
+        "Stool Test",
+    }
+
+    # Insert allowed seed rows.
     inserted = 0
     for item_data in SEED_DATA:
+        item_name = str(item_data["item_name"])
+
+        if item_data["species"] != "dog":
+            continue
+        if item_name in excluded_item_names:
+            continue
+
         row = PreventiveMaster(
             item_name=item_data["item_name"],
             category=item_data["category"],
