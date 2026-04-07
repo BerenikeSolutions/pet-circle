@@ -12,7 +12,6 @@
 --   DECLARE v_uid UUID;
 --   BEGIN
 --     SELECT id INTO v_uid FROM users WHERE phone_number = '919XXXXXXXXX';
---     DELETE FROM agent_onboarding_sessions WHERE user_id = v_uid;
 --     DELETE FROM agent_order_sessions       WHERE user_id = v_uid;
 --     UPDATE users
 --        SET onboarding_state        = 'awaiting_consent',
@@ -30,7 +29,7 @@ TRUNCATE TABLE shown_fun_facts CASCADE;
 -- AI insights & agent sessions
 TRUNCATE TABLE pet_ai_insights CASCADE;
 TRUNCATE TABLE pet_life_stage_traits CASCADE;
-TRUNCATE TABLE agent_onboarding_sessions CASCADE;
+TRUNCATE TABLE IF EXISTS agent_onboarding_sessions CASCADE;
 TRUNCATE TABLE agent_order_sessions CASCADE;
 TRUNCATE TABLE deferred_care_plan_pending CASCADE;
 

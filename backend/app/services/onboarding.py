@@ -394,6 +394,17 @@ def _set_onboarding_data(user, key: str, value):
     flag_modified(user, "onboarding_data")
 
 
+def _get_onboarding_timestamp(data: dict, key: str) -> float | None:
+    """Read a numeric timestamp from onboarding_data safely."""
+    raw = data.get(key)
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 async def _send_onboarding_resume(db, user, state, send_fn):
     """
     Send a welcome-back message showing only the last collected field,
@@ -1449,6 +1460,12 @@ async def _transition_to_documents(db, user, pet, send_fn):
     user.doc_upload_deadline = datetime.now(UTC) + timedelta(seconds=DOC_UPLOAD_WINDOW_SECONDS)
     db.commit()
 
+    now_ts = datetime.now(UTC).timestamp()
+    _set_onboarding_data(user, "awaiting_docs_prompt_at", now_ts)
+    _set_onboarding_data(user, "awaiting_docs_last_reply_at", now_ts)
+    _set_onboarding_data(user, "awaiting_docs_last_reply_text", "upload_prompt")
+    db.commit()
+
     await send_fn(
         db, mobile,
         f"Do you have any health records handy — a vaccination card, vet prescription, "
@@ -2098,6 +2115,10 @@ async def _step_awaiting_documents(db, user, text_lower, send_fn):
     they explicitly skip or the deadline expires.
     """
     mobile = user._plaintext_mobile
+    now_ts = datetime.now(UTC).timestamp()
+    _AWAITING_DOCS_REPLY_COOLDOWN_SECONDS = 300
+    _AWAITING_DOCS_SIMPLE_ACKS = _YES_INPUTS.union({"ok", "okay", "k", "thanks", "thank you", "got it"})
+    od = _get_onboarding_data(user)
 
     # Check if deadline has expired.
     if user.doc_upload_deadline and datetime.now(UTC) > user.doc_upload_deadline:
@@ -2132,6 +2153,9 @@ async def _step_awaiting_documents(db, user, text_lower, send_fn):
             .first()
         )
         pet_name = pet_for_msg.name if pet_for_msg else "your pet"
+        _set_onboarding_data(user, "awaiting_docs_last_reply_at", now_ts)
+        _set_onboarding_data(user, "awaiting_docs_last_reply_text", "building_status")
+        db.commit()
         await send_fn(
             db, mobile,
             f"{pet_name}'s care plan is still being built 🐾 "
@@ -2166,7 +2190,28 @@ async def _step_awaiting_documents(db, user, text_lower, send_fn):
         except Exception as e:
             logger.warning("Failed to mark upload window extended: %s", str(e))
 
+    # Avoid duplicate low-information prompts while the user is deciding
+    # whether to upload records. This prevents repeated "Great! You can upload..."
+    # messages for simple acknowledgements like "yes" or "ok".
+    last_reply_at = _get_onboarding_timestamp(od, "awaiting_docs_last_reply_at")
+    elapsed_since_last = (now_ts - last_reply_at) if last_reply_at is not None else None
+    if text_lower.strip() in _AWAITING_DOCS_SIMPLE_ACKS and elapsed_since_last is not None:
+        if elapsed_since_last < _AWAITING_DOCS_REPLY_COOLDOWN_SECONDS:
+            return
+
     reply = await _generate_doc_upload_reply(pet_name, text_lower, docs_uploaded, remaining)
+    last_reply_text = str(od.get("awaiting_docs_last_reply_text") or "").strip().lower()
+    if (
+        last_reply_text
+        and last_reply_text == reply.strip().lower()
+        and elapsed_since_last is not None
+        and elapsed_since_last < _AWAITING_DOCS_REPLY_COOLDOWN_SECONDS
+    ):
+        return
+
+    _set_onboarding_data(user, "awaiting_docs_last_reply_at", now_ts)
+    _set_onboarding_data(user, "awaiting_docs_last_reply_text", reply.strip().lower())
+    db.commit()
     await send_fn(db, mobile, reply)
 
 

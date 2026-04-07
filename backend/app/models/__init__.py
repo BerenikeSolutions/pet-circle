@@ -6,7 +6,6 @@ SQLAlchemy's declarative base. This is required for relationship
 resolution and for alembic/migration tooling to discover all tables.
 """
 
-from app.models.agent_onboarding_session import AgentOnboardingSession
 from app.models.agent_order_session import AgentOrderSession
 from app.models.breed_consequence_library import BreedConsequenceLibrary
 from app.models.cart_item import CartItem
@@ -84,6 +83,5 @@ __all__ = [
     "NudgeMessageLibrary",
     "BreedConsequenceLibrary",
     "DashboardVisit",
-    "AgentOnboardingSession",
     "AgentOrderSession",
 ]

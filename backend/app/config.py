@@ -135,21 +135,10 @@ class Settings(BaseSettings):
     WHATSAPP_BUSINESS_PHONE: str | None = None
 
     # --- Feature Flags ---
-    # Set to 'true' to enable AI-driven conversational onboarding.
-    # Requires OPENAI_API_KEY. Falls back to deterministic flow if either is absent
-    # or if the OpenAI API health check fails.
-    AGENTIC_ONBOARDING_ENABLED: str = "false"
-
     # Set to 'true' to enable AI-driven conversational order flow.
     # Requires OPENAI_API_KEY. Falls back to deterministic state machine if either
     # is absent or if the OpenAI API health check fails.
     AGENTIC_ORDER_ENABLED: str = "true"
-
-    # Set to 'true' to enable LLM-composed finalization message after onboarding.
-    # When enabled, a single gpt-4.1-mini call composes a warm, personalised
-    # WhatsApp message combining extraction results + dashboard link + fun fact.
-    # Falls back to the templated message if OpenAI is unavailable.
-    AGENTIC_FINALIZATION_ENABLED: str = "false"
 
     # --- Timezone ---
     # Derived from constants, not from environment.

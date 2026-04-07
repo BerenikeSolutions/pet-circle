@@ -120,7 +120,6 @@ _batch_is_onboarding: dict[str, bool] = {}
 # Key: str(user_id), Value: True if user asked to add more files.
 _upload_window_extended: dict[str, bool] = {}
 
-
 def mark_upload_window_extended(user_id) -> None:
     """Mark that a user explicitly asked to add more documents."""
     _upload_window_extended[str(user_id)] = True
@@ -382,6 +381,19 @@ def _clear_deferred_care_plan_marker(db: Session, pet_id, user=None) -> None:
     )
     if user is not None and getattr(user, "dashboard_link_pending", False):
         user.dashboard_link_pending = False
+
+
+def _get_active_deferred_marker(db: Session, pet_id):
+    """Return the active deferred care-plan marker row for a pet, if any."""
+    return (
+        db.query(DeferredCarePlanPending)
+        .filter(
+            DeferredCarePlanPending.pet_id == pet_id,
+            DeferredCarePlanPending.is_cleared == False,
+        )
+        .order_by(DeferredCarePlanPending.created_at.desc())
+        .first()
+    )
 
 
 def _should_use_agentic_order() -> bool:
@@ -770,6 +782,62 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
     if text_lower in _dashboard_exact or text_lower.startswith("link") or any(
         phrase in text_lower for phrase in _dashboard_phrases
     ):
+        pet = (
+            db.query(Pet)
+            .filter(Pet.user_id == user.id, Pet.is_deleted == False)
+            .order_by(Pet.created_at.desc())
+            .first()
+        )
+
+        if pet and _has_pending_deferred_care_plan(db, pet.id, user=user):
+            active_marker = _get_active_deferred_marker(db, pet.id)
+            pending_docs = (
+                db.query(Document.id)
+                .filter(
+                    Document.pet_id == pet.id,
+                    Document.extraction_status == "pending",
+                )
+                .count()
+            )
+
+            if pending_docs > 0:
+                await send_text_message(
+                    db,
+                    from_number,
+                    f"{pet.name}'s care plan is still being prepared — "
+                    f"we're finishing up the health analysis from your uploaded documents. "
+                    f"You'll receive it shortly! 🐾",
+                )
+                return
+
+            docs_query = db.query(Document).filter(Document.pet_id == pet.id)
+            if active_marker and active_marker.created_at:
+                docs_query = docs_query.filter(Document.created_at >= active_marker.created_at)
+            docs_in_scope = docs_query.all()
+            success_count = sum(1 for doc in docs_in_scope if doc.extraction_status == "success")
+            failed_docs = [
+                doc for doc in docs_in_scope
+                if doc.extraction_status in ("failed", "rejected")
+            ]
+            failed_doc_names = [
+                (doc.file_path or "Document")
+                .replace("\\", "/")
+                .rsplit("/", 1)[-1]
+                for doc in failed_docs
+            ]
+
+            await _send_deferred_care_plan(
+                db,
+                user,
+                pet,
+                from_number,
+                all_results=[],
+                success_count=success_count,
+                fail_count=len(failed_docs),
+                failed_doc_names=failed_doc_names,
+            )
+            return
+
         await _send_dashboard_links(db, user)
         return
 
@@ -1527,28 +1595,19 @@ async def _delayed_batch_extraction(
         if user and pet:
             user._plaintext_mobile = from_number
 
-            # Try LLM-composed finalization message when the dashboard link was
-            # deferred (user uploaded docs and the 5-min window closed before
-            # extraction finished). If LLM succeeds, skip the regular summary.
-            agentic_sent = await _try_agentic_finalization(
-                bg_db, user, pet, from_number,
-                all_results, success_count, fail_count,
-            )
-
-            if not agentic_sent:
-                if _has_pending_deferred_care_plan(bg_db, pet.id, user=user):
-                    await _send_deferred_care_plan(
-                        bg_db, user, pet, from_number,
-                        all_results=all_results,
-                        success_count=success_count,
-                        fail_count=fail_count,
-                        failed_doc_names=failed_doc_names,
-                    )
-                else:
-                    await _send_batch_summary(
-                        bg_db, user, pet, from_number,
-                        all_results, success_count, fail_count, failed_doc_names,
-                    )
+            if _has_pending_deferred_care_plan(bg_db, pet.id, user=user):
+                await _send_deferred_care_plan(
+                    bg_db, user, pet, from_number,
+                    all_results=all_results,
+                    success_count=success_count,
+                    fail_count=fail_count,
+                    failed_doc_names=failed_doc_names,
+                )
+            else:
+                await _send_batch_summary(
+                    bg_db, user, pet, from_number,
+                    all_results, success_count, fail_count, failed_doc_names,
+                )
 
         # Clear the batch counter and rejection flag so user can upload again.
         _recent_uploads.pop(pet_key, None)
@@ -1741,23 +1800,6 @@ def _get_dashboard_link(db: Session, pet) -> str | None:
     except Exception as e:
         logger.error("Failed to get dashboard link for pet %s: %s", str(pet.id), str(e))
         return None
-
-
-async def _try_agentic_finalization(
-    db: Session, user, pet, from_number: str,
-    all_results: list[dict], success_count: int, fail_count: int,
-) -> bool:
-    """
-    Deterministic-only finalization guard.
-
-    Agentic finalization is disabled for this deployment, so this helper always
-    returns False and callers continue through deterministic summary/finalization
-    branches.
-    """
-    # Finalization is intentionally deterministic in this deployment.
-    # Keep this function as a no-op so callers always use deterministic
-    # summary/finalization branches.
-    return False
 
 
 async def _send_batch_summary(
