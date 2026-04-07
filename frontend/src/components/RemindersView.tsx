@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import {
   getPreventiveMedicineOptions,
   type DashboardData,
@@ -8,6 +8,7 @@ import {
   updatePreventiveDate,
   updatePreventiveFrequency,
 } from '@/lib/api';
+import { normalizeStatusTag } from '@/components/dashboard/dashboard-utils';
 
 interface RemindersViewProps {
   data: DashboardData;
@@ -17,6 +18,7 @@ interface RemindersViewProps {
 
 interface ReminderItem {
   id: string;
+  backendItemName: string;
   itemName: string;
   section: string;
   recurrenceDays: number;
@@ -101,6 +103,14 @@ function isMedicineItem(name: string): boolean {
   return n.includes('deworm') || n.includes('flea') || n.includes('tick');
 }
 
+function displayItemName(itemName: string): string {
+  const normalized = itemName.trim().toLowerCase();
+  if (normalized.includes('flea') && normalized.includes('tick')) {
+    return 'Flea & Tick Protection';
+  }
+  return itemName;
+}
+
 function mapStatusFromNext(nextISO: string | null, fallback: string): string {
   if (!nextISO) return fallback;
   const next = new Date(nextISO);
@@ -121,14 +131,26 @@ const dotClass: Record<string, { bg: string; border: string }> = {
 };
 
 function getStatusDot(status: string | undefined): { bg: string; border: string } {
-  if (!status) return dotClass.orange;
-  if (status.toLowerCase() === 'red') return dotClass.red;
-  if (status.toLowerCase() === 'overdue') return dotClass.red;
-  if (status.toLowerCase() === 'upcoming') return dotClass.orange;
-  if (status.toLowerCase() === 'done') return dotClass.green;
-  if (status.toLowerCase() === 'up_to_date') return dotClass.green;
-  return dotClass.orange;
+  const normalized = normalizeStatusTag(status || '');
+  if (normalized === 'Urgent') return dotClass.red;
+  if (normalized === 'Due soon') return dotClass.orange;
+  return dotClass.green;
 }
+
+const editFieldStyle: CSSProperties = {
+  width: '100%',
+  height: 36,
+  minHeight: 36,
+  fontSize: 13,
+  border: '1px solid var(--border, #e0e0e0)',
+  borderRadius: 6,
+  padding: '6px 8px',
+  fontFamily: 'inherit',
+  background: 'var(--white, #fff)',
+  outline: 'none',
+  color: 'var(--t1, #000)',
+  boxSizing: 'border-box',
+};
 
 export default function RemindersView({ data, token, onBack }: RemindersViewProps) {
   const baseItems = useMemo<ReminderItem[]>(() => {
@@ -143,7 +165,8 @@ export default function RemindersView({ data, token, onBack }: RemindersViewProp
         const recurrence = r.custom_recurrence_days || r.recurrence_days;
         return {
           id: r.item_name.toLowerCase(),
-          itemName: r.item_name,
+          backendItemName: r.item_name,
+          itemName: displayItemName(r.item_name),
           section: 'Vaccines & Preventive Care',
           recurrenceDays: recurrence,
           freqLabel: recurrenceLabel(recurrence),
@@ -197,7 +220,7 @@ export default function RemindersView({ data, token, onBack }: RemindersViewProp
     if (item.isMedicineEligible) {
       setEditVals((prev) => ({ ...prev, loadingMedicineOptions: true }));
       try {
-        const res = await getPreventiveMedicineOptions(token, item.itemName);
+        const res = await getPreventiveMedicineOptions(token, item.backendItemName);
         if (editRequestIdRef.current !== reqId) return;
         options = res.options || [];
         if (item.medicineName && !options.includes(item.medicineName)) {
@@ -239,17 +262,17 @@ export default function RemindersView({ data, token, onBack }: RemindersViewProp
     let wroteAnyField = false;
     try {
       if (nextDays !== item.recurrenceDays) {
-        await updatePreventiveFrequency(token, item.itemName, nextDays);
+        await updatePreventiveFrequency(token, item.backendItemName, nextDays);
         wroteAnyField = true;
       }
 
       if (editVals.lastISO && editVals.lastISO !== item.lastISO) {
-        await updatePreventiveDate(token, item.itemName, editVals.lastISO);
+        await updatePreventiveDate(token, item.backendItemName, editVals.lastISO);
         wroteAnyField = true;
       }
 
       if (item.isMedicineEligible && selectedMedicine && selectedMedicine !== (item.medicineName || '')) {
-        await updateMedicineName(token, item.itemName, selectedMedicine);
+        await updateMedicineName(token, item.backendItemName, selectedMedicine);
         wroteAnyField = true;
       }
 
@@ -291,35 +314,45 @@ export default function RemindersView({ data, token, onBack }: RemindersViewProp
     >
       <div
         style={{
-          padding: '12px 16px',
+          padding: '14px 16px',
           borderBottom: '1px solid var(--border, #e0e0e0)',
           display: 'flex',
           alignItems: 'center',
-          gap: 10,
+          gap: 12,
+          background: 'var(--white, #fff)',
         }}
       >
         <button
           onClick={onBack}
           style={{
-            background: 'none',
-            border: 'none',
-            fontSize: 14,
+            width: 34,
+            height: 34,
+            borderRadius: '50%',
+            border: '1.5px solid var(--border, #e0e0e0)',
+            background: 'var(--white, #fff)',
+            fontSize: 16,
             cursor: 'pointer',
             fontWeight: 600,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: 'var(--t1, #111)',
+            lineHeight: 1,
+          }}
+          aria-label="Back"
+        >
+          &larr;
+        </button>
+        <div
+          style={{
+            fontSize: 28,
+            fontWeight: 700,
+            color: 'var(--t1, #000)',
+            letterSpacing: '-0.01em',
+            lineHeight: 1.1,
           }}
         >
-          Back
-        </button>
-        <div>
-          <div
-            style={{
-              fontSize: 16,
-              fontWeight: 600,
-              color: 'var(--t1, #000)',
-            }}
-          >
-            Care Reminders
-          </div>
+          Care Reminders
         </div>
       </div>
 
@@ -347,19 +380,21 @@ export default function RemindersView({ data, token, onBack }: RemindersViewProp
               <div
                 style={{
                   fontSize: 12,
-                  fontWeight: 600,
+                  fontWeight: 700,
                   color: 'var(--t2, #666)',
                   textTransform: 'uppercase',
+                  letterSpacing: '0.08em',
                   marginBottom: 12,
                   paddingBottom: 8,
                   borderBottom: '1px solid var(--border, #e0e0e0)',
                 }}
               >
-                {sec}
+                {`💉 ${sec.toUpperCase()}`}
               </div>
 
               {secItems.map((item) => {
                 const statusDot = getStatusDot(item.status);
+                const normalizedStatus = normalizeStatusTag(item.status || '');
                 return (
                   <div
                     key={item.id}
@@ -419,7 +454,7 @@ export default function RemindersView({ data, token, onBack }: RemindersViewProp
                                 Last: <strong style={{ color: 'var(--t2, #666)' }}>{displayDate(item.lastISO)}</strong>
                               </span>
                               <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
-                                Next: <strong style={{ color: item.status === 'red' ? 'var(--red, #FF3B30)' : 'var(--t2, #666)' }}>{displayDate(item.nextISO)}</strong>
+                                Next: <strong style={{ color: normalizedStatus === 'Urgent' ? 'var(--red, #FF3B30)' : 'var(--t2, #666)' }}>{displayDate(item.nextISO)}</strong>
                               </span>
                             </div>
 
@@ -505,15 +540,8 @@ export default function RemindersView({ data, token, onBack }: RemindersViewProp
                             value={editVals.freqLabel}
                             onChange={(e) => setEditVals((v) => ({ ...v, freqLabel: e.target.value }))}
                             style={{
-                              width: '100%',
-                              fontSize: 13,
+                              ...editFieldStyle,
                               border: '1.5px solid #FF9500',
-                              borderRadius: 6,
-                              padding: '5px 8px',
-                              fontFamily: 'inherit',
-                              background: 'var(--white, #fff)',
-                              outline: 'none',
-                              color: 'var(--t1, #000)',
                             }}
                           >
                             {freqOptions.map((label) => (
@@ -541,17 +569,7 @@ export default function RemindersView({ data, token, onBack }: RemindersViewProp
                             type="date"
                             value={editVals.lastISO}
                             onChange={(e) => setEditVals((v) => ({ ...v, lastISO: e.target.value }))}
-                            style={{
-                              width: '100%',
-                              fontSize: 13,
-                              border: '1px solid var(--border, #e0e0e0)',
-                              borderRadius: 6,
-                              padding: '5px 8px',
-                              fontFamily: 'inherit',
-                              background: 'var(--white, #fff)',
-                              outline: 'none',
-                              color: 'var(--t1, #000)',
-                            }}
+                            style={editFieldStyle}
                           />
                         </div>
 
@@ -574,17 +592,7 @@ export default function RemindersView({ data, token, onBack }: RemindersViewProp
                                 value={editVals.medicineChoice}
                                 onChange={(e) => setEditVals((v) => ({ ...v, medicineChoice: e.target.value }))}
                                 disabled={editVals.loadingMedicineOptions}
-                                style={{
-                                  width: '100%',
-                                  fontSize: 13,
-                                  border: '1px solid var(--border, #e0e0e0)',
-                                  borderRadius: 6,
-                                  padding: '5px 8px',
-                                  fontFamily: 'inherit',
-                                  background: 'var(--white, #fff)',
-                                  outline: 'none',
-                                  color: 'var(--t1, #000)',
-                                }}
+                                style={editFieldStyle}
                               >
                                 <option value="">Select medicine</option>
                                 {editVals.medicineOptions.map((option) => (
@@ -615,17 +623,7 @@ export default function RemindersView({ data, token, onBack }: RemindersViewProp
                                   value={editVals.customMedicine}
                                   onChange={(e) => setEditVals((v) => ({ ...v, customMedicine: e.target.value }))}
                                   placeholder="Type medicine name"
-                                  style={{
-                                    width: '100%',
-                                    fontSize: 13,
-                                    border: '1px solid var(--border, #e0e0e0)',
-                                    borderRadius: 6,
-                                    padding: '5px 8px',
-                                    fontFamily: 'inherit',
-                                    background: 'var(--white, #fff)',
-                                    outline: 'none',
-                                    color: 'var(--t1, #000)',
-                                  }}
+                                  style={editFieldStyle}
                                 />
                               </div>
                             )}
@@ -699,3 +697,4 @@ export default function RemindersView({ data, token, onBack }: RemindersViewProp
     </div>
   );
 }
+
