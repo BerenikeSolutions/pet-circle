@@ -69,6 +69,31 @@ from app.services.vet_summary_service import get_vet_summary
 logger = logging.getLogger(__name__)
 
 
+def _is_vaccine_item_name(item_name: str | None) -> bool:
+    """Return True when a preventive master item_name represents a vaccine."""
+    if not item_name:
+        return False
+    name = item_name.strip().lower()
+    vaccine_keywords = (
+        "vaccine",
+        "vaccination",
+        "rabies",
+        "dhppi",
+        "kennel cough",
+        "bordetella",
+        "coronavirus",
+        "ccov",
+        "leptospirosis",
+        "influenza",
+        "nobivac",
+        "feline core",
+        "fvrcp",
+        "felv",
+        "fiv",
+    )
+    return any(keyword in name for keyword in vaccine_keywords)
+
+
 def _safe_iso_date(value: date | datetime | None) -> str | None:
     """Return ISO date string for date-like values."""
     if value is None:
@@ -904,6 +929,7 @@ def update_preventive_date(
     token: str,
     item_name: str,
     new_last_done_date: date,
+    bulk_vaccine_update: bool = False,
 ) -> dict:
     """
     Update a preventive record's last_done_date via dashboard.
@@ -970,61 +996,90 @@ def update_preventive_date(
         )
 
     record, master = result
+    apply_to_all_vaccines = bulk_vaccine_update and _is_vaccine_item_name(master.item_name)
 
-    # Store old values for logging and response.
-    old_last_done = record.last_done_date
-    old_next_due = record.next_due_date
-
-    # --- Update last_done_date ---
-    record.last_done_date = new_last_done_date
-
-    # --- Recalculate next_due_date ---
-    # Respect custom recurrence when present; otherwise use master default.
-    effective_recurrence_days = (
-        record.custom_recurrence_days
-        if record.custom_recurrence_days
-        else master.recurrence_days
-    )
-    record.next_due_date = compute_next_due_date(
-        new_last_done_date, effective_recurrence_days
-    )
-
-    # --- Recalculate status ---
-    record.status = compute_status(
-        record.next_due_date, master.reminder_before_days
-    )
-
-    # --- Invalidate pending reminders for the old due date ---
-    # Stale reminders (pending or sent) for the old next_due_date
-    # are marked 'completed' to prevent duplicate sends.
-    # The next reminder engine run will create fresh reminders if needed.
-    stale_reminders = (
-        db.query(Reminder)
-        .filter(
-            Reminder.preventive_record_id == record.id,
-            Reminder.next_due_date == old_next_due,
-            Reminder.status.in_(["pending", "sent"]),
+    if apply_to_all_vaccines:
+        target_rows = (
+            db.query(PreventiveRecord, PreventiveMaster)
+            .join(
+                PreventiveMaster,
+                PreventiveRecord.preventive_master_id == PreventiveMaster.id,
+            )
+            .filter(
+                PreventiveRecord.pet_id == pet_id,
+                PreventiveRecord.status != "cancelled",
+            )
+            .all()
         )
-        .all()
-    )
+        targets = [
+            (r, m)
+            for r, m in target_rows
+            if _is_vaccine_item_name(m.item_name)
+        ]
+        if not targets:
+            targets = [(record, master)]
+    else:
+        targets = [(record, master)]
+
+    # Store old values from the first target for response compatibility.
+    first_record, _first_master = targets[0]
+    old_last_done = first_record.last_done_date
 
     invalidated_count = 0
-    for reminder in stale_reminders:
-        reminder.status = "completed"
-        invalidated_count += 1
+    for target_record, target_master in targets:
+        old_next_due = target_record.next_due_date
+
+        # --- Update last_done_date ---
+        target_record.last_done_date = new_last_done_date
+
+        # --- Recalculate next_due_date ---
+        # Respect custom recurrence when present; otherwise use master default.
+        effective_recurrence_days = (
+            target_record.custom_recurrence_days
+            if target_record.custom_recurrence_days
+            else target_master.recurrence_days
+        )
+        target_record.next_due_date = compute_next_due_date(
+            new_last_done_date, effective_recurrence_days
+        )
+
+        # --- Recalculate status ---
+        target_record.status = compute_status(
+            target_record.next_due_date, target_master.reminder_before_days
+        )
+
+        # --- Invalidate pending reminders for old due date ---
+        stale_reminders = (
+            db.query(Reminder)
+            .filter(
+                Reminder.preventive_record_id == target_record.id,
+                Reminder.next_due_date == old_next_due,
+                Reminder.status.in_(["pending", "sent"]),
+            )
+            .all()
+        )
+
+        for reminder in stale_reminders:
+            reminder.status = "completed"
+            invalidated_count += 1
 
     db.commit()
+
+    updated_count = len(targets)
+    new_next_due = first_record.next_due_date
+    new_status = first_record.status
 
     logger.info(
         "Preventive date updated via dashboard: pet_id=%s, item=%s, "
         "old_done=%s, new_done=%s, new_due=%s, new_status=%s, "
-        "reminders_invalidated=%d",
+        "updated_records=%d, reminders_invalidated=%d",
         str(pet_id),
         item_name,
         str(old_last_done),
         str(new_last_done_date),
-        str(record.next_due_date),
-        record.status,
+        str(new_next_due),
+        new_status,
+        updated_count,
         invalidated_count,
     )
 
@@ -1033,8 +1088,9 @@ def update_preventive_date(
         "item_name": item_name,
         "old_last_done_date": str(old_last_done),
         "new_last_done_date": str(new_last_done_date),
-        "new_next_due_date": str(record.next_due_date),
-        "record_status": record.status,
+        "new_next_due_date": str(new_next_due),
+        "record_status": new_status,
+        "updated_records": updated_count,
         "reminders_invalidated": invalidated_count,
     }
 

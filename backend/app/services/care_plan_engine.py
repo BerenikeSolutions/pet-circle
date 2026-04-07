@@ -880,7 +880,6 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
             .filter(
                 PreventiveRecord.pet_id == pet.id,
                 PreventiveRecord.status != "cancelled",
-                PreventiveRecord.last_done_date.isnot(None),
             )
             .all()
         )
@@ -889,14 +888,24 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
             test_type = _normalize_item_name(master.item_name)
             if test_type == "other":
                 continue
+
+            is_core_type = test_type in {"vaccine", "deworming", "tick_flea"}
+            if record.last_done_date is None and not is_core_type:
+                # Keep existing rule: non-core types only appear when there is
+                # historical completion evidence or an active prescription.
+                continue
+
             item_key = _build_item_key(test_type, master.item_name)
             if item_key not in records_by_key:
                 records_by_key[item_key] = []
                 test_type_by_key[item_key] = test_type
                 item_names_by_key[item_key] = master.item_name
-            records_by_key[item_key].append(
-                _Report(report_date=record.last_done_date, is_prescription=False)
-            )
+            # Keep the item key even when no completion date exists so core
+            # preventive rows (vaccines/deworming/flea-tick) still appear.
+            if record.last_done_date is not None:
+                records_by_key[item_key].append(
+                    _Report(report_date=record.last_done_date, is_prescription=False)
+                )
 
         # ── Fetch active prescriptions scoped to this pet ────────────────────
         # Join via Condition to ensure we only pick up medications for this pet.

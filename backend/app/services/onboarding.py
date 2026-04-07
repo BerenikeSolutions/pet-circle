@@ -1328,8 +1328,17 @@ async def _store_preventive_data(db, pet, parsed: dict):
     one master per species, so they continue to use the single-match loop.
     """
     # --- Generic vaccine mention → update all essential annual vaccines ---
+    # If user provided specific vaccine name+date entries, do NOT fan out the
+    # generic value to all vaccines. This keeps chat behavior precise:
+    # specific mention updates only that vaccine.
+    specific_with_dates = [
+        spec
+        for spec in (parsed.get("vaccine_specifics") or [])
+        if isinstance(spec, dict) and str(spec.get("name") or "").strip() and str(spec.get("date") or "").strip()
+    ]
+
     generic = parsed.get("vaccines")
-    if generic and generic != "none":
+    if generic and generic != "none" and not specific_with_dates:
         gen_date = await _parse_preventive_date_value(generic, pet)
         if gen_date:
             masters = _essential_annual_vaccine_masters(db, pet.species)
