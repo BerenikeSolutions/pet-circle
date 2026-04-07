@@ -974,6 +974,31 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
                 all_item_keys.add(tt)
                 test_type_by_key.setdefault(tt, tt)
 
+        # ── Inject core preventive_master vaccines without records ──────────
+        # Core items (is_core=TRUE) like Kennel Cough and CCoV must appear on
+        # the care plan even when the pet has no uploaded records for them.
+        core_masters = (
+            db.query(PreventiveMaster)
+            .filter(
+                PreventiveMaster.is_core == True,
+                PreventiveMaster.circle == "health",
+                PreventiveMaster.species.in_([pet.species, "both"]),
+            )
+            .all()
+        )
+        for master in core_masters:
+            if _skip_puppy_series and master.recurrence_days and master.recurrence_days >= 36500:
+                continue
+            test_type = _normalize_item_name(master.item_name)
+            if test_type == "other":
+                continue
+            item_key = _build_item_key(test_type, master.item_name)
+            if item_key not in all_item_keys:
+                all_item_keys.add(item_key)
+                records_by_key.setdefault(item_key, [])
+                test_type_by_key[item_key] = test_type
+                item_names_by_key[item_key] = master.item_name
+
         today = date.today()
         next_year = today + timedelta(days=_NEXT_YEAR_THRESHOLD_DAYS)
 

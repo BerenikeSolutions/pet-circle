@@ -75,21 +75,25 @@ _RE_MEDICATION_SIGNAL = re.compile(
 # Maps medication brand names to compatible preventive categories.
 # Some medicines can reasonably be used for both deworming and flea/tick.
 _MEDICATION_TO_PREVENTIVE_CATEGORIES: dict[str, frozenset[str]] = {
-    # Tick & Flea
-    "nexgard": frozenset({"flea_tick"}),
+    # Both flea_tick + deworming
+    "simparica": frozenset({"flea_tick", "deworming"}),
+    "simparica trio": frozenset({"flea_tick", "deworming"}),
     "nexgard spectra": frozenset({"flea_tick", "deworming"}),
+    "advocate": frozenset({"flea_tick", "deworming"}),
+    "revolution plus": frozenset({"flea_tick", "deworming"}),
+    "broadline": frozenset({"flea_tick", "deworming"}),
+    # Flea & Tick only
+    "nexgard": frozenset({"flea_tick"}),
     "bravecto": frozenset({"flea_tick"}),
     "frontline": frozenset({"flea_tick"}),
     "frontline plus": frozenset({"flea_tick"}),
     "fipronil": frozenset({"flea_tick"}),
     "revolution": frozenset({"flea_tick"}),
-    "revolution plus": frozenset({"flea_tick", "deworming"}),
-    "advocate": frozenset({"flea_tick", "deworming"}),
     "credelio": frozenset({"flea_tick"}),
     "seresto": frozenset({"flea_tick"}),
     "advantix": frozenset({"flea_tick"}),
     "advantage": frozenset({"flea_tick"}),
-    # Deworming
+    # Deworming only
     "milbemax": frozenset({"deworming"}),
     "drontal": frozenset({"deworming"}),
     "drontal plus": frozenset({"deworming"}),
@@ -756,6 +760,10 @@ EXTRACTION_SYSTEM_PROMPT = (
     "- If a document lists preventive medicines without a diagnosis, keep conditions: [] and populate preventive_medications[].\n"
     "- For each preventive_medications entry, always set prevention_targets explicitly using one or both: deworming, flea_tick.\n"
     "- If the medicine coverage text indicates both internal parasites (worms/deworming) and external parasite control (flea/tick), include BOTH targets.\n"
+    "- MEDICINE COVERAGE GUIDE (use this to set prevention_targets correctly):\n"
+    "  BOTH deworming + flea_tick: Simparica, Simparica Trio, NexGard Spectra, Advocate, Revolution Plus, Broadline\n"
+    "  flea_tick only: NexGard, Bravecto, Frontline, Frontline Plus, Credelio, Seresto, Advantix, Advantage, Fipronil\n"
+    "  deworming only: Milbemax, Drontal, Drontal Plus, Panacur, Prazitel, Verminator, Fenbendazole, Praziquantel, Pyrantel, Ivermectin, Albendazole\n"
     "- Drugs prescribed to treat a condition belong in that condition's medications[] array, not as a separate condition.\n"
     "- For contacts: extract vet/specialist contact details when explicitly present in the document.\n"
     "- If any field is missing in the document, use null for that field.\n"

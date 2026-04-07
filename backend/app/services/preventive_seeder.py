@@ -56,6 +56,7 @@ SEED_DATA: list[dict] = [
         "medicine_dependent": False,
         "reminder_before_days": 30,
         "overdue_after_days": 7,
+        "is_core": True,
     },
     {
         "item_name": "Rabies Vaccine",
@@ -66,6 +67,7 @@ SEED_DATA: list[dict] = [
         "medicine_dependent": False,
         "reminder_before_days": 30,
         "overdue_after_days": 7,
+        "is_core": True,
     },
     # --- DHPPi (Dogs only) ---
     # Essential. Covers Distemper, Hepatitis, Parvovirus, Parainfluenza.
@@ -80,6 +82,7 @@ SEED_DATA: list[dict] = [
         "medicine_dependent": False,
         "reminder_before_days": 30,
         "overdue_after_days": 7,
+        "is_core": True,
     },
     # --- Feline Core (Cats only) ---
     # Essential. Covers FVRCP (Feline Viral Rhinotracheitis, Calicivirus, Panleukopenia).
@@ -93,6 +96,7 @@ SEED_DATA: list[dict] = [
         "medicine_dependent": False,
         "reminder_before_days": 30,
         "overdue_after_days": 7,
+        "is_core": True,
     },
     # --- Deworming ---
     # Essential for both dogs and cats. Quarterly (90 days).
@@ -107,6 +111,7 @@ SEED_DATA: list[dict] = [
         "medicine_dependent": True,
         "reminder_before_days": 7,
         "overdue_after_days": 7,
+        "is_core": True,
     },
     {
         "item_name": "Deworming",
@@ -117,6 +122,7 @@ SEED_DATA: list[dict] = [
         "medicine_dependent": True,
         "reminder_before_days": 7,
         "overdue_after_days": 7,
+        "is_core": True,
     },
     # --- Annual Checkup ---
     # Complementary for both dogs and cats. Yearly (365 days).
@@ -305,6 +311,7 @@ SEED_DATA: list[dict] = [
         "medicine_dependent": True,
         "reminder_before_days": 5,
         "overdue_after_days": 3,
+        "is_core": True,
     },
     {
         "item_name": "Tick/Flea",
@@ -315,6 +322,7 @@ SEED_DATA: list[dict] = [
         "medicine_dependent": True,
         "reminder_before_days": 5,
         "overdue_after_days": 3,
+        "is_core": True,
     },
     # --- Nail Trimming ---
     # Complementary for both dogs and cats. Every 3 weeks (21 days).
@@ -387,37 +395,38 @@ SEED_DATA: list[dict] = [
     },
 
     # =============================
-    # OPTIONAL VACCINES
+    # ADDITIONAL CORE & OPTIONAL VACCINES
     # =============================
 
     # --- Kennel Cough / Nobivac KC (Dogs only) ---
-    # Optional vaccine covering Bordetella bronchiseptica + Parainfluenza.
+    # Core vaccine covering Bordetella bronchiseptica + Parainfluenza.
     # Brand: Nobivac KC. Annual recurrence (365 days).
-    # Recommended for dogs that board, attend daycare, or visit dog parks.
-    # Category: 'complete' (optional) — not universally required.
+    # Always shown on dashboard alongside Rabies and DHPPi.
     {
         "item_name": "Kennel Cough (Nobivac KC)",
-        "category": "complete",
+        "category": "essential",
         "circle": "health",
         "species": "dog",
         "recurrence_days": 365,
         "medicine_dependent": False,
         "reminder_before_days": 30,
         "overdue_after_days": 14,
+        "is_core": True,
     },
     # --- Canine Coronavirus / CCoV (Dogs only) ---
-    # Optional vaccine. Annual recurrence (365 days).
+    # Core vaccine. Annual recurrence (365 days).
     # Protects against canine enteric coronavirus causing gastroenteritis.
-    # Category: 'complete' (optional) — not universally required.
+    # Always shown on dashboard alongside Rabies and DHPPi.
     {
         "item_name": "Canine Coronavirus (CCoV)",
-        "category": "complete",
+        "category": "essential",
         "circle": "health",
         "species": "dog",
         "recurrence_days": 365,
         "medicine_dependent": False,
         "reminder_before_days": 30,
         "overdue_after_days": 14,
+        "is_core": True,
     },
     # --- Leptospirosis (Dogs only) ---
     # Optional vaccine. Annual recurrence (365 days).
@@ -611,6 +620,7 @@ def seed_preventive_master(db: Session) -> int:
             medicine_dependent=item_data["medicine_dependent"],
             reminder_before_days=item_data["reminder_before_days"],
             overdue_after_days=item_data["overdue_after_days"],
+            is_core=item_data.get("is_core", False),
         )
         db.add(row)
         inserted += 1
