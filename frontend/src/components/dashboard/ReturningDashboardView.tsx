@@ -16,6 +16,7 @@ function cartItemId(item: CarePlanItem, sectionTitle: string): string {
 
 export default function ReturningDashboardView({
   data,
+  token,
   cartCount,
   cartTotal,
   getCartQty,
@@ -72,7 +73,7 @@ export default function ReturningDashboardView({
 
   return (
     <div ref={containerRef} className="app">
-      <ProfileBanner data={data} onGoToReminders={onGoToReminders} />
+      <ProfileBanner data={data} token={token} onGoToReminders={onGoToReminders} />
       <RecognitionCard data={data} onGoToRecords={onGoToRecords} isReturning />
       <AnalysisSummaryCard data={data} onGoToTrends={onGoToTrends} />
       <CarePlanCard

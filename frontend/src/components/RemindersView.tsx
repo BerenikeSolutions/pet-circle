@@ -152,6 +152,13 @@ const editFieldStyle: CSSProperties = {
   boxSizing: 'border-box',
 };
 
+const dateFieldStyle: CSSProperties = {
+  ...editFieldStyle,
+  appearance: 'none',
+  WebkitAppearance: 'none',
+  lineHeight: '22px',
+};
+
 export default function RemindersView({ data, token, onBack }: RemindersViewProps) {
   const baseItems = useMemo<ReminderItem[]>(() => {
     return (data.preventive_records || [])
@@ -223,13 +230,15 @@ export default function RemindersView({ data, token, onBack }: RemindersViewProp
         const res = await getPreventiveMedicineOptions(token, item.backendItemName);
         if (editRequestIdRef.current !== reqId) return;
         options = res.options || [];
-        if (item.medicineName && !options.includes(item.medicineName)) {
-          medicineChoice = MEDICINE_OTHER;
-          customMedicine = item.medicineName;
-        }
       } catch {
         if (editRequestIdRef.current !== reqId) return;
         options = [];
+      }
+
+      // Keep current saved medicine visible/editable even if options API fails or list changed.
+      if (item.medicineName && !options.includes(item.medicineName)) {
+        medicineChoice = MEDICINE_OTHER;
+        customMedicine = item.medicineName;
       }
     }
 
@@ -393,8 +402,8 @@ export default function RemindersView({ data, token, onBack }: RemindersViewProp
               </div>
 
               {secItems.map((item) => {
-                const statusDot = getStatusDot(item.status);
-                const normalizedStatus = normalizeStatusTag(item.status || '');
+                const effectiveStatus = mapStatusFromNext(item.nextISO, item.status || 'upcoming');
+                const statusDot = getStatusDot(effectiveStatus);
                 return (
                   <div
                     key={item.id}
@@ -454,11 +463,11 @@ export default function RemindersView({ data, token, onBack }: RemindersViewProp
                                 Last: <strong style={{ color: 'var(--t2, #666)' }}>{displayDate(item.lastISO)}</strong>
                               </span>
                               <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
-                                Next: <strong style={{ color: normalizedStatus === 'Urgent' ? 'var(--red, #FF3B30)' : 'var(--t2, #666)' }}>{displayDate(item.nextISO)}</strong>
+                                Next: <strong style={{ color: 'var(--t2, #666)' }}>{displayDate(item.nextISO)}</strong>
                               </span>
                             </div>
 
-                            {item.isMedicineEligible && item.medicineName && (
+                            {item.isMedicineEligible && (
                               <div
                                 style={{
                                   marginTop: 4,
@@ -467,7 +476,7 @@ export default function RemindersView({ data, token, onBack }: RemindersViewProp
                                   lineHeight: 1.35,
                                 }}
                               >
-                                Medicine: <strong style={{ color: 'var(--t2, #666)', overflowWrap: 'anywhere' }}>{item.medicineName}</strong>
+                                Medicine: <strong style={{ color: 'var(--t2, #666)', overflowWrap: 'anywhere' }}>{item.medicineName || '--'}</strong>
                               </div>
                             )}
                           </>
@@ -569,7 +578,7 @@ export default function RemindersView({ data, token, onBack }: RemindersViewProp
                             type="date"
                             value={editVals.lastISO}
                             onChange={(e) => setEditVals((v) => ({ ...v, lastISO: e.target.value }))}
-                            style={editFieldStyle}
+                            style={dateFieldStyle}
                           />
                         </div>
 
@@ -653,7 +662,7 @@ export default function RemindersView({ data, token, onBack }: RemindersViewProp
                             style={{
                               fontSize: 13,
                               fontWeight: 700,
-                              color: '#b85c00',
+                              color: 'var(--t2, #666)',
                             }}
                           >
                             {computeNextDue(editVals.lastISO, recurrenceDays(editVals.freqLabel, item.recurrenceDays))}

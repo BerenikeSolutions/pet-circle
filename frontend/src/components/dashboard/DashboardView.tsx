@@ -13,6 +13,7 @@ import { buildCarePlanBuckets, computeCarePlanCounts } from "./dashboard-utils";
 
 export interface DashboardViewProps {
   data: DashboardData;
+  token: string;
   cartCount: number;
   cartTotal: number;
   getCartQty: (item: CarePlanItem, sectionTitle: string) => number;
@@ -29,6 +30,7 @@ function cartItemId(item: CarePlanItem, sectionTitle: string): string {
 
 export default function DashboardView({
   data,
+  token,
   cartCount,
   cartTotal,
   getCartQty,
@@ -85,7 +87,7 @@ export default function DashboardView({
 
   return (
     <div ref={containerRef} className="app">
-      <ProfileBanner data={data} onGoToReminders={onGoToReminders} />
+      <ProfileBanner data={data} token={token} onGoToReminders={onGoToReminders} />
       <RecognitionCard data={data} onGoToRecords={onGoToRecords} />
       <LifeStageCard data={data} />
       <HealthConditionsCard data={data} onGoToTrends={onGoToTrends} />

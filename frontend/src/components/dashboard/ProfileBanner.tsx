@@ -1,6 +1,8 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import type { DashboardData } from "@/lib/api";
+import { getLastVetVisit } from "@/lib/api";
 import {
   ageMonthsFromDob,
   formatAgeLabel,
@@ -11,14 +13,80 @@ import {
 
 interface ProfileBannerProps {
   data: DashboardData;
+  token: string;
   onGoToReminders: () => void;
 }
 
-export default function ProfileBanner({ data, onGoToReminders }: ProfileBannerProps) {
+function formatVetVisitDate(value: string | null | undefined): string {
+  if (!value) return "--";
+  const dateOnlyMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (dateOnlyMatch) {
+    const year = Number(dateOnlyMatch[1]);
+    const month = Number(dateOnlyMatch[2]);
+    const day = Number(dateOnlyMatch[3]);
+    const safeDate = new Date(year, month - 1, day);
+    return new Intl.DateTimeFormat("en-GB", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+    }).format(safeDate);
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  }).format(parsed);
+}
+
+export default function ProfileBanner({ data, token, onGoToReminders }: ProfileBannerProps) {
   const ageMonths = data.life_stage?.age_months ?? ageMonthsFromDob(data.pet.dob);
   const avatar = getPetAvatar(data.pet.species);
-  const vetName = data.vet_summary?.name || "Not added yet";
-  const vetLastVisit = data.vet_summary?.last_visit || "--";
+  const fallbackVetName = data.vet_summary?.name || "Not added yet";
+  const fallbackVetLastVisit = formatVetVisitDate(data.vet_summary?.last_visit) || "--";
+  const [latestVet, setLatestVet] = useState<{ name: string; lastVisit: string }>({
+    name: fallbackVetName,
+    lastVisit: fallbackVetLastVisit,
+  });
+
+  useEffect(() => {
+    setLatestVet({ name: fallbackVetName, lastVisit: fallbackVetLastVisit });
+  }, [fallbackVetLastVisit, fallbackVetName]);
+
+  useEffect(() => {
+    let isActive = true;
+
+    const loadLatestVet = async () => {
+      try {
+        const lastVet = await getLastVetVisit(token);
+        if (!isActive) return;
+
+        const latestName = lastVet.vet_name?.trim() || "Not added yet";
+        const latestVisit = formatVetVisitDate(lastVet.last_visit_date);
+        const hasLatestRecord = Boolean(lastVet.vet_name?.trim() || lastVet.last_visit_date);
+        if (hasLatestRecord) {
+          setLatestVet({ name: latestName, lastVisit: latestVisit });
+          return;
+        }
+
+        setLatestVet({ name: "Not added yet", lastVisit: "--" });
+      } catch {
+        if (!isActive) return;
+        setLatestVet({ name: fallbackVetName, lastVisit: fallbackVetLastVisit });
+      }
+    };
+
+    void loadLatestVet();
+
+    return () => {
+      isActive = false;
+    };
+  }, [fallbackVetLastVisit, fallbackVetName, token]);
+
+  const vetName = latestVet.name || "Not added yet";
+  const vetLastVisit = latestVet.lastVisit || "--";
 
   const subParts: string[] = [];
   if (data.pet.breed) subParts.push(data.pet.breed);

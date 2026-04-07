@@ -250,6 +250,7 @@ function DashboardInner({ token }: { token: string }) {
         return (
           <ViewComponent
             data={data}
+            token={token}
             cartCount={cartCount}
             cartTotal={cartTotal}
             getCartQty={getCartQty}
