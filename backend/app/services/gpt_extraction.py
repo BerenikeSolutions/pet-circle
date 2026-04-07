@@ -1103,6 +1103,8 @@ _VACCINE_DETAIL_TO_ITEM: dict[str, str] = {
     "nobivac kc": "Kennel Cough (Nobivac KC)",
     "canine coronavirus": "Canine Coronavirus (CCoV)",
     "ccov": "Canine Coronavirus (CCoV)",
+    "leptospirosis": "Leptospirosis",
+    "lepto": "Leptospirosis",
     "fvrcp": "Feline Core",
     "feline core": "Feline Core",
     "tricat": "Feline Core",

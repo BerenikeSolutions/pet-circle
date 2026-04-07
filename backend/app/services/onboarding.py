@@ -309,7 +309,7 @@ async def handle_onboarding_step(
     # --- Irrelevant-input suppression ---
     # Silently swallow casual ack words ("yes", "ok", "thanks", etc.) when the
     # current step expects substantive input (breed, weight, food, etc.).
-    if _is_irrelevant_noise_for_state(state, text_lower):
+    if _is_irrelevant_noise_for_state(state, text_lower, _get_onboarding_data(user)):
         logger.info(
             "Suppressing irrelevant input %r during onboarding state=%s for user=%s",
             text_lower[:40], state, str(user.id),
@@ -458,16 +458,62 @@ _NOISE_ALLOWED_STATES: frozenset[str] = frozenset({
 })
 
 
-def _is_irrelevant_noise_for_state(state: str, text_lower: str) -> bool:
+def _has_pending_confirmation_prompt(state: str, onboarding_data: dict | None) -> bool:
+    """
+    Return True when the current state is explicitly waiting for a yes/no style
+    confirmation reply.
+
+    This protects legit short replies like "y"/"yes" from being swallowed by
+    global onboarding noise suppression.
+    """
+    data = onboarding_data or {}
+    if not data:
+        return False
+
+    # Any active "*_confirm_pending" marker means this state is waiting for
+    # a short confirmation reply and must not treat yes/no as noise.
+    for key, value in data.items():
+        if key.endswith("_confirm_pending") and bool(value):
+            return True
+    return False
+
+
+def _is_irrelevant_noise_for_state(
+    state: str,
+    text_lower: str,
+    onboarding_data: dict | None = None,
+) -> bool:
     """
     Return True if `text_lower` is a casual ack word that cannot possibly
     answer the question being asked in the current onboarding state.
+
+    If the step has an active confirmation prompt, yes/no replies are valid
+    and must not be suppressed.
     """
     if not text_lower:
         return False
     if state in _NOISE_ALLOWED_STATES:
         return False
+    if _has_pending_confirmation_prompt(state, onboarding_data):
+        return False
     return text_lower in _NOISE_WORDS
+
+
+def _resolve_binary_confirmation_reply(text_lower: str) -> str | None:
+    """
+    Parse a short confirmation reply into deterministic intent.
+
+    Returns:
+        - "yes" for affirmative replies
+        - "no" for negative replies
+        - None when reply is not a plain yes/no
+    """
+    normalized = re.sub(r"[.!?,]+$", "", (text_lower or "").strip().lower())
+    if normalized in _YES_INPUTS:
+        return "yes"
+    if normalized in _NO_INPUTS:
+        return "no"
+    return None
 
 
 async def _send_onboarding_resume(db, user, state, send_fn):
@@ -976,9 +1022,19 @@ async def _step_meal_details(db, user, text, send_fn):
             # Skip — proceed without saving.
             pass
         else:
+            binary_reply = _resolve_binary_confirmation_reply(text_lower)
+            if binary_reply == "no":
+                db.commit()
+                await send_fn(
+                    db, mobile,
+                    f"No problem! Could you describe what {pet.name} actually eats "
+                    f"in a typical day?",
+                )
+                return
+
             # Use AI to interpret: plain yes → use example as-is,
             # yes-with-changes → modify example, no → re-ask.
-            final_diet = await _ai_resolve_example_confirmation(
+            final_diet = example_shown if binary_reply == "yes" else await _ai_resolve_example_confirmation(
                 text, example_shown, pet.name, "diet",
             )
             if final_diet == "__reject__":
@@ -1113,8 +1169,22 @@ async def _step_preventive(db, user, text, send_fn):
     if confirm_pending:
         _set_onboarding_data(user, "preventive_confirm_pending", False)
         if text_lower not in _SKIP_INPUTS:
-            final_preventive = await _ai_resolve_example_confirmation(
-                text, example_shown, pet.name, "preventive",
+            binary_reply = _resolve_binary_confirmation_reply(text_lower)
+            if binary_reply == "no":
+                db.commit()
+                await send_fn(
+                    db, mobile,
+                    f"No problem! Could you share what you remember about {pet.name}'s "
+                    f"vaccines, deworming, flea & tick, and blood tests?",
+                )
+                return
+
+            final_preventive = (
+                example_shown
+                if binary_reply == "yes"
+                else await _ai_resolve_example_confirmation(
+                    text, example_shown, pet.name, "preventive",
+                )
             )
             if final_preventive == "__reject__":
                 db.commit()

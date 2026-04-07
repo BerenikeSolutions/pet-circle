@@ -165,8 +165,8 @@ def test_derive_items_from_medication_brands_expands_dual_use_medicine() -> None
     assert names == {"Deworming", "Tick/Flea"}
 
 
-def test_get_preventive_categories_for_medicine_has_no_simparica_hardcode() -> None:
-    assert gpt_extraction._get_preventive_categories_for_medicine("Simparica") == set()
+def test_get_preventive_categories_for_medicine_returns_dual_use_for_simparica() -> None:
+    assert gpt_extraction._get_preventive_categories_for_medicine("Simparica") == {"flea_tick", "deworming"}
 
 
 def test_validate_extraction_uses_preventive_medications_targets_for_simparica() -> None:

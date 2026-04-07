@@ -118,14 +118,20 @@ def _lookup_catalog_frequency(db: Session, medicine_name: str, item_type: str) -
     Search product_catalog for a matching product and return parsed frequency in days.
 
     Rule:
-      - Dual-use medicines: resolve medicine-centrically across categories.
-      - Non-dual medicines: keep previous category-specific lookup behavior.
+      - Dual-use medicines (e.g. Simparica): one medicine = one dosing interval.
+        Search across both deworming and flea_tick categories and return a single
+        consistent frequency regardless of which item_type is being updated.
+        When catalog entries disagree, use the shortest interval (most frequent
+        dosing) since that is the actual administration schedule.
+      - Non-dual medicines: category-specific lookup as before.
     """
     from app.models.product_catalog import ProductCatalog
 
     is_dual = _is_dual_use_medicine(medicine_name)
     categories = _infer_catalog_categories(item_type)
     if is_dual:
+        # Always search both categories so the result is identical
+        # regardless of whether item_type is "Deworming" or "Tick/Flea".
         allowed_categories = ["deworming", "flea_tick"]
     else:
         allowed_categories = categories
@@ -170,7 +176,8 @@ def _lookup_catalog_frequency(db: Session, medicine_name: str, item_type: str) -
 
     if len(matched_days) > 1:
         logger.warning(
-            "Catalog contains multiple recurrence values for %s (%s); using minimum days for consistency.",
+            "Catalog contains multiple recurrence values for %s (%s); "
+            "using shortest interval (actual dosing schedule).",
             medicine_name,
             sorted(matched_days),
         )
