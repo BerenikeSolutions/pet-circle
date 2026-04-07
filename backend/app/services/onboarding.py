@@ -1263,32 +1263,15 @@ def _essential_annual_vaccine_masters(db: Session, species: str) -> list[Prevent
     """
     Return recurring annual core-vaccine masters for the species.
 
-    Filters: circle='health', recurrence_days <= 730,
-    and item name classified as 'vaccine' by nudge_engine._classify_item.
-    Excludes puppy dose series (recurrence_days=36500) and non-vaccines
-    (e.g. Deworming, Annual Checkup).
-
     Generic onboarding inputs like "vaccines last Dec" should only fan out
-    to core vaccines, not optional vaccines.
+    to canonical core vaccines, never optional vaccines.
+
+    Primary selection requires both:
+      - canonical core vaccine name
+      - is_core = TRUE
+
+    Fallback keeps canonical-name protection even if is_core flags are stale.
     """
-    from app.services.nudge_engine import _classify_item
-
-    rows = (
-        db.query(PreventiveMaster)
-        .filter(
-            PreventiveMaster.species.in_([species, "both"]),
-            PreventiveMaster.circle == "health",
-            PreventiveMaster.recurrence_days <= 730,
-            PreventiveMaster.is_core.is_(True),
-        )
-        .all()
-    )
-
-    core_vaccines = [m for m in rows if _classify_item(m.item_name) == "vaccine"]
-    if core_vaccines:
-        return core_vaccines
-
-    # Fallback for environments where is_core flags are stale/missing.
     canonical_core_vaccines = {
         "rabies vaccine",
         "rabies (nobivac rl)",
@@ -1297,7 +1280,8 @@ def _essential_annual_vaccine_masters(db: Session, species: str) -> list[Prevent
         "kennel cough (nobivac kc)",
         "canine coronavirus (ccov)",
     }
-    fallback_rows = (
+
+    rows = (
         db.query(PreventiveMaster)
         .filter(
             PreventiveMaster.species.in_([species, "both"]),
@@ -1306,9 +1290,20 @@ def _essential_annual_vaccine_masters(db: Session, species: str) -> list[Prevent
         )
         .all()
     )
+
+    core_vaccines = [
+        m
+        for m in rows
+        if bool(m.is_core)
+        and (m.item_name or "").strip().lower() in canonical_core_vaccines
+    ]
+    if core_vaccines:
+        return core_vaccines
+
+    # Fallback for environments where is_core flags are stale/missing.
     fallback = [
         m
-        for m in fallback_rows
+        for m in rows
         if (m.item_name or "").strip().lower() in canonical_core_vaccines
     ]
     if fallback:
@@ -2693,8 +2688,8 @@ async def _finalize_onboarding(db, user, send_fn):
     # --- Generate the "care plan ready" message ---
     # Persist the deferred marker BEFORE the slow GPT call so that any
     # "dashboard" request from the user during care-plan generation is
-    # correctly answered with "still being prepared" instead of a premature
-    # dashboard link.
+    # silently swallowed by the dashboard handler. The care plan + link
+    # will be delivered as soon as GPT returns.
     _persist_deferred_marker_with_fallback(db, user, pet)
 
     # Transition message first.

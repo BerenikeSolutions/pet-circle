@@ -22,7 +22,7 @@ def test_resolve_vaccine_item_name_maps_ccov_variants() -> None:
     )
 
 
-def test_annual_vaccine_query_does_not_restrict_to_essential_category(monkeypatch) -> None:
+def test_annual_vaccine_query_returns_only_canonical_core_vaccines() -> None:
     class _FakeQuery:
         def __init__(self, rows):
             self.rows = rows
@@ -43,17 +43,13 @@ def test_annual_vaccine_query_does_not_restrict_to_essential_category(monkeypatc
             return self.query_obj
 
     rows = [
-        SimpleNamespace(item_name="Rabies (Nobivac RL)"),
-        SimpleNamespace(item_name="Kennel Cough (Nobivac KC)"),
-        SimpleNamespace(item_name="Canine Coronavirus (CCoV)"),
-        SimpleNamespace(item_name="Deworming"),
+        SimpleNamespace(item_name="Rabies (Nobivac RL)", is_core=True),
+        SimpleNamespace(item_name="Kennel Cough (Nobivac KC)", is_core=True),
+        SimpleNamespace(item_name="Canine Coronavirus (CCoV)", is_core=True),
+        SimpleNamespace(item_name="Deworming", is_core=True),
+        SimpleNamespace(item_name="Leptospirosis", is_core=True),
     ]
     db = _FakeDB(rows)
-
-    monkeypatch.setattr(
-        "app.services.nudge_engine._classify_item",
-        lambda name: "vaccine" if "deworm" not in (name or "").lower() else "deworming",
-    )
 
     result = onboarding._essential_annual_vaccine_masters(db, "dog")
 
@@ -62,7 +58,6 @@ def test_annual_vaccine_query_does_not_restrict_to_essential_category(monkeypatc
         "Kennel Cough (Nobivac KC)",
         "Canine Coronavirus (CCoV)",
     ]
-    assert not any("category" in str(expr).lower() for expr in db.query_obj.filter_args)
 
 
 def test_normalize_preventive_medicine_moves_dewormer_out_of_flea_tick() -> None:

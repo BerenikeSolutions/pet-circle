@@ -801,39 +801,15 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
             bool(pet) and _has_pending_deferred_care_plan(db, pet.id, user=user)
         )
 
-        # Guard against race conditions where deferred marker persistence fails.
-        # Only hold dashboard links while in deferred state, or right after
-        # onboarding completion when extraction can still be in-flight.
-        onboarding_completed_at = getattr(user, "onboarding_completed_at", None)
-        if pet and (has_deferred_care_plan or bool(onboarding_completed_at)):
-            pending_docs = (
-                db.query(Document.id)
-                .filter(
-                    Document.pet_id == pet.id,
-                    Document.extraction_status == "pending",
-                )
-                .count()
-            )
-            if pending_docs > 0:
-                await send_text_message(
-                    db,
-                    from_number,
-                    f"{pet.name}'s care plan is still being prepared — "
-                    f"we're finishing up the health analysis from your uploaded documents. "
-                    f"You'll receive it shortly! 🐾",
-                )
-                return
-
+        # If the care plan delivery is in progress (deferred marker active),
+        # silently swallow the dashboard request. The user will receive the
+        # care plan + dashboard link from the in-flight delivery path
+        # (either _finalize_onboarding or extraction-completion handler).
+        # This prevents premature dashboard links and duplicate sends.
         if pet and has_deferred_care_plan:
-            # Care plan hasn't been delivered yet — tell the user it's
-            # coming and let the extraction-completion path send it.
-            # This avoids a race where both this handler and the
-            # extraction handler send the care plan simultaneously.
-            await send_text_message(
-                db,
-                from_number,
-                f"{pet.name}'s care plan is still being prepared — "
-                f"you'll receive it shortly! 🐾",
+            logger.info(
+                "Suppressing dashboard request for pet=%s — care plan delivery in progress",
+                str(pet.id),
             )
             return
 
