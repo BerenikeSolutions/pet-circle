@@ -56,6 +56,7 @@ def test_route_message_transcript_dashboard_precedence(monkeypatch):
     user = SimpleNamespace(
         id="user-rt-1",
         onboarding_state="complete",
+        onboarding_completed_at=None,
         order_state=None,
         active_reminder_id=None,
         mobile_number="enc",

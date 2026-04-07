@@ -53,6 +53,7 @@ from app.models.document import Document
 from app.models.pet import Pet
 from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
+from app.models.product_catalog import ProductCatalog
 from app.models.reminder import Reminder
 from app.models.user import User
 from app.services.diet_service import HOMEMADE_KW, add_diet_item, split_diet_items_by_type
@@ -1324,6 +1325,71 @@ def _match_specific_vaccine_master(
     )
 
 
+def _infer_preventive_categories_from_catalog(db: Session, medicine_name: str | None) -> set[str]:
+    """Infer preventive categories using product catalog records.
+
+    This avoids hardcoded medicine names and relies on existing catalog labels.
+    """
+    if not isinstance(medicine_name, str):
+        return set()
+
+    normalized = re.sub(r"\s+", " ", medicine_name.strip().lower())
+    if not normalized:
+        return set()
+
+    tokens = [tok for tok in re.findall(r"[a-z0-9]+", normalized) if len(tok) >= 4]
+    if not tokens:
+        return set()
+
+    rows = (
+        db.query(ProductCatalog.category, ProductCatalog.brand, ProductCatalog.product_name)
+        .filter(ProductCatalog.category.in_(["deworming", "flea_tick"]))
+        .all()
+    )
+
+    categories: set[str] = set()
+    for category, brand, product_name in rows:
+        haystack = f"{(brand or '').strip().lower()} {(product_name or '').strip().lower()}"
+        if not haystack.strip():
+            continue
+        if normalized in haystack or any(token in haystack for token in tokens):
+            categories.add(category)
+
+    return categories
+
+
+def _enrich_preventive_categories_from_catalog(db: Session, parsed: dict) -> dict:
+    """Backfill missing deworming/flea_tick buckets from catalog-inferred categories."""
+    normalized = dict(parsed or {})
+
+    def _copy_bucket(target_key: str, source_value: dict) -> None:
+        existing = normalized.get(target_key)
+        if isinstance(existing, dict):
+            if not existing.get("date") and source_value.get("date"):
+                existing["date"] = source_value.get("date")
+            if not existing.get("medicine") and source_value.get("medicine"):
+                existing["medicine"] = source_value.get("medicine")
+            return
+        normalized[target_key] = {
+            "date": source_value.get("date"),
+            "medicine": source_value.get("medicine"),
+            "prevention_targets": source_value.get("prevention_targets") or [],
+        }
+
+    for source_key in ("deworming", "flea_tick"):
+        source_value = normalized.get(source_key)
+        if not isinstance(source_value, dict):
+            continue
+
+        categories = _infer_preventive_categories_from_catalog(db, source_value.get("medicine"))
+        if "deworming" in categories:
+            _copy_bucket("deworming", source_value)
+        if "flea_tick" in categories:
+            _copy_bucket("flea_tick", source_value)
+
+    return normalized
+
+
 async def _store_preventive_data(db, pet, parsed: dict):
     """
     Store parsed preventive care data as preventive records.
@@ -1338,6 +1404,8 @@ async def _store_preventive_data(db, pet, parsed: dict):
     Other categories (deworming, flea_tick, blood_test) each have exactly
     one master per species, so they continue to use the single-match loop.
     """
+    parsed = _enrich_preventive_categories_from_catalog(db, parsed)
+
     # --- Generic vaccine mention → update all essential annual vaccines ---
     # If user provided specific vaccine name+date entries, do NOT fan out the
     # generic value to all vaccines. This keeps chat behavior precise:
@@ -1876,8 +1944,8 @@ async def _parse_preventive_care(text: str) -> dict:
     Returns dict with keys:
         vaccines (str|None)         — generic "vaccines done" date
         vaccine_specifics (list)    — [{"name": "rabies", "date": "Dec 2025"}, ...]
-        deworming (dict|str|None)   — {"date": "...", "medicine": "..."} or date string
-        flea_tick (dict|str|None)   — {"date": "...", "medicine": "..."} or date string
+        deworming (dict|str|None)   — {"date": "...", "medicine": "...", "prevention_targets": [...]} or date string
+        flea_tick (dict|str|None)   — {"date": "...", "medicine": "...", "prevention_targets": [...]} or date string
         blood_test (str|None)
         missing (list[str])         — which of the 4 categories were not mentioned
     """
@@ -1907,12 +1975,16 @@ async def _parse_preventive_care(text: str) -> dict:
         "Panacur, Advocate, Revolution, Credelio, Seresto, Advantix, Prazitel, Verminator, "
         "Fipronil, Ivermectin, Fenbendazole, Pyrantel, Albendazole), "
         "extract it as the 'medicine' field.\n"
-        "- Return deworming and flea_tick as objects with 'date' and 'medicine' keys.\n\n"
+        "- Return deworming and flea_tick as objects with 'date', 'medicine', and "
+        "'prevention_targets' keys.\n"
+        "- prevention_targets must be an array containing one or both of: 'deworming', "
+        "'flea_tick', based on what the medicine covers.\n"
+        "- If no medicine is provided, use an empty prevention_targets array.\n\n"
         'Return ONLY valid JSON, no markdown: '
         '{"vaccines": "date or timeframe"|null, '
         '"vaccine_specifics": [{"name": "vaccine name", "date": "date or timeframe"}], '
-        '"deworming": {"date": "date or timeframe", "medicine": "brand name"|null}|null, '
-        '"flea_tick": {"date": "date or timeframe", "medicine": "brand name"|null}|null, '
+        '"deworming": {"date": "date or timeframe", "medicine": "brand name"|null, "prevention_targets": ["deworming"|"flea_tick"]}|null, '
+        '"flea_tick": {"date": "date or timeframe", "medicine": "brand name"|null, "prevention_targets": ["deworming"|"flea_tick"]}|null, '
         '"blood_test": "date or timeframe"|null, '
         '"missing": ["category names not mentioned"]}. '
         "If the user explicitly says 'none' or 'not done' for a category, "
@@ -1975,12 +2047,20 @@ def _normalize_preventive_medicine_categories(parsed: dict) -> dict:
 
     def _coerce_category_value(value):
         if isinstance(value, dict):
+            raw_targets = value.get("prevention_targets")
+            clean_targets: list[str] = []
+            if isinstance(raw_targets, list):
+                for target in raw_targets:
+                    token = _as_text(target).lower().replace("-", "_").replace(" ", "_")
+                    if token:
+                        clean_targets.append(token)
             return {
                 "date": value.get("date"),
                 "medicine": value.get("medicine") if isinstance(value.get("medicine"), str) else None,
+                "prevention_targets": clean_targets,
             }
         if isinstance(value, str) and value and value != "none":
-            return {"date": value, "medicine": None}
+            return {"date": value, "medicine": None, "prevention_targets": []}
         return value
 
     def _is_category_present(value) -> bool:
@@ -2030,7 +2110,17 @@ def _normalize_preventive_medicine_categories(parsed: dict) -> dict:
         if not medicine:
             continue
 
-        categories = _get_preventive_categories_for_medicine(medicine)
+        explicit_categories: set[str] = set()
+        raw_targets = source_value.get("prevention_targets")
+        if isinstance(raw_targets, list):
+            for target in raw_targets:
+                token = _as_text(target).lower().replace("-", "_").replace(" ", "_")
+                if token in {"flea", "tick", "tick_flea", "flea_tick", "tick/flea", "flea/tick"}:
+                    explicit_categories.add("flea_tick")
+                elif token in {"deworm", "deworming", "worm", "worms"}:
+                    explicit_categories.add("deworming")
+
+        categories = explicit_categories or _get_preventive_categories_for_medicine(medicine)
         if not categories:
             continue
 
@@ -2040,7 +2130,11 @@ def _normalize_preventive_medicine_categories(parsed: dict) -> dict:
 
         if "deworming" in categories:
             if not isinstance(deworming, dict):
-                deworming = {"date": source_date, "medicine": source_medicine}
+                deworming = {
+                    "date": source_date,
+                    "medicine": source_medicine,
+                    "prevention_targets": source_value.get("prevention_targets") or [],
+                }
                 source_rehomed = True
             else:
                 before_date = deworming.get("date")
@@ -2056,7 +2150,11 @@ def _normalize_preventive_medicine_categories(parsed: dict) -> dict:
 
         if "flea_tick" in categories:
             if not isinstance(flea_tick, dict):
-                flea_tick = {"date": source_date, "medicine": source_medicine}
+                flea_tick = {
+                    "date": source_date,
+                    "medicine": source_medicine,
+                    "prevention_targets": source_value.get("prevention_targets") or [],
+                }
                 source_rehomed = True
             else:
                 before_date = flea_tick.get("date")

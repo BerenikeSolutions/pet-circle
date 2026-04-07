@@ -328,69 +328,85 @@ export default function RemindersView({ data, token, onBack, onDashboardDataUpda
 
     setSaveError('');
     setSaving(true);
-    let wroteAnyField = false;
-    try {
-      if (nextDays !== item.recurrenceDays) {
-        await updatePreventiveFrequency(token, item.backendItemName, nextDays);
-        wroteAnyField = true;
-      }
+    const nextISO = computeNextISO(editVals.lastISO, nextDays);
 
-      if (editVals.lastISO && editVals.lastISO !== item.lastISO) {
-        await updatePreventiveDate(token, item.backendItemName, editVals.lastISO);
-        wroteAnyField = true;
-      }
+    // Build list of independent update calls to run in parallel.
+    const updates: Promise<unknown>[] = [];
 
-      if (item.isMedicineEligible && selectedMedicine && selectedMedicine !== (item.medicineName || '')) {
-        await updateMedicineName(token, item.backendItemName, selectedMedicine);
-        wroteAnyField = true;
-      }
+    if (nextDays !== item.recurrenceDays) {
+      updates.push(updatePreventiveFrequency(token, item.backendItemName, nextDays));
+    }
 
-      const nextISO = computeNextISO(editVals.lastISO, nextDays);
-      try {
-        const latest = await fetchDashboardFresh(token);
-        setItems(toReminderItems(latest.preventive_records || []));
-        onDashboardDataUpdated?.(latest);
-      } catch {
-        // If readback fails despite successful writes, show optimistic values.
-        setItems((prev) =>
-          prev.map((entry) =>
-            entry.id !== item.id
-              ? entry
-              : {
-                  ...entry,
-                  recurrenceDays: nextDays,
-                  freqLabel: recurrenceLabel(nextDays),
-                  lastISO: editVals.lastISO,
-                  nextISO,
-                  status: mapStatusFromNext(nextISO, entry.status || 'upcoming'),
-                  medicineName: selectedMedicine || entry.medicineName,
-                }
-          )
-        );
-      }
+    if (editVals.lastISO && editVals.lastISO !== item.lastISO) {
+      updates.push(updatePreventiveDate(token, item.backendItemName, editVals.lastISO));
+    }
+
+    if (item.isMedicineEligible && selectedMedicine && selectedMedicine !== (item.medicineName || '')) {
+      updates.push(updateMedicineName(token, item.backendItemName, selectedMedicine));
+    }
+
+    const optimisticItems = items.map((entry) =>
+      entry.id !== item.id
+        ? entry
+        : {
+            ...entry,
+            recurrenceDays: nextDays,
+            freqLabel: recurrenceLabel(nextDays),
+            lastISO: editVals.lastISO || entry.lastISO,
+            nextISO,
+            status: mapStatusFromNext(nextISO, entry.status || 'upcoming'),
+            medicineName: selectedMedicine || entry.medicineName,
+          }
+    );
+
+    const patchedData = (): DashboardData => ({
+      ...data,
+      preventive_records: (data.preventive_records || []).map((r) => {
+        if (r.item_name.toLowerCase() !== item.backendItemName.toLowerCase()) return r;
+        return {
+          ...r,
+          last_done_date: editVals.lastISO || r.last_done_date,
+          next_due_date: nextISO,
+          status: mapStatusFromNext(nextISO, r.status || 'upcoming'),
+          custom_recurrence_days: nextDays !== r.recurrence_days ? nextDays : r.custom_recurrence_days,
+          medicine_name: selectedMedicine || r.medicine_name,
+        };
+      }),
+    });
+
+    if (updates.length === 0) {
+      // Nothing changed — just close the editor.
+      setSaving(false);
       setEditingId(null);
-    } catch (err: unknown) {
-      if (wroteAnyField) {
-        // A write succeeded before another failed. Reconcile from an
-        // authoritative fresh fetch (no cache fallback) before leaving edit mode.
-        try {
-          const latest = await fetchDashboardFresh(token);
+      return;
+    }
+
+    try {
+      // Fire all writes in parallel instead of sequentially.
+      await Promise.all(updates);
+
+      // Apply optimistic update and close editor immediately.
+      setItems(optimisticItems);
+      setEditingId(null);
+      setSaving(false);
+
+      // Reconcile with server data in background (non-blocking).
+      fetchDashboardFresh(token)
+        .then((latest) => {
           setItems(toReminderItems(latest.preventive_records || []));
           onDashboardDataUpdated?.(latest);
-          setEditingId(null);
-          setSaveError('');
-        } catch (refreshErr: unknown) {
-          setSaveError(
-            refreshErr instanceof Error
-              ? refreshErr.message
-              : 'Saved, but could not confirm the latest values. Please retry save.'
-          );
-        }
-      } else {
-        setSaveError(err instanceof Error ? err.message : 'Could not save changes.');
-      }
-    } finally {
+        })
+        .catch(() => {
+          onDashboardDataUpdated?.(patchedData());
+        });
+    } catch (err: unknown) {
+      // At least one write failed. Apply optimistic values for any that succeeded
+      // and propagate to parent.
+      setItems(optimisticItems);
+      onDashboardDataUpdated?.(patchedData());
+      setEditingId(null);
       setSaving(false);
+      setSaveError(err instanceof Error ? err.message : 'Some changes may not have saved. Refresh to confirm.');
     }
   };
 

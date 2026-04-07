@@ -1,16 +1,21 @@
 """
 PetCircle Phase 1 — Medicine Recurrence Service
 
-Uses OpenAI GPT to determine the recommended recurrence interval
-for a specific medicine/product based on pet species and item type
-(deworming, flea/tick, supplements).
+Determines the recommended recurrence interval for a medicine/product.
 
-The AI returns the number of days between doses/applications,
-which is then used as custom_recurrence_days for the preventive record.
+Strategy:
+  1. Look up the product in product_catalog by matching the medicine name
+     against "brand product_name". If found and the catalog has a parseable
+     frequency value, use it directly — no AI call needed.
+  2. Fall back to OpenAI GPT only when the product is not in the catalog
+     or the catalog frequency cannot be parsed into days.
 """
 
 import json
 import logging
+import re
+
+from sqlalchemy.orm import Session
 
 from app.config import settings
 
@@ -29,6 +34,118 @@ def _get_openai_client():
     return _openai_medicine_client
 
 
+# ---------------------------------------------------------------------------
+# Frequency string → days parser
+# ---------------------------------------------------------------------------
+
+def _parse_frequency_to_days(frequency: str | None) -> int | None:
+    """
+    Parse a human-readable frequency/duration string into an integer number of days.
+
+    Handles patterns like:
+      "30 days", "Every 3 months", "1 month", "3 months", "12 weeks",
+      "monthly", "quarterly", "annually", "Once a month"
+    """
+    if not frequency:
+        return None
+
+    text = frequency.strip().lower()
+
+    # Direct day values: "30 days", "90 days", "every 30 days"
+    m = re.search(r'(\d+)\s*days?', text)
+    if m:
+        return int(m.group(1))
+
+    # Week values: "4 weeks", "every 12 weeks"
+    m = re.search(r'(\d+)\s*weeks?', text)
+    if m:
+        return int(m.group(1)) * 7
+
+    # Month values: "3 months", "every 1 month", "once a month"
+    m = re.search(r'(\d+)\s*months?', text)
+    if m:
+        return int(m.group(1)) * 30
+
+    # Named frequencies
+    if 'weekly' in text:
+        return 7
+    if 'fortnightly' in text or 'bi-weekly' in text or 'biweekly' in text:
+        return 14
+    if 'monthly' in text or 'once a month' in text:
+        return 30
+    if 'quarterly' in text:
+        return 90
+    if 'semi-annual' in text or 'semiannual' in text or 'bi-annual' in text:
+        return 180
+    if 'annual' in text or 'yearly' in text:
+        return 365
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Catalog lookup
+# ---------------------------------------------------------------------------
+
+def _lookup_catalog_frequency(db: Session, medicine_name: str, item_type: str) -> int | None:
+    """
+    Search product_catalog for a matching product and return parsed frequency in days.
+
+    The frontend sends medicine_name as "Brand ProductName" (the same format
+    built by the medicine-options endpoint). We match by checking if the
+    concatenation of brand + product_name equals the input (case-insensitive).
+    """
+    from app.models.product_catalog import ProductCatalog
+    from sqlalchemy import func as sqlfunc
+
+    item_norm = (item_type or "").strip().lower()
+    categories: list[str] = []
+    if "deworm" in item_norm:
+        categories.append("deworming")
+    if "flea" in item_norm or "tick" in item_norm:
+        categories.append("flea_tick")
+
+    if not categories:
+        return None
+
+    # Match "Brand ProductName" against catalog rows.
+    medicine_lower = medicine_name.strip().lower()
+
+    rows = (
+        db.query(ProductCatalog.brand, ProductCatalog.product_name, ProductCatalog.frequency)
+        .filter(
+            ProductCatalog.category.in_(categories),
+            ProductCatalog.product_name.isnot(None),
+        )
+        .all()
+    )
+
+    for brand, product_name, frequency in rows:
+        brand_text = (brand or "").strip()
+        product_text = (product_name or "").strip()
+        label = f"{brand_text} {product_text}".strip().lower()
+        if label == medicine_lower:
+            days = _parse_frequency_to_days(frequency)
+            if days and days > 0:
+                logger.info(
+                    "Catalog recurrence for %s (%s): %d days (from '%s')",
+                    medicine_name, item_type, days, frequency,
+                )
+                return days
+            # Found in catalog but frequency not parseable — fall through to GPT.
+            logger.warning(
+                "Catalog match for %s but unparseable frequency: '%s'",
+                medicine_name, frequency,
+            )
+            return None
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# GPT fallback
+# ---------------------------------------------------------------------------
+
 MEDICINE_RECURRENCE_SYSTEM_PROMPT = (
     "You are a veterinary pharmacology assistant. Given a pet species, "
     "preventive care type, and specific medicine/product name, return the "
@@ -44,25 +161,8 @@ MEDICINE_RECURRENCE_SYSTEM_PROMPT = (
 )
 
 
-def get_medicine_recurrence(
-    species: str,
-    item_type: str,
-    medicine_name: str,
-    default_days: int,
-) -> int:
-    """
-    Look up recommended recurrence days for a medicine using GPT.
-
-    Args:
-        species: Pet species ('dog' or 'cat').
-        item_type: Preventive item type (e.g., 'Deworming', 'Tick/Flea').
-        medicine_name: Name of the medicine/product.
-        default_days: Fallback recurrence from preventive_master.
-
-    Returns:
-        Recommended recurrence in days (int). Falls back to default_days
-        if AI call fails or medicine is unrecognized.
-    """
+def _gpt_recurrence(species: str, item_type: str, medicine_name: str, default_days: int) -> int:
+    """Call OpenAI GPT to determine recurrence days. Returns default_days on failure."""
     try:
         client = _get_openai_client()
 
@@ -107,3 +207,31 @@ def get_medicine_recurrence(
             medicine_name, str(e),
         )
         return default_days
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def get_medicine_recurrence(
+    species: str,
+    item_type: str,
+    medicine_name: str,
+    default_days: int,
+    db: Session | None = None,
+) -> int:
+    """
+    Determine recommended recurrence days for a medicine.
+
+    1. If a DB session is provided, check product_catalog first (instant).
+    2. If not found in catalog, fall back to GPT (slow, ~2-10s).
+    3. On any failure, return default_days.
+    """
+    # Step 1: catalog lookup (fast path)
+    if db is not None:
+        catalog_days = _lookup_catalog_frequency(db, medicine_name, item_type)
+        if catalog_days is not None:
+            return catalog_days
+
+    # Step 2: GPT fallback for unknown medicines
+    return _gpt_recurrence(species, item_type, medicine_name, default_days)

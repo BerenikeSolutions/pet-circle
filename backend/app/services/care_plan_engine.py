@@ -870,6 +870,9 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
         test_type_by_key: dict[str, str] = {}
         # Display name per item_key (first-seen per key wins).
         item_names_by_key: dict[str, str] = {}
+        # User-set custom recurrence per item_key (latest record wins).
+        # When present, overrides baseline_days for next_due and freq_label.
+        custom_recurrence_by_key: dict[str, int] = {}
 
         record_rows = (
             db.query(PreventiveRecord, PreventiveMaster)
@@ -884,7 +887,13 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
             .all()
         )
 
+        # Skip one-time puppy-series items (recurrence_days >= 36500) for
+        # non-puppy pets.  Adults should only see the annual DHPPi + Rabies.
+        _skip_puppy_series = life_stage != LifeStage.PUPPY
+
         for record, master in record_rows:
+            if _skip_puppy_series and master.recurrence_days and master.recurrence_days >= 36500:
+                continue
             test_type = _normalize_item_name(master.item_name)
             if test_type == "other":
                 continue
@@ -900,6 +909,9 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
                 records_by_key[item_key] = []
                 test_type_by_key[item_key] = test_type
                 item_names_by_key[item_key] = master.item_name
+            # Track user-set custom recurrence (latest record per key wins).
+            if record.custom_recurrence_days:
+                custom_recurrence_by_key[item_key] = record.custom_recurrence_days
             # Keep the item key even when no completion date exists so core
             # preventive rows (vaccines/deworming/flea-tick) still appear.
             if record.last_done_date is not None:
@@ -980,8 +992,14 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
             baseline_days = _get_baseline_protocol(life_stage, test_type)
             prescription = prescriptions_by_key.get(item_key)
 
+            # When the user has set a custom recurrence via the dashboard,
+            # use it for next_due and freq_label so the care plan reflects
+            # user edits.  Classification still uses baseline_days (the
+            # algorithm evaluates adherence against the medical protocol).
+            effective_days = custom_recurrence_by_key.get(item_key) or baseline_days
+
             classification = _classify_test(filtered, baseline_days, prescription)
-            next_due = _compute_next_due(classification, filtered, baseline_days, prescription)
+            next_due = _compute_next_due(classification, filtered, effective_days, prescription)
 
             # Requirement 9.9: exclude items due more than 1 year from today.
             if next_due is not None and next_due > next_year:
@@ -989,7 +1007,7 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
 
             raw_name = item_names_by_key.get(item_key, test_type.replace("_", " ").title())
             name = _DISPLAY_NAME.get(raw_name.lower(), raw_name)
-            freq_label = _days_to_freq_label(baseline_days)
+            freq_label = _days_to_freq_label(effective_days)
             status_tag = _status_tag(next_due, classification)
 
             item: CarePlanItemDict = {

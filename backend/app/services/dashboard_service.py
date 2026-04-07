@@ -383,8 +383,6 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         .all()
     )
 
-    vaccine_item_names = {"Rabies Vaccine", "Core Vaccine", "Feline Core"}
-
     def _record_sort_key(r: PreventiveRecord) -> tuple:
         # Prefer newest completion date; fallback to next due, then created_at.
         return (
@@ -396,8 +394,19 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
     vaccine_latest_by_name: dict[str, tuple[PreventiveRecord, PreventiveMaster]] = {}
     non_vaccine_records: list[tuple[PreventiveRecord, PreventiveMaster]] = []
 
+    # Puppy-series items (recurrence_days >= 36500) are one-time doses.
+    # Hide them for adult dogs (>= 12 months old).
+    _is_adult_dog = (
+        pet.species == "dog"
+        and pet.dob is not None
+        and (date.today() - pet.dob).days >= 365
+    )
+
     for record, master in preventive_data:
-        if master.item_name in vaccine_item_names:
+        # Skip puppy-series records for adult dogs.
+        if _is_adult_dog and master.recurrence_days and master.recurrence_days >= 36500:
+            continue
+        if _is_vaccine_item_name(master.item_name):
             existing = vaccine_latest_by_name.get(master.item_name)
             if not existing or _record_sort_key(record) >= _record_sort_key(existing[0]):
                 vaccine_latest_by_name[master.item_name] = (record, master)
@@ -451,6 +460,9 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
     # Ensures all health-circle items (vaccines, deworming, flea/tick, checkups) appear
     # on the dashboard even before any documents are uploaded. Items with existing
     # records are skipped to avoid duplicates.
+    #
+    # Puppy-series items (recurrence_days=36500) are excluded for dogs older
+    # than 12 months — adults should only see the annual DHPPi + Rabies cycle.
     health_masters = (
         db.query(PreventiveMaster)
         .filter(
@@ -461,6 +473,9 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
     )
     existing_names = {r["item_name"] for r in preventive_records}
     for master in health_masters:
+        # Skip puppy-series items for adult dogs.
+        if _is_adult_dog and master.recurrence_days and master.recurrence_days >= 36500:
+            continue
         if master.item_name not in existing_names:
             preventive_records.append({
                 "item_name": master.item_name,

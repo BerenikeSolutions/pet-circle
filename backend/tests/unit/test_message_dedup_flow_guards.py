@@ -57,17 +57,21 @@ class _RouterDB:
         self.marker = marker
         self.pending_docs = pending_docs
         self.docs_in_scope = docs_in_scope or []
-        self._query_calls = 0
 
-    def query(self, *_args, **_kwargs):
-        self._query_calls += 1
-        if self._query_calls == 1:
+    def query(self, entity, *_args, **_kwargs):
+        model = getattr(entity, "class_", entity)
+        name = getattr(model, "__name__", "")
+        if name == "Pet":
             return _CountQuery(self.pet)
-        if self._query_calls == 2:
+        if name == "DeferredCarePlanPending":
             return _CountQuery(self.marker)
-        if self._query_calls == 3:
-            return _CountQuery(self.pending_docs)
-        return _CountQuery(self.docs_in_scope)
+        if name == "Document":
+            # query(Document.id) asks for pending count; query(Document)
+            # asks for in-scope docs used to build failed_doc_names.
+            if getattr(entity, "key", None) == "id":
+                return _CountQuery(self.pending_docs)
+            return _CountQuery(self.docs_in_scope)
+        return _CountQuery(None)
 
 
 def test_awaiting_documents_yes_is_suppressed_within_cooldown(monkeypatch):
@@ -105,6 +109,7 @@ def test_handle_text_acknowledgment_reply_is_sent(monkeypatch):
         _plaintext_mobile="919100000002",
         order_state=None,
         active_reminder_id=None,
+        onboarding_completed_at=None,
     )
 
     sent = []
@@ -130,6 +135,7 @@ def test_dashboard_request_sends_deferred_care_plan_not_dashboard_links(monkeypa
         _plaintext_mobile="919100000003",
         order_state=None,
         active_reminder_id=None,
+        onboarding_completed_at=None,
     )
 
     calls = {"deferred": 0, "dashboard_links": 0}
@@ -158,6 +164,7 @@ def test_dashboard_request_with_pending_docs_sends_building_status(monkeypatch):
         _plaintext_mobile="919100000004",
         order_state=None,
         active_reminder_id=None,
+        onboarding_completed_at=None,
     )
 
     sent = []
@@ -193,6 +200,7 @@ def test_dashboard_request_without_pending_deferred_sends_dashboard_links(monkey
         _plaintext_mobile="919100000005",
         order_state=None,
         active_reminder_id=None,
+        onboarding_completed_at=None,
     )
 
     calls = {"deferred": 0, "dashboard_links": 0}
@@ -276,6 +284,7 @@ def test_chat_transcript_flow_avoids_duplicates_and_respects_dashboard_precedenc
         _plaintext_mobile="919100000006",
         order_state=None,
         active_reminder_id=None,
+        onboarding_completed_at=None,
     )
 
     pending_state = {"value": True}

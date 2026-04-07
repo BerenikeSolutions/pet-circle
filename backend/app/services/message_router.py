@@ -789,8 +789,15 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
             .first()
         )
 
-        if pet and _has_pending_deferred_care_plan(db, pet.id, user=user):
-            active_marker = _get_active_deferred_marker(db, pet.id)
+        has_deferred_care_plan = (
+            bool(pet) and _has_pending_deferred_care_plan(db, pet.id, user=user)
+        )
+
+        # Guard against race conditions where deferred marker persistence fails.
+        # Only hold dashboard links while in deferred state, or right after
+        # onboarding completion when extraction can still be in-flight.
+        onboarding_completed_at = getattr(user, "onboarding_completed_at", None)
+        if pet and (has_deferred_care_plan or bool(onboarding_completed_at)):
             pending_docs = (
                 db.query(Document.id)
                 .filter(
@@ -799,7 +806,6 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
                 )
                 .count()
             )
-
             if pending_docs > 0:
                 await send_text_message(
                     db,
@@ -809,6 +815,9 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
                     f"You'll receive it shortly! 🐾",
                 )
                 return
+
+        if pet and has_deferred_care_plan:
+            active_marker = _get_active_deferred_marker(db, pet.id)
 
             docs_query = db.query(Document).filter(Document.pet_id == pet.id)
             if active_marker and active_marker.created_at:
@@ -1959,6 +1968,18 @@ async def _send_deferred_care_plan(
     extraction completes for onboarding users whose dashboard link was deferred.
     """
     try:
+        # If this path was triggered manually via a dashboard request (no
+        # extraction payload attached), send the standard transition message
+        # before the final care-plan text for a consistent user experience.
+        if not all_results and not (success_count == 0 and fail_count > 0):
+            await send_text_message(
+                db,
+                from_number,
+                f"That's everything. 🐾 Building {pet.name}'s personalised care plan now "
+                f"— their health dashboard, care reminders, and nutrition breakdown "
+                f"will be ready in just a moment.",
+            )
+
         # If everything failed, keep the explicit extraction-failure summary.
         # _send_batch_summary already emits rejection warnings, so return early
         # to avoid duplicate warning messages.

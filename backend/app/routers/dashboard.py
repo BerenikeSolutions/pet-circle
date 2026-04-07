@@ -1330,13 +1330,14 @@ def dashboard_update_medicine_name(
         # Save the medicine name
         record.medicine_name = body.medicine_name
 
-        # Use AI to calculate recommended recurrence days
+        # Look up recurrence from product catalog; fall back to GPT for unknown medicines.
         from app.services.medicine_recurrence_service import get_medicine_recurrence
         ai_days = get_medicine_recurrence(
             species=species,
             item_type=master.item_name,
             medicine_name=body.medicine_name,
             default_days=master.recurrence_days,
+            db=db,
         )
 
         record.custom_recurrence_days = ai_days

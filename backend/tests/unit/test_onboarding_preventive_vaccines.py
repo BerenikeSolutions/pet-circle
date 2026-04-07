@@ -81,15 +81,20 @@ def test_normalize_preventive_medicine_moves_dewormer_out_of_flea_tick() -> None
     assert normalized["deworming"] == {
         "date": "January 2026",
         "medicine": "Drontal Plus",
+        "prevention_targets": [],
     }
 
 
-def test_normalize_preventive_medicine_copies_dual_use_to_both_categories() -> None:
+def test_normalize_preventive_medicine_copies_dual_use_to_both_categories_from_targets() -> None:
     parsed = {
         "vaccines": None,
         "vaccine_specifics": [],
         "deworming": None,
-        "flea_tick": {"date": "February 2026", "medicine": "Simparica Trio"},
+        "flea_tick": {
+            "date": "February 2026",
+            "medicine": "Any Brand",
+            "prevention_targets": ["flea_tick", "deworming"],
+        },
         "blood_test": None,
         "missing": ["vaccines", "deworming", "blood_test"],
     }
@@ -98,11 +103,13 @@ def test_normalize_preventive_medicine_copies_dual_use_to_both_categories() -> N
 
     assert normalized["flea_tick"] == {
         "date": "February 2026",
-        "medicine": "Simparica Trio",
+        "medicine": "Any Brand",
+        "prevention_targets": ["flea_tick", "deworming"],
     }
     assert normalized["deworming"] == {
         "date": "February 2026",
-        "medicine": "Simparica Trio",
+        "medicine": "Any Brand",
+        "prevention_targets": ["flea_tick", "deworming"],
     }
 
 
@@ -121,6 +128,7 @@ def test_normalize_preventive_medicine_backfills_date_when_target_already_has_me
     assert normalized["deworming"] == {
         "date": "January 2026",
         "medicine": "Drontal Plus",
+        "prevention_targets": [],
     }
     assert normalized["flea_tick"] is None
 
@@ -138,3 +146,42 @@ def test_normalize_preventive_medicine_recomputes_missing_after_remap() -> None:
     normalized = onboarding._normalize_preventive_medicine_categories(parsed)
 
     assert normalized["missing"] == ["vaccines", "flea_tick", "blood_test"]
+
+
+def test_enrich_preventive_categories_from_catalog_backfills_missing_bucket() -> None:
+    class _FakeQuery:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def filter(self, *_args):
+            return self
+
+        def all(self):
+            return self.rows
+
+    class _FakeDB:
+        def __init__(self):
+            self.rows = [
+                ("flea_tick", "Zoetis", "Simparica Trio"),
+                ("deworming", "Zoetis", "Simparica Trio"),
+            ]
+
+        def query(self, *_cols):
+            return _FakeQuery(self.rows)
+
+    parsed = {
+        "vaccines": None,
+        "vaccine_specifics": [],
+        "deworming": None,
+        "flea_tick": {"date": "February 2026", "medicine": "Simparica Trio", "prevention_targets": []},
+        "blood_test": None,
+        "missing": ["vaccines", "deworming", "blood_test"],
+    }
+
+    enriched = onboarding._enrich_preventive_categories_from_catalog(_FakeDB(), parsed)
+
+    assert enriched["deworming"] == {
+        "date": "February 2026",
+        "medicine": "Simparica Trio",
+        "prevention_targets": [],
+    }
