@@ -1261,16 +1261,15 @@ def _upsert_preventive_record(db, pet, master, parsed_date, medicine_name: str |
 
 def _essential_annual_vaccine_masters(db: Session, species: str) -> list[PreventiveMaster]:
     """
-    Return all recurring annual vaccine masters for the species.
+    Return recurring annual core-vaccine masters for the species.
 
     Filters: circle='health', recurrence_days <= 730,
     and item name classified as 'vaccine' by nudge_engine._classify_item.
     Excludes puppy dose series (recurrence_days=36500) and non-vaccines
     (e.g. Deworming, Annual Checkup).
 
-    Includes both mandatory and optional annual vaccines so generic
-    onboarding inputs like "vaccines last Dec" apply to all vaccine rows,
-    including Kennel Cough (Nobivac KC).
+    Generic onboarding inputs like "vaccines last Dec" should only fan out
+    to core vaccines, not optional vaccines.
     """
     from app.services.nudge_engine import _classify_item
 
@@ -1280,10 +1279,44 @@ def _essential_annual_vaccine_masters(db: Session, species: str) -> list[Prevent
             PreventiveMaster.species.in_([species, "both"]),
             PreventiveMaster.circle == "health",
             PreventiveMaster.recurrence_days <= 730,
+            PreventiveMaster.is_core.is_(True),
         )
         .all()
     )
-    return [m for m in rows if _classify_item(m.item_name) == "vaccine"]
+
+    core_vaccines = [m for m in rows if _classify_item(m.item_name) == "vaccine"]
+    if core_vaccines:
+        return core_vaccines
+
+    # Fallback for environments where is_core flags are stale/missing.
+    canonical_core_vaccines = {
+        "rabies vaccine",
+        "rabies (nobivac rl)",
+        "dhppi",
+        "dhppi (nobivac)",
+        "kennel cough (nobivac kc)",
+        "canine coronavirus (ccov)",
+    }
+    fallback_rows = (
+        db.query(PreventiveMaster)
+        .filter(
+            PreventiveMaster.species.in_([species, "both"]),
+            PreventiveMaster.circle == "health",
+            PreventiveMaster.recurrence_days <= 730,
+        )
+        .all()
+    )
+    fallback = [
+        m
+        for m in fallback_rows
+        if (m.item_name or "").strip().lower() in canonical_core_vaccines
+    ]
+    if fallback:
+        logger.warning(
+            "Core-vaccine fallback used for species=%s; verify preventive_master.is_core flags",
+            species,
+        )
+    return fallback
 
 
 def _resolve_vaccine_item_name(name: str) -> str | None:
@@ -2658,6 +2691,12 @@ async def _finalize_onboarding(db, user, send_fn):
         return
 
     # --- Generate the "care plan ready" message ---
+    # Persist the deferred marker BEFORE the slow GPT call so that any
+    # "dashboard" request from the user during care-plan generation is
+    # correctly answered with "still being prepared" instead of a premature
+    # dashboard link.
+    _persist_deferred_marker_with_fallback(db, user, pet)
+
     # Transition message first.
     await send_fn(
         db, mobile,
@@ -2691,6 +2730,31 @@ async def _finalize_onboarding(db, user, send_fn):
         care_plan_msg += (
             f"\n\nSend *dashboard* anytime to get {pet.name}'s care plan link."
         )
+
+    # Atomically claim the deferred marker before sending. If another caller
+    # already claimed it (e.g. an in-flight dashboard request), bail out so
+    # the user only receives the care plan once.
+    try:
+        from app.services.message_router import _clear_deferred_care_plan_marker
+        claimed = _clear_deferred_care_plan_marker(db, pet.id, user=user)
+        db.commit()
+    except Exception as claim_err:
+        logger.warning(
+            "Could not claim deferred marker during finalize for pet=%s: %s",
+            str(pet.id), str(claim_err),
+        )
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        claimed = 1  # On claim failure, fall through and send anyway.
+
+    if claimed <= 0:
+        logger.info(
+            "Care plan already delivered for pet=%s — skipping duplicate send during finalize",
+            str(pet.id),
+        )
+        return
 
     await send_fn(db, mobile, care_plan_msg)
 
