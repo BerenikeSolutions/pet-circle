@@ -721,6 +721,41 @@ export async function fetchDashboard(token: string): Promise<DashboardResult> {
   }
 }
 
+/**
+ * Fetch dashboard directly from backend without local cache fallback.
+ * Use this after writes when UI must reconcile with authoritative server state.
+ */
+export async function fetchDashboardFresh(token: string): Promise<DashboardData> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await fetch(`${API_BASE}/dashboard/${token}`, {
+      cache: "no-store",
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      if (res.status === 404) {
+        const body = await res.json().catch(() => null);
+        const detail = body?.detail || "Dashboard not found or link has expired.";
+        throw new FetchError(detail, 404);
+      }
+      throw new FetchError(`Request failed: ${res.status}`, res.status);
+    }
+
+    const data: DashboardData = await res.json();
+    cacheDashboard(token, data);
+    return data;
+  } catch (e: any) {
+    if (e.name === "AbortError") {
+      throw new Error("Request timed out. Please try again.");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 /** Error with HTTP status code so we can distinguish 404 from 5xx. */
 class FetchError extends Error {
   status: number;

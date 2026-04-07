@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import {
+  fetchDashboardFresh,
   getPreventiveMedicineOptions,
   type DashboardData,
   updateMedicineName,
@@ -14,6 +15,7 @@ interface RemindersViewProps {
   data: DashboardData;
   token: string;
   onBack: () => void;
+  onDashboardDataUpdated?: (nextData: DashboardData) => void;
 }
 
 interface ReminderItem {
@@ -114,6 +116,32 @@ function displayItemName(itemName: string): string {
   return itemName;
 }
 
+function toReminderItems(records: DashboardData['preventive_records']): ReminderItem[] {
+  return (records || [])
+    .filter((r) => !!r.is_core)
+    .sort((a, b) => {
+      const ad = a.next_due_date ? new Date(a.next_due_date).getTime() : Number.MAX_SAFE_INTEGER;
+      const bd = b.next_due_date ? new Date(b.next_due_date).getTime() : Number.MAX_SAFE_INTEGER;
+      return ad - bd;
+    })
+    .map((r) => {
+      const recurrence = r.custom_recurrence_days || r.recurrence_days;
+      return {
+        id: r.item_name.toLowerCase(),
+        backendItemName: r.item_name,
+        itemName: displayItemName(r.item_name),
+        section: 'Vaccines & Preventive Care',
+        recurrenceDays: recurrence,
+        freqLabel: recurrenceLabel(recurrence),
+        lastISO: formatISO(r.last_done_date),
+        nextISO: formatISO(r.next_due_date) || null,
+        status: r.status,
+        medicineName: r.medicine_name || undefined,
+        isMedicineEligible: isMedicineItem(r.item_name),
+      };
+    });
+}
+
 function mapStatusFromNext(nextISO: string | null, fallback: string): string {
   if (!nextISO) return fallback;
   const next = new Date(nextISO);
@@ -162,31 +190,9 @@ const dateFieldStyle: CSSProperties = {
   lineHeight: '22px',
 };
 
-export default function RemindersView({ data, token, onBack }: RemindersViewProps) {
+export default function RemindersView({ data, token, onBack, onDashboardDataUpdated }: RemindersViewProps) {
   const baseItems = useMemo<ReminderItem[]>(() => {
-    return (data.preventive_records || [])
-      .filter((r) => !!r.is_core)
-      .sort((a, b) => {
-        const ad = a.next_due_date ? new Date(a.next_due_date).getTime() : Number.MAX_SAFE_INTEGER;
-        const bd = b.next_due_date ? new Date(b.next_due_date).getTime() : Number.MAX_SAFE_INTEGER;
-        return ad - bd;
-      })
-      .map((r) => {
-        const recurrence = r.custom_recurrence_days || r.recurrence_days;
-        return {
-          id: r.item_name.toLowerCase(),
-          backendItemName: r.item_name,
-          itemName: displayItemName(r.item_name),
-          section: 'Vaccines & Preventive Care',
-          recurrenceDays: recurrence,
-          freqLabel: recurrenceLabel(recurrence),
-          lastISO: formatISO(r.last_done_date),
-          nextISO: formatISO(r.next_due_date) || null,
-          status: r.status,
-          medicineName: r.medicine_name || undefined,
-          isMedicineEligible: isMedicineItem(r.item_name),
-        };
-      });
+    return toReminderItems(data.preventive_records || []);
   }, [data.preventive_records]);
 
   const [items, setItems] = useState<ReminderItem[]>(baseItems);
@@ -291,25 +297,46 @@ export default function RemindersView({ data, token, onBack }: RemindersViewProp
       }
 
       const nextISO = computeNextISO(editVals.lastISO, nextDays);
-      setItems((prev) =>
-        prev.map((entry) =>
-          entry.id !== item.id
-            ? entry
-            : {
-                ...entry,
-                recurrenceDays: nextDays,
-                freqLabel: recurrenceLabel(nextDays),
-                lastISO: editVals.lastISO,
-                nextISO,
-                status: mapStatusFromNext(nextISO, entry.status || 'upcoming'),
-                medicineName: selectedMedicine || entry.medicineName,
-              }
-        )
-      );
+      try {
+        const latest = await fetchDashboardFresh(token);
+        setItems(toReminderItems(latest.preventive_records || []));
+        onDashboardDataUpdated?.(latest);
+      } catch {
+        // If readback fails despite successful writes, show optimistic values.
+        setItems((prev) =>
+          prev.map((entry) =>
+            entry.id !== item.id
+              ? entry
+              : {
+                  ...entry,
+                  recurrenceDays: nextDays,
+                  freqLabel: recurrenceLabel(nextDays),
+                  lastISO: editVals.lastISO,
+                  nextISO,
+                  status: mapStatusFromNext(nextISO, entry.status || 'upcoming'),
+                  medicineName: selectedMedicine || entry.medicineName,
+                }
+          )
+        );
+      }
       setEditingId(null);
     } catch (err: unknown) {
       if (wroteAnyField) {
-        setSaveError('Some changes may have been saved. Please reopen this reminder to confirm latest values.');
+        // A write succeeded before another failed. Reconcile from an
+        // authoritative fresh fetch (no cache fallback) before leaving edit mode.
+        try {
+          const latest = await fetchDashboardFresh(token);
+          setItems(toReminderItems(latest.preventive_records || []));
+          onDashboardDataUpdated?.(latest);
+          setEditingId(null);
+          setSaveError('');
+        } catch (refreshErr: unknown) {
+          setSaveError(
+            refreshErr instanceof Error
+              ? refreshErr.message
+              : 'Saved, but could not confirm the latest values. Please retry save.'
+          );
+        }
       } else {
         setSaveError(err instanceof Error ? err.message : 'Could not save changes.');
       }

@@ -277,6 +277,7 @@ function DashboardInner({ token }: { token: string }) {
           <RemindersView
             data={data}
             token={token}
+            onDashboardDataUpdated={(nextData) => setData(nextData)}
             onBack={() => {
               setView("dashboard");
               void load();
