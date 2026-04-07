@@ -363,9 +363,15 @@ def _has_pending_deferred_care_plan(db: Session, pet_id, user=None) -> bool:
     return False
 
 
-def _clear_deferred_care_plan_marker(db: Session, pet_id, user=None) -> None:
-    """Clear all active deferred markers for a pet and legacy user-level pending flag."""
-    (
+def _clear_deferred_care_plan_marker(db: Session, pet_id, user=None) -> int:
+    """
+    Clear all active deferred markers for a pet and legacy user-level pending flag.
+
+    Returns the number of marker rows transitioned from active to cleared.
+    Callers can use this as a "claim" check to ensure only one concurrent
+    sender wins the race to deliver the deferred care plan.
+    """
+    rows_cleared = (
         db.query(DeferredCarePlanPending)
         .filter(
             DeferredCarePlanPending.pet_id == pet_id,
@@ -381,6 +387,8 @@ def _clear_deferred_care_plan_marker(db: Session, pet_id, user=None) -> None:
     )
     if user is not None and getattr(user, "dashboard_link_pending", False):
         user.dashboard_link_pending = False
+        rows_cleared = max(rows_cleared, 1)
+    return int(rows_cleared or 0)
 
 
 def _get_active_deferred_marker(db: Session, pet_id):
@@ -1948,24 +1956,44 @@ async def _send_deferred_care_plan(
     """
     Send the deterministic care-plan finalization message after document
     extraction completes for onboarding users whose dashboard link was deferred.
+
+    Atomically "claims" the deferred marker up front so that concurrent
+    callers (e.g. extraction-completion handler racing with a manual
+    "dashboard" request) cannot both deliver the care plan.
     """
     try:
-        # If this path was triggered manually via a dashboard request (no
-        # extraction payload attached), send the standard transition message
-        # before the final care-plan text for a consistent user experience.
-        if not all_results and not (success_count == 0 and fail_count > 0):
-            await send_text_message(
-                db,
-                from_number,
-                f"That's everything. 🐾 Building {pet.name}'s personalised care plan now "
-                f"— their health dashboard, care reminders, and nutrition breakdown "
-                f"will be ready in just a moment.",
+        # --- Atomic claim ---
+        # The first caller to flip the marker from active -> cleared wins.
+        # Everyone else returns silently to avoid duplicate sends.
+        try:
+            claimed_rows = _clear_deferred_care_plan_marker(db, pet.id, user=user)
+            db.commit()
+        except Exception as claim_err:
+            logger.warning(
+                "Could not claim deferred marker for pet=%s: %s",
+                str(pet.id), claim_err,
             )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            claimed_rows = 0
+
+        if claimed_rows <= 0:
+            logger.info(
+                "Deferred care plan already claimed for pet=%s — skipping duplicate send",
+                str(pet.id),
+            )
+            return
+
+        # _finalize_onboarding has already sent the "That's everything …"
+        # transition message before deferring, so we never re-send it here.
 
         # If everything failed, keep the explicit extraction-failure summary.
         # _send_batch_summary already emits rejection warnings, so return early
         # to avoid duplicate warning messages.
         if success_count == 0 and fail_count > 0:
+            # Marker already claimed at the top of this function.
             await _send_batch_summary(
                 db, user, pet, from_number,
                 all_results=all_results,
@@ -1973,15 +2001,6 @@ async def _send_deferred_care_plan(
                 fail_count=fail_count,
                 failed_doc_names=failed_doc_names,
             )
-            if _has_pending_deferred_care_plan(db, pet.id, user=user):
-                try:
-                    _clear_deferred_care_plan_marker(db, pet.id, user=user)
-                    db.commit()
-                except Exception:
-                    try:
-                        db.rollback()
-                    except Exception:
-                        pass
             return
 
         # Always surface incorrect-document rejections before care-plan finalization.
@@ -2063,26 +2082,16 @@ async def _send_deferred_care_plan(
         else:
             care_plan_msg += f"\n\nSend *dashboard* anytime to get {pet.name}'s care plan link."
 
-        # Clear pending marker before sending to avoid duplicate sends on retries.
-        try:
-            _clear_deferred_care_plan_marker(db, pet.id, user=user)
-            db.commit()
-        except Exception as flag_err:
-            logger.warning(
-                "Could not clear deferred marker for pet=%s: %s",
-                str(pet.id), flag_err,
-            )
-            try:
-                db.rollback()
-            except Exception:
-                pass
-
+        # Marker was already claimed (cleared) at the top of this function,
+        # so we can send safely without the risk of a duplicate delivery.
         await send_text_message(db, from_number, care_plan_msg)
     except Exception as exc:
         logger.warning(
             "Deferred care-plan send failed for user=%s pet=%s: %s",
             str(user.id), str(pet.id), exc,
         )
+        # Marker already claimed at the top of the function — fall back to
+        # the simple batch summary so the user still gets a confirmation.
         await _send_batch_summary(
             db, user, pet, from_number,
             all_results=all_results,
@@ -2090,15 +2099,6 @@ async def _send_deferred_care_plan(
             fail_count=fail_count,
             failed_doc_names=failed_doc_names,
         )
-        if _has_pending_deferred_care_plan(db, pet.id, user=user):
-            try:
-                _clear_deferred_care_plan_marker(db, pet.id, user=user)
-                db.commit()
-            except Exception:
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
 
 
 async def _send_extraction_summary(

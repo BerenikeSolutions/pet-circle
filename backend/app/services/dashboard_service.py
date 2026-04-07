@@ -68,6 +68,17 @@ from app.services.vet_summary_service import get_vet_summary
 
 logger = logging.getLogger(__name__)
 
+_CORE_VACCINE_NAMES = frozenset(
+    {
+        "rabies vaccine",
+        "rabies (nobivac rl)",
+        "dhppi",
+        "dhppi (nobivac)",
+        "kennel cough (nobivac kc)",
+        "canine coronavirus (ccov)",
+    }
+)
+
 
 def _is_vaccine_item_name(item_name: str | None) -> bool:
     """Return True when a preventive master item_name represents a vaccine."""
@@ -92,6 +103,14 @@ def _is_vaccine_item_name(item_name: str | None) -> bool:
         "fiv",
     )
     return any(keyword in name for keyword in vaccine_keywords)
+
+
+def _is_core_vaccine(master: PreventiveMaster | None) -> bool:
+    """Return True when a preventive master row is both core and a vaccine."""
+    if not master:
+        return False
+    normalized_name = (master.item_name or "").strip().lower()
+    return bool(master.is_core) and normalized_name in _CORE_VACCINE_NAMES
 
 
 def _safe_iso_date(value: date | datetime | None) -> str | None:
@@ -406,6 +425,11 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         # Skip puppy-series records for adult dogs.
         if _is_adult_dog and master.recurrence_days and master.recurrence_days >= 36500:
             continue
+
+        # Hide non-core vaccines unless the user has a logged completion date.
+        if _is_vaccine_item_name(master.item_name) and not _is_core_vaccine(master) and not record.last_done_date:
+            continue
+
         if _is_vaccine_item_name(master.item_name):
             existing = vaccine_latest_by_name.get(master.item_name)
             if not existing or _record_sort_key(record) >= _record_sort_key(existing[0]):
@@ -476,6 +500,12 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         # Skip puppy-series items for adult dogs.
         if _is_adult_dog and master.recurrence_days and master.recurrence_days >= 36500:
             continue
+
+        # Inject only core vaccines by default. Non-core vaccines should
+        # appear only after a logged completion date exists.
+        if _is_vaccine_item_name(master.item_name) and not _is_core_vaccine(master):
+            continue
+
         if master.item_name not in existing_names:
             preventive_records.append({
                 "item_name": master.item_name,
@@ -1013,7 +1043,7 @@ def update_preventive_date(
         )
 
     record, master = result
-    apply_to_all_vaccines = bulk_vaccine_update and _is_vaccine_item_name(master.item_name)
+    apply_to_all_vaccines = bulk_vaccine_update and _is_core_vaccine(master)
 
     if apply_to_all_vaccines:
         target_rows = (
@@ -1031,7 +1061,7 @@ def update_preventive_date(
         targets = [
             (r, m)
             for r, m in target_rows
-            if _is_vaccine_item_name(m.item_name)
+            if _is_core_vaccine(m)
         ]
         if not targets:
             targets = [(record, master)]
