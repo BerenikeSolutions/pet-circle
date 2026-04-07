@@ -10,7 +10,7 @@ Current scope:
     - Excludes dental and fecal test items.
 
 Rules:
-    - Insert only if table is empty (idempotent — safe to re-run).
+    - Insert missing canonical rows (idempotent — safe to re-run).
     - Enforce UNIQUE(item_name, species) via the table constraint.
     - All recurrence values are stored in the DB, never hardcoded in
       application logic — the seeder is the only place these appear.
@@ -22,6 +22,7 @@ filtered by current scope rules in seed_preventive_master().
 
 import logging
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.preventive_master import PreventiveMaster
@@ -568,8 +569,8 @@ def seed_preventive_master(db: Session) -> int:
     """
     Seed the preventive_master table with frozen health items.
 
-    This function is idempotent — it only inserts if the table is empty.
-    If any rows already exist, it skips seeding entirely and logs a message.
+    This function is idempotent — it inserts only missing canonical rows.
+    Existing rows are preserved and never overwritten.
 
     The effective seed scope is dog-only and excludes grooming/dental/fecal
     entries.
@@ -580,16 +581,10 @@ def seed_preventive_master(db: Session) -> int:
     Returns:
         Number of rows inserted (0 if table was already populated).
     """
-    # Check if table already has data — only seed into empty table.
-    # This prevents duplicate inserts on re-runs or redeployments.
-    existing_count = db.query(PreventiveMaster).count()
-
-    if existing_count > 0:
-        logger.info(
-            "Preventive master table already seeded (%d rows). Skipping.",
-            existing_count,
-        )
-        return 0
+    existing_pairs = {
+        (row[0], row[1])
+        for row in db.query(PreventiveMaster.item_name, PreventiveMaster.species).all()
+    }
 
     excluded_item_names = {
         "Bath & Grooming",
@@ -601,31 +596,52 @@ def seed_preventive_master(db: Session) -> int:
         "Stool Test",
     }
 
-    # Insert allowed seed rows.
+    # Insert allowed seed rows that are currently missing.
     inserted = 0
     for item_data in SEED_DATA:
         item_name = str(item_data["item_name"])
+        key = (item_name, item_data["species"])
 
         if item_data["species"] != "dog":
             continue
         if item_name in excluded_item_names:
             continue
+        if key in existing_pairs:
+            continue
 
-        row = PreventiveMaster(
-            item_name=item_data["item_name"],
-            category=item_data["category"],
-            circle=item_data["circle"],
-            species=item_data["species"],
-            recurrence_days=item_data["recurrence_days"],
-            medicine_dependent=item_data["medicine_dependent"],
-            reminder_before_days=item_data["reminder_before_days"],
-            overdue_after_days=item_data["overdue_after_days"],
-            is_core=item_data.get("is_core", False),
-        )
-        db.add(row)
-        inserted += 1
+        nested = db.begin_nested()
+        try:
+            row = PreventiveMaster(
+                item_name=item_data["item_name"],
+                category=item_data["category"],
+                circle=item_data["circle"],
+                species=item_data["species"],
+                recurrence_days=item_data["recurrence_days"],
+                medicine_dependent=item_data["medicine_dependent"],
+                reminder_before_days=item_data["reminder_before_days"],
+                overdue_after_days=item_data["overdue_after_days"],
+                is_core=item_data.get("is_core", False),
+            )
+            db.add(row)
+            db.flush()
+            nested.commit()
+            existing_pairs.add(key)
+            inserted += 1
+        except IntegrityError:
+            nested.rollback()
+            logger.debug(
+                "Preventive master row already exists during self-heal: %s/%s",
+                item_data["item_name"],
+                item_data["species"],
+            )
+        except Exception:
+            nested.rollback()
+            raise
 
     db.commit()
-    logger.info("Preventive master table seeded with %d rows.", inserted)
+    logger.info(
+        "Preventive master self-heal inserted %d missing row(s).",
+        inserted,
+    )
 
     return inserted

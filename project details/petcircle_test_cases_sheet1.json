@@ -1,4 +1,5 @@
 [
+  run this test using the simulated user input and check if the expected system behaviour happens. also check if Watch Point / Risk is handled properly
   {
     "Test ID": "IF-01",
     "Category": "Input format",

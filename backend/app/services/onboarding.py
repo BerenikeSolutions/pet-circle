@@ -31,6 +31,7 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 from openai import AsyncOpenAI
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -46,6 +47,7 @@ from app.core.constants import (
 )
 from app.core.encryption import decrypt_field, encrypt_field, hash_field
 from app.core.log_sanitizer import mask_phone
+from app.database import get_fresh_session
 from app.models.dashboard_token import DashboardToken
 from app.models.deferred_care_plan_pending import DeferredCarePlanPending
 from app.models.condition import Condition
@@ -1390,6 +1392,30 @@ def _enrich_preventive_categories_from_catalog(db: Session, parsed: dict) -> dic
     return normalized
 
 
+def _ensure_preventive_master_seeded_for_store() -> None:
+    """Best-effort preventive_master self-heal in isolated DB session."""
+    seed_db = get_fresh_session()
+    try:
+        seed_preventive_master(seed_db)
+    except SQLAlchemyError as e:
+        try:
+            seed_db.rollback()
+        except Exception as rollback_err:
+            logger.debug("Preventive seeding rollback failed: %s", str(rollback_err))
+        logger.warning("Preventive master self-heal seeding failed: %s", str(e), exc_info=True)
+    except Exception as e:
+        try:
+            seed_db.rollback()
+        except Exception as rollback_err:
+            logger.debug("Preventive seeding rollback failed: %s", str(rollback_err))
+        logger.warning("Unexpected preventive seeding failure: %s", str(e), exc_info=True)
+    finally:
+        try:
+            seed_db.close()
+        except Exception as close_err:
+            logger.debug("Preventive seeding session close failed: %s", str(close_err))
+
+
 async def _store_preventive_data(db, pet, parsed: dict):
     """
     Store parsed preventive care data as preventive records.
@@ -1404,6 +1430,24 @@ async def _store_preventive_data(db, pet, parsed: dict):
     Other categories (deworming, flea_tick, blood_test) each have exactly
     one master per species, so they continue to use the single-match loop.
     """
+    # Self-heal before lookups if preventive_master was truncated or partly missing.
+    # Runs in a separate session so onboarding transaction boundaries stay intact.
+    _ensure_preventive_master_seeded_for_store()
+
+    has_species_masters = (
+        db.query(PreventiveMaster.id)
+        .filter(PreventiveMaster.species.in_([pet.species, "both"]))
+        .first()
+        is not None
+    )
+    if not has_species_masters:
+        logger.error(
+            "Preventive master unavailable for species=%s; skipping preventive persistence for pet_id=%s",
+            pet.species,
+            str(pet.id),
+        )
+        return
+
     parsed = _enrich_preventive_categories_from_catalog(db, parsed)
 
     # --- Generic vaccine mention → update all essential annual vaccines ---
