@@ -83,6 +83,32 @@ def _parse_frequency_to_days(frequency: str | None) -> int | None:
     return None
 
 
+def _infer_catalog_categories(item_type: str | None) -> list[str]:
+    """Infer product catalog categories from preventive item text."""
+    item_norm = (item_type or "").strip().lower()
+    categories: list[str] = []
+    if "deworm" in item_norm:
+        categories.append("deworming")
+    if "flea" in item_norm or "tick" in item_norm:
+        categories.append("flea_tick")
+    return categories
+
+
+def _is_dual_use_medicine(medicine_name: str | None) -> bool:
+    """Return True when medicine can target both deworming and flea/tick."""
+    if not isinstance(medicine_name, str) or not medicine_name.strip():
+        return False
+
+    try:
+        from app.services.gpt_extraction import _get_preventive_categories_for_medicine
+
+        categories = _get_preventive_categories_for_medicine(medicine_name)
+    except Exception:
+        return False
+
+    return {"deworming", "flea_tick"}.issubset(categories)
+
+
 # ---------------------------------------------------------------------------
 # Catalog lookup
 # ---------------------------------------------------------------------------
@@ -91,55 +117,72 @@ def _lookup_catalog_frequency(db: Session, medicine_name: str, item_type: str) -
     """
     Search product_catalog for a matching product and return parsed frequency in days.
 
-    The frontend sends medicine_name as "Brand ProductName" (the same format
-    built by the medicine-options endpoint). We match by checking if the
-    concatenation of brand + product_name equals the input (case-insensitive).
+    Rule:
+      - Dual-use medicines: resolve medicine-centrically across categories.
+      - Non-dual medicines: keep previous category-specific lookup behavior.
     """
     from app.models.product_catalog import ProductCatalog
-    from sqlalchemy import func as sqlfunc
 
-    item_norm = (item_type or "").strip().lower()
-    categories: list[str] = []
-    if "deworm" in item_norm:
-        categories.append("deworming")
-    if "flea" in item_norm or "tick" in item_norm:
-        categories.append("flea_tick")
+    is_dual = _is_dual_use_medicine(medicine_name)
+    categories = _infer_catalog_categories(item_type)
+    if is_dual:
+        allowed_categories = ["deworming", "flea_tick"]
+    else:
+        allowed_categories = categories
 
-    if not categories:
+    if not allowed_categories:
         return None
 
     # Match "Brand ProductName" against catalog rows.
     medicine_lower = medicine_name.strip().lower()
 
     rows = (
-        db.query(ProductCatalog.brand, ProductCatalog.product_name, ProductCatalog.frequency)
+        db.query(
+            ProductCatalog.category,
+            ProductCatalog.brand,
+            ProductCatalog.product_name,
+            ProductCatalog.frequency,
+        )
         .filter(
-            ProductCatalog.category.in_(categories),
+            ProductCatalog.category.in_(allowed_categories),
             ProductCatalog.product_name.isnot(None),
         )
         .all()
     )
 
-    for brand, product_name, frequency in rows:
+    matched_days: set[int] = set()
+    for category, brand, product_name, frequency in rows:
         brand_text = (brand or "").strip()
         product_text = (product_name or "").strip()
         label = f"{brand_text} {product_text}".strip().lower()
         if label == medicine_lower:
             days = _parse_frequency_to_days(frequency)
             if days and days > 0:
-                logger.info(
-                    "Catalog recurrence for %s (%s): %d days (from '%s')",
-                    medicine_name, item_type, days, frequency,
+                matched_days.add(days)
+            else:
+                logger.warning(
+                    "Catalog match for %s but unparseable frequency: '%s'",
+                    medicine_name, frequency,
                 )
-                return days
-            # Found in catalog but frequency not parseable — fall through to GPT.
-            logger.warning(
-                "Catalog match for %s but unparseable frequency: '%s'",
-                medicine_name, frequency,
-            )
-            return None
 
-    return None
+    if not matched_days:
+        return None
+
+    if len(matched_days) > 1:
+        logger.warning(
+            "Catalog contains multiple recurrence values for %s (%s); using minimum days for consistency.",
+            medicine_name,
+            sorted(matched_days),
+        )
+
+    result_days = min(matched_days)
+    logger.info(
+        "Catalog recurrence for %s (%s): %d days",
+        medicine_name,
+        item_type,
+        result_days,
+    )
+    return result_days
 
 
 # ---------------------------------------------------------------------------
@@ -161,16 +204,23 @@ MEDICINE_RECURRENCE_SYSTEM_PROMPT = (
 )
 
 
-def _gpt_recurrence(species: str, item_type: str, medicine_name: str, default_days: int) -> int:
+def _gpt_recurrence(
+    species: str,
+    item_type: str,
+    medicine_name: str,
+    default_days: int,
+    include_item_type: bool,
+) -> int:
     """Call OpenAI GPT to determine recurrence days. Returns default_days on failure."""
     try:
         client = _get_openai_client()
 
-        user_prompt = (
-            f"Species: {species}\n"
-            f"Preventive type: {item_type}\n"
-            f"Medicine/Product: {medicine_name}\n\n"
-            f"What is the recommended interval between doses/applications in days?"
+        user_prompt_parts = [f"Species: {species}"]
+        if include_item_type:
+            user_prompt_parts.append(f"Preventive type: {item_type}")
+        user_prompt_parts.append(f"Medicine/Product: {medicine_name}")
+        user_prompt = "\n".join(user_prompt_parts) + (
+            "\n\nWhat is the recommended interval between doses/applications in days?"
         )
 
         response = client.chat.completions.create(
@@ -227,6 +277,8 @@ def get_medicine_recurrence(
     2. If not found in catalog, fall back to GPT (slow, ~2-10s).
     3. On any failure, return default_days.
     """
+    is_dual = _is_dual_use_medicine(medicine_name)
+
     # Step 1: catalog lookup (fast path)
     if db is not None:
         catalog_days = _lookup_catalog_frequency(db, medicine_name, item_type)
@@ -234,4 +286,10 @@ def get_medicine_recurrence(
             return catalog_days
 
     # Step 2: GPT fallback for unknown medicines
-    return _gpt_recurrence(species, item_type, medicine_name, default_days)
+    return _gpt_recurrence(
+        species,
+        item_type,
+        medicine_name,
+        default_days,
+        include_item_type=not is_dual,
+    )
