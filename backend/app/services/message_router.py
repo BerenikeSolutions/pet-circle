@@ -817,33 +817,15 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
                 return
 
         if pet and has_deferred_care_plan:
-            active_marker = _get_active_deferred_marker(db, pet.id)
-
-            docs_query = db.query(Document).filter(Document.pet_id == pet.id)
-            if active_marker and active_marker.created_at:
-                docs_query = docs_query.filter(Document.created_at >= active_marker.created_at)
-            docs_in_scope = docs_query.all()
-            success_count = sum(1 for doc in docs_in_scope if doc.extraction_status == "success")
-            failed_docs = [
-                doc for doc in docs_in_scope
-                if doc.extraction_status in ("failed", "rejected")
-            ]
-            failed_doc_names = [
-                (doc.file_path or "Document")
-                .replace("\\", "/")
-                .rsplit("/", 1)[-1]
-                for doc in failed_docs
-            ]
-
-            await _send_deferred_care_plan(
+            # Care plan hasn't been delivered yet — tell the user it's
+            # coming and let the extraction-completion path send it.
+            # This avoids a race where both this handler and the
+            # extraction handler send the care plan simultaneously.
+            await send_text_message(
                 db,
-                user,
-                pet,
                 from_number,
-                all_results=[],
-                success_count=success_count,
-                fail_count=len(failed_docs),
-                failed_doc_names=failed_doc_names,
+                f"{pet.name}'s care plan is still being prepared — "
+                f"you'll receive it shortly! 🐾",
             )
             return
 
