@@ -5,22 +5,34 @@ from app.routers import webhook
 
 
 class _FakeQuery:
+    def __init__(self, db):
+        self._db = db
+
     def filter(self, *_args, **_kwargs):
         return self
 
     def first(self):
+        self._db.first_calls += 1
+        if self._db.return_existing:
+            return SimpleNamespace(id="existing")
         return None
 
 
 class _FakeDB:
+    def __init__(self, *, return_existing: bool = False):
+        self.return_existing = return_existing
+        self.add_calls = 0
+        self.commit_calls = 0
+        self.first_calls = 0
+
     def query(self, *_args, **_kwargs):
-        return _FakeQuery()
+        return _FakeQuery(self)
 
     def add(self, *_args, **_kwargs):
-        return None
+        self.add_calls += 1
 
     def commit(self):
-        return None
+        self.commit_calls += 1
 
     def rollback(self):
         return None
@@ -56,13 +68,14 @@ def _build_whatsapp_text_payload(*, message_id: str, text: str, from_number: str
     }
 
 
-def test_webhook_ingestion_dispatches_transcript_texts_and_dedups_retry(client, app, monkeypatch):
+def test_webhook_ingestion_dispatches_and_dedups_by_message_id(client, app, monkeypatch):
     webhook._DEDUP_CACHE.clear()
 
     fake_db = _FakeDB()
     app.dependency_overrides[get_db] = lambda: fake_db
 
     dispatched = []
+    create_task_calls = {"count": 0}
 
     async def _noop_background():
         return None
@@ -72,12 +85,10 @@ def test_webhook_ingestion_dispatches_transcript_texts_and_dedups_retry(client, 
         return _noop_background()
 
     def fake_create_task(coro):
+        create_task_calls["count"] += 1
         # In tests we don't execute background work; close the coroutine to
         # avoid unawaited-coroutine warnings while still asserting dispatch.
-        try:
-            coro.close()
-        except Exception:
-            pass
+        coro.close()
         return SimpleNamespace(done=lambda: True)
 
     monkeypatch.setattr(webhook, "verify_webhook_signature", lambda *_args, **_kwargs: True)
@@ -86,26 +97,121 @@ def test_webhook_ingestion_dispatches_transcript_texts_and_dedups_retry(client, 
     monkeypatch.setattr(webhook.asyncio, "create_task", fake_create_task)
 
     try:
-        payload_1 = _build_whatsapp_text_payload(message_id="wamid.tx.1", text="i want to see dashboard")
+        payload_1 = _build_whatsapp_text_payload(message_id="wamid.tx.1", text="dashboard")
+        # Same text with a different message_id should still dispatch.
         payload_2 = _build_whatsapp_text_payload(message_id="wamid.tx.2", text="dashboard")
-        payload_3 = _build_whatsapp_text_payload(message_id="wamid.tx.3", text="dashboard link")
+        # Same message_id with different text should be deduped.
+        payload_2_retry = _build_whatsapp_text_payload(message_id="wamid.tx.2", text="dashboard link")
 
         r1 = client.post("/webhook/whatsapp", json=payload_1, headers={"X-Hub-Signature-256": "ok"})
         r2 = client.post("/webhook/whatsapp", json=payload_2, headers={"X-Hub-Signature-256": "ok"})
-        r3 = client.post("/webhook/whatsapp", json=payload_3, headers={"X-Hub-Signature-256": "ok"})
-        # Retry of payload_2 should be deduped at webhook layer.
-        r2_retry = client.post("/webhook/whatsapp", json=payload_2, headers={"X-Hub-Signature-256": "ok"})
+        r2_retry = client.post("/webhook/whatsapp", json=payload_2_retry, headers={"X-Hub-Signature-256": "ok"})
 
         assert r1.status_code == 200
         assert r2.status_code == 200
-        assert r3.status_code == 200
         assert r2_retry.status_code == 200
 
-        assert [item.get("text") for item in dispatched] == [
-            "i want to see dashboard",
-            "dashboard",
-            "dashboard link",
+        assert [item.get("message_id") for item in dispatched] == [
+            "wamid.tx.1",
+            "wamid.tx.2",
         ]
-        assert len(dispatched) == 3
+        assert [item.get("text") for item in dispatched] == ["dashboard", "dashboard"]
+        assert create_task_calls["count"] == 2
+        assert fake_db.add_calls == 2
+        assert fake_db.commit_calls == 2
     finally:
+        webhook._DEDUP_CACHE.clear()
+        app.dependency_overrides.clear()
+
+
+def test_webhook_db_dedup_blocks_dispatch_when_cache_misses(client, app, monkeypatch):
+    webhook._DEDUP_CACHE.clear()
+
+    fake_db = _FakeDB(return_existing=True)
+    app.dependency_overrides[get_db] = lambda: fake_db
+
+    dispatched = []
+    create_task_calls = {"count": 0}
+
+    async def _noop_background():
+        return None
+
+    def fake_process_message_background(message_data):
+        dispatched.append(dict(message_data))
+        return _noop_background()
+
+    def fake_create_task(coro):
+        create_task_calls["count"] += 1
+        coro.close()
+        return SimpleNamespace(done=lambda: True)
+
+    monkeypatch.setattr(webhook, "verify_webhook_signature", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(webhook.rate_limiter, "check_rate_limit", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(webhook, "_is_duplicate_message", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(webhook, "_process_message_background", fake_process_message_background)
+    monkeypatch.setattr(webhook.asyncio, "create_task", fake_create_task)
+
+    try:
+        payload = _build_whatsapp_text_payload(message_id="wamid.db.1", text="dashboard")
+        response = client.post("/webhook/whatsapp", json=payload, headers={"X-Hub-Signature-256": "ok"})
+
+        assert response.status_code == 200
+        assert dispatched == []
+        assert create_task_calls["count"] == 0
+        assert fake_db.add_calls == 0
+        assert fake_db.commit_calls == 0
+        assert fake_db.first_calls >= 1
+    finally:
+        webhook._DEDUP_CACHE.clear()
+        app.dependency_overrides.clear()
+
+
+def test_webhook_returns_200_while_background_task_finishes_later(client, app, monkeypatch):
+    webhook._DEDUP_CACHE.clear()
+
+    fake_db = _FakeDB()
+    app.dependency_overrides[get_db] = lambda: fake_db
+
+    state = {"started": False, "finished": False, "task_calls": 0}
+    scheduled_coros = []
+
+    async def fake_process_message_background(_message_data):
+        state["started"] = True
+        await webhook.asyncio.sleep(0.05)
+        state["finished"] = True
+
+    def tracked_create_task(coro):
+        state["task_calls"] += 1
+        scheduled_coros.append(coro)
+        return SimpleNamespace(done=lambda: False)
+
+    monkeypatch.setattr(webhook, "verify_webhook_signature", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(webhook.rate_limiter, "check_rate_limit", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(webhook, "_process_message_background", fake_process_message_background)
+    monkeypatch.setattr(webhook.asyncio, "create_task", tracked_create_task)
+
+    try:
+        payload = _build_whatsapp_text_payload(message_id="wamid.bg.1", text="dashboard")
+        response = client.post("/webhook/whatsapp", json=payload, headers={"X-Hub-Signature-256": "ok"})
+
+        assert response.status_code == 200
+        assert state["task_calls"] == 1
+        # Webhook should acknowledge quickly without waiting for background work.
+        assert state["started"] is False
+        assert state["finished"] is False
+        assert len(scheduled_coros) == 1
+
+        # Execute the captured background coroutine explicitly so completion
+        # semantics are verified deterministically in unit tests.
+        webhook.asyncio.run(scheduled_coros.pop())
+
+        assert state["finished"] is True
+    finally:
+        while scheduled_coros:
+            coro = scheduled_coros.pop()
+            try:
+                coro.close()
+            except Exception:
+                pass
+        webhook._DEDUP_CACHE.clear()
         app.dependency_overrides.clear()

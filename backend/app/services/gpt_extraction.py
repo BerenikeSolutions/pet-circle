@@ -72,53 +72,62 @@ _RE_MEDICATION_SIGNAL = re.compile(
     re.IGNORECASE,
 )
 
-# Known preventive medication brand names — used to:
-# 1. Reject them from being stored as Condition records
-# 2. Map them to their tracked preventive item category
-_KNOWN_MEDICATION_BRANDS: set[str] = {
+# Maps medication brand names to compatible preventive categories.
+# Some medicines can reasonably be used for both deworming and flea/tick.
+_MEDICATION_TO_PREVENTIVE_CATEGORIES: dict[str, frozenset[str]] = {
     # Tick & Flea
-    "simparica", "simparica trio", "nexgard", "nexgard spectra",
-    "bravecto", "frontline", "frontline plus", "fipronil",
-    "revolution", "revolution plus", "advocate", "credelio",
-    "seresto", "advantix", "advantage",
+    "simparica": frozenset({"flea_tick"}),
+    "simparica trio": frozenset({"flea_tick", "deworming"}),
+    "nexgard": frozenset({"flea_tick"}),
+    "nexgard spectra": frozenset({"flea_tick", "deworming"}),
+    "bravecto": frozenset({"flea_tick"}),
+    "frontline": frozenset({"flea_tick"}),
+    "frontline plus": frozenset({"flea_tick"}),
+    "fipronil": frozenset({"flea_tick"}),
+    "revolution": frozenset({"flea_tick"}),
+    "revolution plus": frozenset({"flea_tick", "deworming"}),
+    "advocate": frozenset({"flea_tick", "deworming"}),
+    "credelio": frozenset({"flea_tick"}),
+    "seresto": frozenset({"flea_tick"}),
+    "advantix": frozenset({"flea_tick"}),
+    "advantage": frozenset({"flea_tick"}),
     # Deworming
-    "milbemax", "drontal", "drontal plus", "panacur", "prazitel",
-    "prazitel plus", "verminator", "fenbendazole", "praziquantel",
-    "pyrantel", "ivermectin", "albendazole",
+    "milbemax": frozenset({"deworming"}),
+    "drontal": frozenset({"deworming"}),
+    "drontal plus": frozenset({"deworming"}),
+    "panacur": frozenset({"deworming"}),
+    "prazitel": frozenset({"deworming"}),
+    "prazitel plus": frozenset({"deworming"}),
+    "verminator": frozenset({"deworming"}),
+    "fenbendazole": frozenset({"deworming"}),
+    "praziquantel": frozenset({"deworming"}),
+    "pyrantel": frozenset({"deworming"}),
+    "ivermectin": frozenset({"deworming"}),
+    "albendazole": frozenset({"deworming"}),
 }
 
-# Maps medication brand names to their tracked preventive item name.
-_MEDICATION_TO_PREVENTIVE_ITEM: dict[str, str] = {
-    # Tick & Flea
-    "simparica": "Tick/Flea",
-    "simparica trio": "Tick/Flea",
-    "nexgard": "Tick/Flea",
-    "nexgard spectra": "Tick/Flea",
-    "bravecto": "Tick/Flea",
-    "frontline": "Tick/Flea",
-    "frontline plus": "Tick/Flea",
-    "fipronil": "Tick/Flea",
-    "revolution": "Tick/Flea",
-    "revolution plus": "Tick/Flea",
-    "advocate": "Tick/Flea",
-    "credelio": "Tick/Flea",
-    "seresto": "Tick/Flea",
-    "advantix": "Tick/Flea",
-    "advantage": "Tick/Flea",
-    # Deworming
-    "milbemax": "Deworming",
-    "drontal": "Deworming",
-    "drontal plus": "Deworming",
-    "panacur": "Deworming",
-    "prazitel": "Deworming",
-    "prazitel plus": "Deworming",
-    "verminator": "Deworming",
-    "fenbendazole": "Deworming",
-    "praziquantel": "Deworming",
-    "pyrantel": "Deworming",
-    "ivermectin": "Deworming",
-    "albendazole": "Deworming",
-}
+# Known preventive medication brand names used for quick medication-name checks.
+_KNOWN_MEDICATION_BRANDS: set[str] = set(_MEDICATION_TO_PREVENTIVE_CATEGORIES.keys())
+
+
+def _get_preventive_categories_for_medicine(medication_name: str | None) -> set[str]:
+    """Return compatible preventive categories for a medicine brand mention.
+
+    Performs normalized containment checks so values like "NexGard Spectra chew"
+    still resolve to configured compatibility categories.
+    """
+    if not isinstance(medication_name, str):
+        return set()
+
+    normalized = medication_name.strip().lower()
+    if not normalized:
+        return set()
+
+    categories: set[str] = set()
+    for brand, mapped in _MEDICATION_TO_PREVENTIVE_CATEGORIES.items():
+        if brand in normalized:
+            categories.update(mapped)
+    return categories
 
 
 def _is_likely_medication_name(name: str) -> bool:
@@ -130,8 +139,7 @@ def _is_likely_medication_name(name: str) -> bool:
     """
     if _RE_MEDICATION_SIGNAL.search(name):
         return True
-    name_lower = name.strip().lower()
-    return name_lower in _KNOWN_MEDICATION_BRANDS
+    return bool(_get_preventive_categories_for_medicine(name))
 
 
 def _extract_partial_json_string_value(raw_json: str, key: str) -> str | None:
@@ -1108,21 +1116,32 @@ def _derive_items_from_medication_brands(
     }
     extra_items: list[dict] = []
 
+    category_to_item_name = {
+        "deworming": "Deworming",
+        "flea_tick": "Tick/Flea",
+    }
+
     for condition in (conditions or []):
         if not isinstance(condition, dict):
             continue
         for med in (condition.get("medications") or []):
             if not isinstance(med, dict):
                 continue
-            med_name = (med.get("name") or "").strip().lower()
-            for brand, tracked_item in _MEDICATION_TO_PREVENTIVE_ITEM.items():
-                if brand in med_name and _normalize_preventive_item_name(tracked_item) not in existing_item_names:
-                    extra_items.append({
-                        "item_name": tracked_item,
-                        "last_done_date": med.get("start_date"),
-                    })
-                    existing_item_names.add(_normalize_preventive_item_name(tracked_item))
-                    break
+            med_name_raw = med.get("name")
+            med_name = med_name_raw.strip() if isinstance(med_name_raw, str) else ""
+            categories = _get_preventive_categories_for_medicine(med_name)
+            for category in categories:
+                tracked_item = category_to_item_name.get(category)
+                if not tracked_item:
+                    continue
+                normalized_item = _normalize_preventive_item_name(tracked_item)
+                if normalized_item in existing_item_names:
+                    continue
+                extra_items.append({
+                    "item_name": tracked_item,
+                    "last_done_date": med.get("start_date"),
+                })
+                existing_item_names.add(normalized_item)
 
     return existing_items + extra_items
 

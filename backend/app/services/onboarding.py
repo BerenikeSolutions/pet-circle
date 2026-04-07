@@ -1939,7 +1939,7 @@ async def _parse_preventive_care(text: str) -> dict:
             s for s in raw_specifics
             if isinstance(s, dict) and s.get("name") and s.get("date")
         ]
-        return {
+        parsed = {
             "vaccines": data.get("vaccines"),
             "vaccine_specifics": clean_specifics,
             "deworming": data.get("deworming"),
@@ -1947,6 +1947,7 @@ async def _parse_preventive_care(text: str) -> dict:
             "blood_test": data.get("blood_test"),
             "missing": data.get("missing", []),
         }
+        return _normalize_preventive_medicine_categories(parsed)
     except Exception as e:
         logger.warning("Preventive care GPT parse failed: %s", str(e))
         return {
@@ -1957,6 +1958,137 @@ async def _parse_preventive_care(text: str) -> dict:
             "blood_test": None,
             "missing": [],
         }
+
+
+def _normalize_preventive_medicine_categories(parsed: dict) -> dict:
+    """Normalize deworming/flea_tick fields based on medicine compatibility.
+
+    Rules:
+    - Medicine compatible with only one category is moved to that category.
+    - Medicine compatible with both categories is copied to the missing category.
+    - Unknown medicines are left unchanged.
+    """
+    from app.services.gpt_extraction import _get_preventive_categories_for_medicine
+
+    def _as_text(value) -> str:
+        return value.strip() if isinstance(value, str) else ""
+
+    def _coerce_category_value(value):
+        if isinstance(value, dict):
+            return {
+                "date": value.get("date"),
+                "medicine": value.get("medicine") if isinstance(value.get("medicine"), str) else None,
+            }
+        if isinstance(value, str) and value and value != "none":
+            return {"date": value, "medicine": None}
+        return value
+
+    def _is_category_present(value) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, dict):
+            return bool(_as_text(value.get("date")) or _as_text(value.get("medicine")))
+        return True
+
+    def _is_vaccine_present(data: dict) -> bool:
+        vaccines = data.get("vaccines")
+        specifics = data.get("vaccine_specifics") or []
+        if isinstance(vaccines, str) and vaccines.strip():
+            return True
+        return bool(specifics)
+
+    def _absorbed_by_target(target, source_date, source_medicine: str) -> bool:
+        if not isinstance(target, dict):
+            return False
+        target_medicine = _as_text(target.get("medicine"))
+        if target_medicine and target_medicine.lower() != source_medicine.lower():
+            return False
+        target_date = _as_text(target.get("date"))
+        source_date_text = _as_text(source_date)
+        if source_date_text and not target_date:
+            return False
+        return True
+
+    normalized = dict(parsed or {})
+
+    deworming = _coerce_category_value(normalized.get("deworming"))
+    flea_tick = _coerce_category_value(normalized.get("flea_tick"))
+
+    # Snapshot source values so cross-category moves don't mutate iteration input.
+    entries = (
+        ("deworming", _coerce_category_value(deworming)),
+        ("flea_tick", _coerce_category_value(flea_tick)),
+    )
+
+    for source_key, source_value in entries:
+        if not isinstance(source_value, dict):
+            continue
+
+        medicine = _as_text(source_value.get("medicine"))
+        if not medicine:
+            continue
+
+        categories = _get_preventive_categories_for_medicine(medicine)
+        if not categories:
+            continue
+
+        source_date = source_value.get("date")
+        source_medicine = medicine
+        source_rehomed = False
+
+        if "deworming" in categories:
+            if not isinstance(deworming, dict):
+                deworming = {"date": source_date, "medicine": source_medicine}
+                source_rehomed = True
+            else:
+                before_date = deworming.get("date")
+                before_medicine = deworming.get("medicine")
+                if not deworming.get("date"):
+                    deworming["date"] = source_date
+                if not _as_text(deworming.get("medicine")):
+                    deworming["medicine"] = source_medicine
+                if before_date != deworming.get("date") or before_medicine != deworming.get("medicine"):
+                    source_rehomed = True
+                elif _absorbed_by_target(deworming, source_date, source_medicine):
+                    source_rehomed = True
+
+        if "flea_tick" in categories:
+            if not isinstance(flea_tick, dict):
+                flea_tick = {"date": source_date, "medicine": source_medicine}
+                source_rehomed = True
+            else:
+                before_date = flea_tick.get("date")
+                before_medicine = flea_tick.get("medicine")
+                if not flea_tick.get("date"):
+                    flea_tick["date"] = source_date
+                if not _as_text(flea_tick.get("medicine")):
+                    flea_tick["medicine"] = source_medicine
+                if before_date != flea_tick.get("date") or before_medicine != flea_tick.get("medicine"):
+                    source_rehomed = True
+                elif _absorbed_by_target(flea_tick, source_date, source_medicine):
+                    source_rehomed = True
+
+        # Clear source bucket only when it was actually rehomed into compatible bucket(s).
+        if source_key == "deworming" and "deworming" not in categories and source_rehomed:
+            deworming = None
+        if source_key == "flea_tick" and "flea_tick" not in categories and source_rehomed:
+            flea_tick = None
+
+    normalized["deworming"] = deworming
+    normalized["flea_tick"] = flea_tick
+    final_missing: list[str] = []
+    if not _is_vaccine_present(normalized):
+        final_missing.append("vaccines")
+    if not _is_category_present(deworming):
+        final_missing.append("deworming")
+    if not _is_category_present(flea_tick):
+        final_missing.append("flea_tick")
+    if not _is_category_present(normalized.get("blood_test")):
+        final_missing.append("blood_test")
+    normalized["missing"] = final_missing
+    return normalized
 
 
 def _compute_life_stage(age_years: float | None) -> tuple[str, str] | None:

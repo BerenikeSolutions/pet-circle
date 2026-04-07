@@ -138,3 +138,35 @@ def test_validate_extraction_skips_future_last_done_dates() -> None:
     items, _, _, _ = gpt_extraction._validate_extraction_json(raw_json)
 
     assert items == [{"item_name": "Core Vaccine", "last_done_date": "2025-05-06"}]
+
+
+def test_get_preventive_categories_for_medicine_supports_single_and_dual_use() -> None:
+    assert gpt_extraction._get_preventive_categories_for_medicine("Drontal Plus") == {"deworming"}
+    assert gpt_extraction._get_preventive_categories_for_medicine("Frontline Spot-On") == {"flea_tick"}
+    assert gpt_extraction._get_preventive_categories_for_medicine("Simparica Trio chew") == {
+        "deworming",
+        "flea_tick",
+    }
+
+
+def test_derive_items_from_medication_brands_expands_dual_use_medicine() -> None:
+    conditions = [
+        {
+            "medications": [
+                {
+                    "name": "Simparica Trio",
+                    "start_date": "2026-01-05",
+                }
+            ]
+        }
+    ]
+
+    derived = gpt_extraction._derive_items_from_medication_brands([], conditions)
+    names = {item["item_name"] for item in derived}
+
+    assert names == {"Deworming", "Tick/Flea"}
+
+
+def test_get_preventive_categories_for_medicine_ignores_non_string_input() -> None:
+    assert gpt_extraction._get_preventive_categories_for_medicine(None) == set()
+    assert gpt_extraction._get_preventive_categories_for_medicine(123) == set()
