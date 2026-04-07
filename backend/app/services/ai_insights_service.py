@@ -77,9 +77,16 @@ _FREQUENCY_FRAGMENT_RE = re.compile(
     r"\bx\s*\d+(?:\.\d+)?\s*/\s*(?:day|week|month)\b|"
     r"\b\d+(?:\.\d+)?\s*x\s*/\s*(?:day|week|month)\b|"
     r"\b(?:once|twice|thrice|\d+\s*times?)\s*(?:a|per)\s*(?:day|week|month)\b|"
-    r"\b(?:daily|weekly|monthly)\b|"
     r"/\s*(?:day|week|month)\b"
     r")",
+    re.IGNORECASE,
+)
+_FREQUENCY_QUALIFIER_RE = re.compile(
+    r"^\s*(?:occasional(?:ly)?|sometimes|rarely|infrequently)\s+",
+    re.IGNORECASE,
+)
+_LEADING_PERIODIC_QUALIFIER_RE = re.compile(
+    r"^\s*(?:daily|weekly|monthly)\s+([a-z][a-z\-]*)\s*$",
     re.IGNORECASE,
 )
 _MEASURE_TOKEN_RE = re.compile(r"\b\d+(?:\.\d+)?\s*(?:g|kg|ml|l|cups?|tbsp|tsp|x)\b", re.IGNORECASE)
@@ -97,15 +104,19 @@ def _extract_main_food_items(*texts: str, apply_noise_filter: bool = True) -> li
     """Extract main food labels while removing quantity/frequency/noise fragments."""
     items: list[str] = []
 
-    for text in texts:
-        if not text:
+    for raw_text in texts:
+        if not raw_text:
             continue
 
-        normalized = text.replace("×", "x")
+        normalized = raw_text.replace("×", "x")
         chunks = _DIET_SPLIT_RE.split(normalized)
         for chunk in chunks:
             # Strip frequency snippets so labels stay as clean food names.
             chunk = _FREQUENCY_FRAGMENT_RE.sub("", chunk)
+            chunk = _FREQUENCY_QUALIFIER_RE.sub("", chunk)
+            periodic_match = _LEADING_PERIODIC_QUALIFIER_RE.match(chunk)
+            if periodic_match:
+                chunk = periodic_match.group(1)
             chunk = _MEASURE_TOKEN_RE.sub("", chunk)
             chunk = re.sub(r"\b\d+\b", "", chunk)
             chunk = re.sub(r"\s+", " ", chunk).strip(" .,-")

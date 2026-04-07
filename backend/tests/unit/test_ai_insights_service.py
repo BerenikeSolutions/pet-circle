@@ -102,6 +102,30 @@ def test_format_found_diet_summary_preserves_brand_x_token():
     assert summary == "Brand X kibble. No supplements."
 
 
+def test_format_found_diet_summary_removes_occasional_qualifier():
+    foods = [SimpleNamespace(type="homemade", label="occasional egg", detail=None)]
+
+    summary = _format_found_diet_summary(foods, [])
+
+    assert summary == "Egg. No supplements."
+
+
+def test_format_found_diet_summary_preserves_daily_brand_name():
+    foods = [SimpleNamespace(type="packaged", label="Daily Delight kibble", detail=None)]
+
+    summary = _format_found_diet_summary(foods, [])
+
+    assert summary == "Daily Delight kibble. No supplements."
+
+
+def test_format_found_diet_summary_strips_weekly_leading_qualifier():
+    foods = [SimpleNamespace(type="homemade", label="weekly egg", detail=None)]
+
+    summary = _format_found_diet_summary(foods, [])
+
+    assert summary == "Egg. No supplements."
+
+
 class _InsightQuery:
     def filter(self, *args, **kwargs):
         return self

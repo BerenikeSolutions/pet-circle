@@ -1330,6 +1330,25 @@ def dashboard_update_medicine_name(
         # Save the medicine name
         record.medicine_name = body.medicine_name
 
+        def _normalize_medicine(value: str | None) -> str:
+            return " ".join((value or "").strip().lower().split())
+
+        def _recompute_record_status(target_record: PreventiveRecord, recurrence_days: int) -> None:
+            if not target_record.last_done_date:
+                return
+
+            from datetime import date as date_type
+            from datetime import timedelta
+
+            target_record.next_due_date = target_record.last_done_date + timedelta(days=recurrence_days)
+            today = date_type.today()
+            if target_record.next_due_date < today:
+                target_record.status = "overdue"
+            elif (target_record.next_due_date - today).days <= CARE_PLAN_DUE_SOON_DAYS:
+                target_record.status = "upcoming"
+            else:
+                target_record.status = "up_to_date"
+
         # Look up recurrence from product catalog; fall back to GPT for unknown medicines.
         from app.services.medicine_recurrence_service import get_medicine_recurrence
         ai_days = get_medicine_recurrence(
@@ -1342,18 +1361,54 @@ def dashboard_update_medicine_name(
 
         record.custom_recurrence_days = ai_days
 
-        # Recalculate next_due_date if last_done_date exists
-        if record.last_done_date:
-            from datetime import date as date_type
-            from datetime import timedelta
-            record.next_due_date = record.last_done_date + timedelta(days=ai_days)
-            today = date_type.today()
-            if record.next_due_date < today:
-                record.status = "overdue"
-            elif (record.next_due_date - today).days <= CARE_PLAN_DUE_SOON_DAYS:
-                record.status = "upcoming"
+        # Recalculate next_due_date/status for updated record.
+        _recompute_record_status(record, ai_days)
+
+        # Dual-use medicines (deworming + flea/tick) must share one recurrence
+        # when both records use the same medicine; different medicines keep
+        # independent frequencies.
+        from app.services.gpt_extraction import _get_preventive_categories_for_medicine
+
+        medicine_categories = _get_preventive_categories_for_medicine(body.medicine_name)
+        is_dual_medicine = {"deworming", "flea_tick"}.issubset(medicine_categories)
+        selected_name_norm = _normalize_medicine(body.medicine_name)
+
+        if is_dual_medicine:
+            current_item_norm = (master.item_name or "").strip().lower()
+            if "deworm" in current_item_norm:
+                opposite_item_pattern = "%flea%"
+            elif "flea" in current_item_norm or "tick" in current_item_norm:
+                opposite_item_pattern = "%deworm%"
             else:
-                record.status = "up_to_date"
+                opposite_item_pattern = None
+
+            sibling_result = None
+            if opposite_item_pattern:
+                sibling_result = (
+                    db.query(PreventiveRecord, PreventiveMaster)
+                    .join(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
+                    .filter(
+                        PreventiveRecord.pet_id == dt.pet_id,
+                        PreventiveRecord.id != record.id,
+                        PreventiveRecord.status != "cancelled",
+                        PreventiveMaster.medicine_dependent.is_(True),
+                        sqlfunc.lower(PreventiveMaster.item_name).like(opposite_item_pattern),
+                    )
+                    .order_by(
+                        PreventiveRecord.last_done_date.desc().nullslast(),
+                        PreventiveRecord.next_due_date.desc().nullslast(),
+                        PreventiveRecord.created_at.desc().nullslast(),
+                        PreventiveRecord.id.desc(),
+                    )
+                    .first()
+                )
+
+            if sibling_result:
+                sibling_record, _ = sibling_result
+                sibling_name_norm = _normalize_medicine(sibling_record.medicine_name)
+                if sibling_name_norm and sibling_name_norm == selected_name_norm:
+                    sibling_record.custom_recurrence_days = ai_days
+                    _recompute_record_status(sibling_record, ai_days)
 
         db.commit()
 

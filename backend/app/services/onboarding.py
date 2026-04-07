@@ -492,11 +492,21 @@ def _is_irrelevant_noise_for_state(
     """
     if not text_lower:
         return False
+
+    normalized = re.sub(r"[.!?,]+$", "", text_lower.strip().lower())
+
+    # In supplements step, explicit negative replies are legitimate answers
+    # to "Is <pet> on any supplements right now?" and must be processed.
+    if state == "awaiting_supplements" and (
+        normalized in _NO_INPUTS or normalized in _NONE_KEYWORDS
+    ):
+        return False
+
     if state in _NOISE_ALLOWED_STATES:
         return False
     if _has_pending_confirmation_prompt(state, onboarding_data):
         return False
-    return text_lower in _NOISE_WORDS
+    return normalized in _NOISE_WORDS
 
 
 def _resolve_binary_confirmation_reply(text_lower: str) -> str | None:
@@ -1114,8 +1124,13 @@ async def _step_supplements_v2(db, user, text, send_fn):
         return
 
     text_lower = text.strip().lower()
+    normalized = re.sub(r"[.!?,]+$", "", text_lower)
 
-    if text_lower not in _SKIP_INPUTS and text_lower not in _NONE_KEYWORDS:
+    if (
+        normalized not in _SKIP_INPUTS
+        and normalized not in _NONE_KEYWORDS
+        and normalized not in _NO_INPUTS
+    ):
         items = await _parse_diet_input(text)
         for label, detail in items:
             try:

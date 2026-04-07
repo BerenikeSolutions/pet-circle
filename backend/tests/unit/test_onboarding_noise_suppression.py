@@ -59,3 +59,34 @@ def test_binary_confirmation_parser_accepts_no_variants() -> None:
 
 def test_binary_confirmation_parser_returns_none_for_non_binary_reply() -> None:
     assert onboarding._resolve_binary_confirmation_reply("yes but no egg") is None
+
+
+def test_noise_suppression_allows_supplement_negative_reply() -> None:
+    assert onboarding._is_irrelevant_noise_for_state(
+        "awaiting_supplements",
+        "no",
+        {},
+    ) is False
+    assert onboarding._is_irrelevant_noise_for_state(
+        "awaiting_supplements",
+        "none",
+        {},
+    ) is False
+    assert onboarding._is_irrelevant_noise_for_state(
+        "awaiting_supplements",
+        "n",
+        {},
+    ) is False
+    assert onboarding._is_irrelevant_noise_for_state(
+        "awaiting_supplements",
+        "not really",
+        {},
+    ) is False
+
+
+def test_noise_suppression_still_blocks_supplement_ack_noise() -> None:
+    assert onboarding._is_irrelevant_noise_for_state(
+        "awaiting_supplements",
+        "ok",
+        {},
+    ) is True
