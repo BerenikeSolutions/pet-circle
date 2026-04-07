@@ -61,6 +61,10 @@ ALLOWED_MIME_TYPES: set[str] = {
 # This is a system-wide constant — never use UTC or other zones.
 SYSTEM_TIMEZONE: str = "Asia/Kolkata"
 
+# --- Care Plan Status Windows ---
+# Due-soon window used by dashboard care-plan status semantics.
+CARE_PLAN_DUE_SOON_DAYS: int = 7
+
 # --- Conflict Resolution ---
 # Number of days before an unresolved conflict auto-resolves.
 # After expiry, the system keeps the existing record (KEEP_EXISTING).

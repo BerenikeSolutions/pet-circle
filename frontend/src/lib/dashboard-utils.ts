@@ -144,13 +144,15 @@ export function diffDaysFromToday(dateStr: string | null): number | null {
   return Math.round((target.getTime() - today.getTime()) / 86400000);
 }
 
+const CARE_PLAN_DUE_SOON_DAYS = 7;
+
 export function deriveStatus(lastDone: string | null, nextDue: string | null): string {
   if (!lastDone && !nextDue) return 'missing';
   if (!nextDue) return 'done';
   const days = diffDaysFromToday(nextDue);
   if (days === null) return 'missing';
   if (days < 0) return 'overdue';
-  if (days <= 60) return 'upcoming';
+  if (days <= CARE_PLAN_DUE_SOON_DAYS) return 'upcoming';
   return 'done';
 }
 

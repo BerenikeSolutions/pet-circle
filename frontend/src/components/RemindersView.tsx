@@ -48,6 +48,9 @@ const FREQ_OPTIONS = [
   { label: 'Annual', days: 365 },
 ];
 
+// Keep status windows aligned with care plan dashboard logic.
+const CARE_PLAN_DUE_SOON_DAYS = 7;
+
 const MEDICINE_OTHER = 'Other';
 
 function formatISO(dateStr: string | null | undefined): string {
@@ -120,7 +123,7 @@ function mapStatusFromNext(nextISO: string | null, fallback: string): string {
   const ms = next.getTime() - now.getTime();
   const days = Math.floor(ms / 86400000);
   if (days < 0) return 'overdue';
-  if (days <= 30) return 'upcoming';
+  if (days <= CARE_PLAN_DUE_SOON_DAYS) return 'upcoming';
   return 'up_to_date';
 }
 
@@ -201,9 +204,11 @@ export default function RemindersView({ data, token, onBack }: RemindersViewProp
   const [saveError, setSaveError] = useState<string>('');
 
   useEffect(() => {
-    if (editingId) return;
+    // Sync from server payload only when the payload itself changes.
+    // Do not resync on edit-mode toggle, otherwise freshly saved local values
+    // get overwritten by stale props until a full dashboard refresh.
     setItems(baseItems);
-  }, [baseItems, editingId]);
+  }, [baseItems]);
 
   const sections = Array.from(new Set(items.map((i) => i.section)));
 
@@ -681,28 +686,6 @@ export default function RemindersView({ data, token, onBack }: RemindersViewProp
           );
         })}
 
-      <button
-        onClick={onBack}
-        style={{
-          position: 'fixed',
-          bottom: 28,
-          right: 16,
-          width: 48,
-          height: 48,
-          borderRadius: '50%',
-          background: '#000',
-          color: '#fff',
-          fontSize: 16,
-          border: 'none',
-          cursor: 'pointer',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
-        }}
-      >
-        Home
-      </button>
     </div>
   );
 }

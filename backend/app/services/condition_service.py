@@ -21,6 +21,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.constants import CARE_PLAN_DUE_SOON_DAYS
 from app.models.condition import Condition
 from app.models.condition_medication import ConditionMedication
 from app.models.condition_monitoring import ConditionMonitoring
@@ -148,11 +149,21 @@ async def get_condition_timeline(db: Session, pet_id: UUID) -> dict:
                 })
             # Upcoming / overdue event (next_due_date only when not done)
             elif mon.next_due_date:
-                is_overdue = mon.next_due_date < today
-                tag = "Overdue" if is_overdue else "Upcoming"
-                mcolor = "#FF3B30" if is_overdue else COLORS["monitoring"]
+                days_diff = (mon.next_due_date - today).days
+                if days_diff < 0:
+                    tag = "Overdue"
+                    mcolor = "#FF3B30"
+                    due_text = f"Overdue since: {mon.next_due_date}"
+                elif days_diff <= CARE_PLAN_DUE_SOON_DAYS:
+                    tag = "Due Soon"
+                    mcolor = COLORS["monitoring"]
+                    due_text = f"Due: {mon.next_due_date}"
+                else:
+                    tag = "On Track"
+                    mcolor = COLORS["vet_visit"]
+                    due_text = f"Due: {mon.next_due_date}"
                 pills = [_make_pill(
-                    f"{'Overdue since' if is_overdue else 'Due'}: {mon.next_due_date}",
+                    due_text,
                     mcolor, mcolor + "12",
                 )]
                 events.append({
@@ -560,7 +571,7 @@ def get_last_vet_visit(db: Session, pet_id: UUID) -> dict:
         days_diff = (nd - today).days
         if days_diff < 0:
             status = "overdue"
-        elif days_diff <= 30:
+        elif days_diff <= CARE_PLAN_DUE_SOON_DAYS:
             status = "due_soon"
         else:
             status = "on_track"

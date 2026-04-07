@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
+from app.core.constants import CARE_PLAN_DUE_SOON_DAYS
 from app.core.rate_limiter import check_dashboard_rate_limit
 from app.database import get_db
 from app.models.cart_item import CartItem
@@ -1178,7 +1179,7 @@ def dashboard_update_frequency(
             today = date_type.today()
             if record.next_due_date < today:
                 record.status = "overdue"
-            elif (record.next_due_date - today).days <= 30:
+            elif (record.next_due_date - today).days <= CARE_PLAN_DUE_SOON_DAYS:
                 record.status = "upcoming"
             else:
                 record.status = "up_to_date"
@@ -1336,7 +1337,7 @@ def dashboard_update_medicine_name(
             today = date_type.today()
             if record.next_due_date < today:
                 record.status = "overdue"
-            elif (record.next_due_date - today).days <= 30:
+            elif (record.next_due_date - today).days <= CARE_PLAN_DUE_SOON_DAYS:
                 record.status = "upcoming"
             else:
                 record.status = "up_to_date"
