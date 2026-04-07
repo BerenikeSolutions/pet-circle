@@ -55,7 +55,7 @@ from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
 from app.models.reminder import Reminder
 from app.models.user import User
-from app.services.diet_service import add_diet_item, split_diet_items_by_type
+from app.services.diet_service import HOMEMADE_KW, add_diet_item, split_diet_items_by_type
 from app.services.hygiene_service import add_hygiene_item
 from app.services.nutrition_service import get_diet_summary
 from app.services.preventive_seeder import seed_preventive_master
@@ -288,6 +288,32 @@ async def handle_onboarding_step(
         await _send_onboarding_resume(db, user, state, send_fn)
         return
 
+    # If the user asks for their dashboard / care plan link at ANY point
+    # before onboarding is complete, tell them it's still being built
+    # rather than silently routing the message into the current step
+    # handler (which would reply with an unrelated question).
+    _DASHBOARD_REQUEST_KEYWORDS = (
+        "dashboard", "my link", "share link", "care plan link",
+        "my plan", "send link", "pet plan",
+    )
+    if state != "complete" and any(
+        kw in text_lower for kw in _DASHBOARD_REQUEST_KEYWORDS
+    ):
+        pet_for_msg = (
+            db.query(Pet)
+            .filter(Pet.user_id == user.id)
+            .order_by(Pet.created_at.desc())
+            .first()
+        )
+        pet_name = pet_for_msg.name if pet_for_msg else "your pet"
+        await send_fn(
+            db, mobile,
+            f"{pet_name}'s care plan is still being built 🐾 "
+            f"You'll receive the dashboard link as soon as it's ready. "
+            f"Let's finish the remaining details first!",
+        )
+        return
+
     if state == "welcome":
         await _step_welcome(db, user, text, send_fn, message_data=message_data)
 
@@ -316,7 +342,7 @@ async def handle_onboarding_step(
         await _step_awaiting_documents(db, user, text_lower, send_fn)
 
     else:
-        # Unknown state (including legacy states and agentic_onboarding) — reset.
+        # Unknown or legacy state — reset.
         logger.warning("Unknown onboarding state '%s' for user %s — resetting to welcome", state, mobile)
         user.onboarding_state = "welcome"
         user.onboarding_data = None
@@ -587,10 +613,21 @@ async def _step_breed_age(db, user, text, send_fn):
         pet.species = species_gpt
 
     # Save age if provided.
-    if age_years is not None:
+    # Prefer explicit DOB from GPT (user gave a birth date like "11/11/2021").
+    from datetime import date as date_type
+    explicit_dob = parsed.get("dob")
+    if explicit_dob:
+        try:
+            parsed_dob = date_type.fromisoformat(str(explicit_dob))
+            if parsed_dob <= date_type.today():
+                pet.dob = parsed_dob
+                pet.age_text = _age_text_from_dob(parsed_dob)
+        except (ValueError, TypeError):
+            explicit_dob = None  # fall through to age_years logic
+
+    if not explicit_dob and age_years is not None:
         pet.age_text = age_text_raw or f"{age_years} years"
         # Compute approximate DOB for scheduling.
-        from datetime import date as date_type
         approx_dob = date_type(
             date_type.today().year - int(age_years),
             max(1, min(12, date_type.today().month)),
@@ -606,6 +643,9 @@ async def _step_breed_age(db, user, text, send_fn):
                 y -= 1
             approx_dob = date_type(y, m, 1)
         pet.dob = approx_dob
+        # Ensure age_text is human-readable from the computed DOB.
+        if pet.dob:
+            pet.age_text = _age_text_from_dob(pet.dob)
 
     # Re-ask ONCE for whichever piece is missing. On the 2nd attempt
     # (attempts >= 1), advance regardless of what's still missing.
@@ -748,8 +788,11 @@ async def _step_gender_weight(db, user, text, send_fn):
         )
 
     # Advance to food type question.
+    # Start at -1 so a queued message that arrives before the user sees the
+    # question gets one free pass (increments to 0) instead of triggering
+    # an immediate clarification.
     user.onboarding_state = "awaiting_food_type"
-    _set_onboarding_data(user, "food_type_attempts", 0)
+    _set_onboarding_data(user, "food_type_attempts", -1)
     db.commit()
 
     await send_fn(
@@ -792,8 +835,8 @@ async def _step_food_type(db, user, text, send_fn):
             food_type = ai_food_type
 
     if not food_type:
-        if attempts >= 1:
-            food_type = "mix"  # Default on second unrecognized input.
+        if attempts >= 1 or attempts < 0:
+            food_type = "mix"  # Default on grace pass (queued msg) or second unrecognized.
         else:
             _set_onboarding_data(user, "food_type_attempts", attempts + 1)
             db.commit()
@@ -1160,7 +1203,7 @@ async def _parse_preventive_date_value(raw: str, pet: Pet) -> date | None:
     return parsed_date
 
 
-def _upsert_preventive_record(db, pet, master, parsed_date) -> None:
+def _upsert_preventive_record(db, pet, master, parsed_date, medicine_name: str | None = None) -> None:
     """
     Create or update a PreventiveRecord for (pet, master), keeping the most
     recent last_done_date. Caller is responsible for committing.
@@ -1188,6 +1231,8 @@ def _upsert_preventive_record(db, pet, master, parsed_date) -> None:
             existing.last_done_date = parsed_date
             existing.next_due_date = next_due
             existing.status = status
+        if medicine_name and not existing.medicine_name:
+            existing.medicine_name = medicine_name
     else:
         record = PreventiveRecord(
             pet_id=pet.id,
@@ -1195,6 +1240,7 @@ def _upsert_preventive_record(db, pet, master, parsed_date) -> None:
             last_done_date=parsed_date,
             next_due_date=next_due,
             status=status,
+            medicine_name=medicine_name,
         )
         db.add(record)
 
@@ -1203,10 +1249,14 @@ def _essential_annual_vaccine_masters(db: Session, species: str) -> list[Prevent
     """
     Return all recurring annual vaccine masters for the species.
 
-    Filters: circle='health', category='essential', recurrence_days <= 730,
+    Filters: circle='health', recurrence_days <= 730,
     and item name classified as 'vaccine' by nudge_engine._classify_item.
     Excludes puppy dose series (recurrence_days=36500) and non-vaccines
-    (e.g. Deworming, Annual Checkup) that happen to share essential/health.
+    (e.g. Deworming, Annual Checkup).
+
+    Includes both mandatory and optional annual vaccines so generic
+    onboarding inputs like "vaccines last Dec" apply to all vaccine rows,
+    including Kennel Cough (Nobivac KC).
     """
     from app.services.nudge_engine import _classify_item
 
@@ -1215,12 +1265,31 @@ def _essential_annual_vaccine_masters(db: Session, species: str) -> list[Prevent
         .filter(
             PreventiveMaster.species.in_([species, "both"]),
             PreventiveMaster.circle == "health",
-            PreventiveMaster.category == "essential",
             PreventiveMaster.recurrence_days <= 730,
         )
         .all()
     )
     return [m for m in rows if _classify_item(m.item_name) == "vaccine"]
+
+
+def _resolve_vaccine_item_name(name: str) -> str | None:
+    """Resolve a free-text vaccine alias to a canonical preventive item name."""
+    from app.services.gpt_extraction import _VACCINE_DETAIL_TO_ITEM
+
+    normalized = (name or "").strip().lower()
+    if not normalized:
+        return None
+
+    # Prefer exact alias keys, then fallback to keyword containment matching.
+    exact = _VACCINE_DETAIL_TO_ITEM.get(normalized)
+    if exact:
+        return exact
+
+    for keyword, item_name in _VACCINE_DETAIL_TO_ITEM.items():
+        if keyword in normalized:
+            return item_name
+
+    return None
 
 
 def _match_specific_vaccine_master(
@@ -1231,12 +1300,7 @@ def _match_specific_vaccine_master(
     PreventiveMaster row. Reuses gpt_extraction._VACCINE_DETAIL_TO_ITEM as
     the single source of truth for name aliases.
     """
-    from app.services.gpt_extraction import _VACCINE_DETAIL_TO_ITEM
-
-    key = (name or "").strip().lower()
-    if not key:
-        return None
-    item_name = _VACCINE_DETAIL_TO_ITEM.get(key)
+    item_name = _resolve_vaccine_item_name(name)
     if not item_name:
         return None
     return (
@@ -1299,6 +1363,14 @@ async def _store_preventive_data(db, pet, parsed: dict):
         if not value or value == "none":
             continue
 
+        # Support both string dates and {"date": "...", "medicine": "..."} format.
+        medicine_name = None
+        if isinstance(value, dict):
+            medicine_name = (value.get("medicine") or "").strip() or None
+            value = value.get("date") or ""
+            if not value or value == "none":
+                continue
+
         parsed_date = await _parse_preventive_date_value(value, pet)
         if parsed_date is None:
             continue
@@ -1318,7 +1390,7 @@ async def _store_preventive_data(db, pet, parsed: dict):
             )
             continue
 
-        _upsert_preventive_record(db, pet, master, parsed_date)
+        _upsert_preventive_record(db, pet, master, parsed_date, medicine_name=medicine_name)
 
     try:
         db.commit()
@@ -1527,10 +1599,7 @@ async def _store_meal_items(db, pet, items: list, food_type: str):
     for label, detail in items:
         item_type = food_type if food_type != "mix" else "packaged"
         label_lower = label.lower()
-        if any(kw in label_lower for kw in (
-            "home", "khichdi", "dal", "roti", "rice",
-            "chicken", "egg", "boiled", "cooked",
-        )):
+        if any(kw in label_lower for kw in HOMEMADE_KW):
             item_type = "homemade"
         elif food_type == "home":
             item_type = "homemade"
@@ -1663,27 +1732,55 @@ def _strip_json_fences(raw: str) -> str:
     return raw
 
 
+def _age_text_from_dob(dob: date) -> str:
+    """Compute a human-readable age string from a date of birth."""
+    today = date.today()
+    years = today.year - dob.year
+    months = today.month - dob.month
+    if today.day < dob.day:
+        months -= 1
+    if months < 0:
+        years -= 1
+        months += 12
+    if years <= 0 and months <= 0:
+        days = (today - dob).days
+        if days < 0:
+            return "newborn"
+        return f"{max(1, days // 7)} weeks" if days < 60 else "1 month"
+    if years == 0:
+        return f"{months} month{'s' if months != 1 else ''}"
+    if months == 0:
+        return f"{years} year{'s' if years != 1 else ''}"
+    return f"{years} year{'s' if years != 1 else ''} {months} month{'s' if months != 1 else ''}"
+
+
 async def _parse_breed_age(text: str) -> dict:
     """
     Use GPT-4.1-mini to extract breed and approximate age from combined input.
 
     Returns dict with keys:
         breed (str|None), species ("dog"|"cat"|None),
-        age_years (float|None), age_text (str|None), confident (bool)
+        age_years (float|None), age_text (str|None),
+        dob (str|None — ISO date if explicitly given), confident (bool)
     """
     client = _get_openai_onboarding_client()
+    today_str = date.today().isoformat()
     prompt = (
+        f"Today's date is {today_str}. "
         "Extract the pet breed and approximate age from this message. "
         "Also determine if this is a dog or cat breed. "
         'Return ONLY valid JSON, no markdown: '
         '{"breed": "...", "species": "dog"|"cat"|null, '
         '"age_years": number|null, "age_text": "original age text", '
-        '"confident": true|false}. '
+        '"dob": "YYYY-MM-DD"|null, "confident": true|false}. '
         "If the breed is clearly identifiable, set confident=true. "
         "If the breed is ambiguous or unrecognizable, set confident=false. "
         "For age, accept years, months, or life stage words "
         '(puppy=0.5, kitten=0.5, junior=1.5, adult=4, senior=9). '
-        "If no age is given, set age_years and age_text to null.\n\n"
+        "If the user provides a date of birth (like '11/11/2021', '11 Nov 21', etc.), "
+        "convert it to ISO format (YYYY-MM-DD) in the 'dob' field AND compute age_years "
+        "from today's date. Use the 2-digit year rule: 00-30 = 2000s, 31-99 = 1900s. "
+        "If no age is given, set age_years, age_text, and dob to null.\n\n"
         f"User message: {text}"
     )
     try:
@@ -1701,11 +1798,12 @@ async def _parse_breed_age(text: str) -> dict:
             "species": data.get("species"),
             "age_years": data.get("age_years"),
             "age_text": data.get("age_text"),
+            "dob": data.get("dob"),
             "confident": data.get("confident", False),
         }
     except Exception as e:
         logger.warning("Breed/age GPT parse failed: %s", str(e))
-        return {"breed": None, "species": None, "age_years": None, "age_text": None, "confident": False}
+        return {"breed": None, "species": None, "age_years": None, "age_text": None, "dob": None, "confident": False}
 
 
 async def _parse_gender_weight_neutered(text: str) -> dict:
@@ -1747,13 +1845,13 @@ async def _parse_gender_weight_neutered(text: str) -> dict:
 
 async def _parse_preventive_care(text: str) -> dict:
     """
-    Use GPT-4.1-mini to extract preventive care dates from combined input.
+    Use GPT-4.1-mini to extract preventive care dates and medicine names from combined input.
 
     Returns dict with keys:
         vaccines (str|None)         — generic "vaccines done" date
         vaccine_specifics (list)    — [{"name": "rabies", "date": "Dec 2025"}, ...]
-        deworming (str|None)
-        flea_tick (str|None)
+        deworming (dict|str|None)   — {"date": "...", "medicine": "..."} or date string
+        flea_tick (dict|str|None)   — {"date": "...", "medicine": "..."} or date string
         blood_test (str|None)
         missing (list[str])         — which of the 4 categories were not mentioned
     """
@@ -1777,11 +1875,18 @@ async def _parse_preventive_care(text: str) -> dict:
         "without naming any specific vaccine, set 'vaccines' to the date and leave "
         "'vaccine_specifics' as an empty list.\n"
         "- Specific names go in 'vaccine_specifics' even when only one is mentioned.\n\n"
+        "MEDICINE NAME RULES:\n"
+        "- For deworming and flea & tick, if the user mentions a specific medicine or "
+        "brand name (e.g. Simparica, NexGard, Bravecto, Frontline, Milbemax, Drontal, "
+        "Panacur, Advocate, Revolution, Credelio, Seresto, Advantix, Prazitel, Verminator, "
+        "Fipronil, Ivermectin, Fenbendazole, Pyrantel, Albendazole), "
+        "extract it as the 'medicine' field.\n"
+        "- Return deworming and flea_tick as objects with 'date' and 'medicine' keys.\n\n"
         'Return ONLY valid JSON, no markdown: '
         '{"vaccines": "date or timeframe"|null, '
         '"vaccine_specifics": [{"name": "vaccine name", "date": "date or timeframe"}], '
-        '"deworming": "date or timeframe"|null, '
-        '"flea_tick": "date or timeframe"|null, '
+        '"deworming": {"date": "date or timeframe", "medicine": "brand name"|null}|null, '
+        '"flea_tick": {"date": "date or timeframe", "medicine": "brand name"|null}|null, '
         '"blood_test": "date or timeframe"|null, '
         '"missing": ["category names not mentioned"]}. '
         "If the user explicitly says 'none' or 'not done' for a category, "
@@ -1796,7 +1901,7 @@ async def _parse_preventive_care(text: str) -> dict:
             model="gpt-4.1-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=400,
+            max_tokens=500,
         )
         raw = _strip_json_fences(response.choices[0].message.content.strip())
         data = json.loads(raw)
@@ -2003,6 +2108,27 @@ async def _step_awaiting_documents(db, user, text_lower, send_fn):
         except Exception:
             pass
         await _finalize_onboarding(db, user, send_fn)
+        return
+
+    # If the user is asking for the dashboard/link before the care plan is
+    # ready, tell them it's being built instead of sending a generic upload
+    # reply. Avoids the confusion of "I asked for the dashboard and got a
+    # prompt to upload more documents."
+    _DASHBOARD_KEYWORDS = ("dashboard", "link", "care plan", "my plan")
+    if any(kw in text_lower for kw in _DASHBOARD_KEYWORDS):
+        pet_for_msg = (
+            db.query(Pet)
+            .filter(Pet.user_id == user.id)
+            .order_by(Pet.created_at.desc())
+            .first()
+        )
+        pet_name = pet_for_msg.name if pet_for_msg else "your pet"
+        await send_fn(
+            db, mobile,
+            f"{pet_name}'s care plan is still being built 🐾 "
+            f"You'll receive the dashboard link as soon as it's ready. "
+            f"Reply *skip* if you don't want to upload any documents.",
+        )
         return
 
     # Count uploads using BOTH the DB and the in-memory batch tracker.
@@ -2464,7 +2590,7 @@ async def _generate_care_plan_message(
         return (
             f"{name}'s care plan is ready! 🐾 Based on {name}'s health analysis, life stage and current diet.\n\n"
             f"{condition_line}\n\n"
-            f"We've logged {record_count} preventive care record{'s' if record_count != 1 else ''} for {name}.\n\n"
+            f"We've logged {record_count} preventive care item{'s' if record_count != 1 else ''} for {name}.\n\n"
             f"{supplement_rec}"
         )
     elif has_food and has_preventive:
@@ -2473,7 +2599,7 @@ async def _generate_care_plan_message(
             f"{name}'s care plan is ready! 🐾 Based on {name}'s health analysis, "
             f"life stage and current diet.\n\n"
             f"{condition_line}\n\n"
-            f"We've logged {record_count} preventive care record{'s' if record_count != 1 else ''} for {name}.\n\n"
+            f"We've logged {record_count} preventive care item{'s' if record_count != 1 else ''} for {name}.\n\n"
             f"{supplement_rec}"
         )
     elif has_food and not has_preventive:

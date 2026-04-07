@@ -8,7 +8,6 @@ import LifeStageCard from "./LifeStageCard";
 import HealthConditionsCard from "./HealthConditionsCard";
 import DietAnalysisCard from "./DietAnalysisCard";
 import CarePlanCard from "./CarePlanCard";
-import NudgeBanner from "./NudgeBanner";
 import CartFloater from "./CartFloater";
 import { buildCarePlanBuckets, computeCarePlanCounts } from "./dashboard-utils";
 
@@ -20,10 +19,8 @@ export interface DashboardViewProps {
   onGoToReminders: () => void;
   onGoToTrends: () => void;
   onGoToRecords: () => void;
-  onGoToNudges: () => void;
   onGoToCart: () => void;
   onAddToCart: (item: CarePlanItem, sectionTitle: string) => void;
-  nudgeCount: number;
 }
 
 function cartItemId(item: CarePlanItem, sectionTitle: string): string {
@@ -38,10 +35,8 @@ export default function DashboardView({
   onGoToReminders,
   onGoToTrends,
   onGoToRecords,
-  onGoToNudges,
   onGoToCart,
   onAddToCart,
-  nudgeCount,
 }: DashboardViewProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [floaterUnlocked, setFloaterUnlocked] = useState(false);
@@ -94,7 +89,6 @@ export default function DashboardView({
       <RecognitionCard data={data} onGoToRecords={onGoToRecords} />
       <LifeStageCard data={data} />
       <HealthConditionsCard data={data} onGoToTrends={onGoToTrends} />
-      <NudgeBanner petName={data.pet.name} nudgeCount={nudgeCount} onGoToNudges={onGoToNudges} />
       <DietAnalysisCard data={data} />
       <CarePlanCard
         petName={data.pet.name}

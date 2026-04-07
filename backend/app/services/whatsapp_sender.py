@@ -21,7 +21,10 @@ Retry policy:
     - Failures are logged but never crash the calling flow
 """
 
+import hashlib
 import logging
+import time
+from collections import OrderedDict
 
 import httpx
 from sqlalchemy.orm import Session
@@ -33,6 +36,39 @@ from app.models.message_log import MessageLog
 from app.utils.retry import retry_whatsapp_call
 
 logger = logging.getLogger(__name__)
+
+# ── Outbound message dedup ─────────────────────────────────────────────
+# Prevents sending the exact same message to the same recipient within
+# a short window (e.g., race between timer and user "skip" both
+# triggering finalize, or Meta webhook retries causing double processing).
+_OUTBOUND_DEDUP_TTL = 10  # seconds
+_OUTBOUND_DEDUP_MAX = 500
+_outbound_dedup_cache: OrderedDict[str, float] = OrderedDict()
+
+
+def _is_outbound_duplicate(to_number: str, text: str) -> bool:
+    """Return True if the same message was sent to the same number recently."""
+    key = hashlib.sha256(f"{to_number}:{text}".encode()).hexdigest()
+    now = time.monotonic()
+
+    # Evict stale entries.
+    while _outbound_dedup_cache:
+        oldest_key, oldest_ts = next(iter(_outbound_dedup_cache.items()))
+        if now - oldest_ts > _OUTBOUND_DEDUP_TTL:
+            _outbound_dedup_cache.pop(oldest_key)
+        else:
+            break
+
+    if key in _outbound_dedup_cache:
+        logger.info("Outbound dedup: skipping duplicate message to %s", mask_phone(to_number))
+        return True
+
+    _outbound_dedup_cache[key] = now
+    # Cap size.
+    while len(_outbound_dedup_cache) > _OUTBOUND_DEDUP_MAX:
+        _outbound_dedup_cache.popitem(last=False)
+
+    return False
 
 
 def get_template_body(db: Session, template_name: str) -> str:
@@ -178,6 +214,10 @@ async def send_text_message(
     Returns:
         API response dict on success, None on failure.
     """
+    # Outbound dedup: skip if the exact same message was sent recently.
+    if _is_outbound_duplicate(to_number, text):
+        return None
+
     payload = {
         "messaging_product": "whatsapp",
         "to": to_number,

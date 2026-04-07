@@ -143,21 +143,84 @@ NUTRITION_TARGET_SYSTEM_PROMPT = (
     "- No explanation, no markdown — JSON only"
 )
 
-FOOD_ESTIMATION_SYSTEM_PROMPT = (
-    "You are a pet food nutrition expert. Given a food product name and type, "
-    "estimate its nutritional content per typical daily serving for a medium-sized dog.\n\n"
-    "Rules:\n"
-    "- Return ONLY valid JSON with these keys:\n"
-    "  calories_per_serving (int), protein_pct (float), fat_pct (float), fibre_pct (float), "
-    "moisture_pct (float), calcium (float, %), phosphorus (float, %), "
-    "omega_3_mg (int), omega_6_mg (int), vitamin_e_iu (int), vitamin_d3_iu (int), "
-    "glucosamine_mg (int), probiotics (bool)\n"
-    "- For packaged food, estimate based on typical commercial pet food values\n"
-    "- For homemade food, estimate based on common home-cooked dog food recipes\n"
-    "- For supplements, provide the nutrient the supplement is known for\n"
-    "- Be conservative with estimates\n"
-    "- No explanation, no markdown — JSON only"
-)
+def _build_food_estimation_prompt(
+    species: str | None,
+    breed: str | None,
+    weight_kg: float | None,
+    age_description: str | None,
+    gender: str | None = None,
+    conditions: list[str] | None = None,
+) -> str:
+    """
+    Build a pet-specific food estimation prompt using ALL known pet info.
+
+    Previously the prompt was hardcoded to "medium-sized dog" which produced
+    generic estimates regardless of the actual pet. Now we pass species,
+    breed, weight, age, gender and any diagnosed health conditions so the
+    model can size the serving correctly and apply species-specific and
+    condition-specific nutrient rules (e.g. low phosphorus for kidney
+    disease, taurine for cats, joint support for hip dysplasia).
+    """
+    species_norm = (species or "dog").lower().strip()
+    breed_norm = (breed or "mixed breed").strip()
+    weight_part = f"{weight_kg:g}kg " if weight_kg and weight_kg > 0 else ""
+    age_part = f", {age_description}" if age_description else ""
+    gender_part = f" {gender.lower()}" if gender else ""
+
+    pet_descriptor = f"a {weight_part}{breed_norm}{gender_part} {species_norm}{age_part}"
+
+    species_rules = ""
+    if species_norm == "cat":
+        species_rules = (
+            "- This is a CAT — cats are obligate carnivores. Protein and fat "
+            "should be noticeably higher than a dog's equivalent serving.\n"
+            "- Taurine is essential for cats; if the food naturally contains it "
+            "(meat, fish, organ meat) reflect that in your estimate.\n"
+            "- Carbohydrates should be minimal for cats.\n"
+        )
+    else:
+        species_rules = (
+            "- This is a DOG — balance protein, fat, and carbs appropriately "
+            "for the breed size and activity level.\n"
+            "- Large/giant breeds benefit from added glucosamine and joint support.\n"
+        )
+
+    condition_rules = ""
+    if conditions:
+        cond_list = ", ".join(conditions)
+        condition_rules = (
+            f"- This pet has the following diagnosed health conditions: {cond_list}.\n"
+            "  Adjust estimates with these conditions in mind — e.g. lower "
+            "phosphorus/protein for kidney disease, lower fat for pancreatitis, "
+            "added glucosamine for joint/hip issues, lower carbs for diabetes, "
+            "higher fibre for GI issues, hypoallergenic if food allergies.\n"
+        )
+
+    return (
+        "You are a board-certified veterinary nutritionist. Given a food "
+        "product name and type, estimate its nutritional content per typical "
+        f"DAILY serving for {pet_descriptor}. Scale the serving size to the "
+        "pet's body weight — a 5kg pet needs a much smaller serving than a "
+        "40kg pet.\n\n"
+        "Rules:\n"
+        "- Return ONLY valid JSON with these keys:\n"
+        "  calories_per_serving (int), protein_pct (float), fat_pct (float), fibre_pct (float), "
+        "moisture_pct (float), calcium (float, %), phosphorus (float, %), "
+        "omega_3_mg (int), omega_6_mg (int), vitamin_e_iu (int), vitamin_d3_iu (int), "
+        "glucosamine_mg (int), probiotics (bool)\n"
+        "- For packaged food, estimate based on typical commercial pet food values "
+        "for this species and size.\n"
+        "- For homemade food, estimate based on common home-cooked recipes for this species.\n"
+        "- For supplements, provide the nutrient the supplement is known for.\n"
+        f"{species_rules}"
+        f"{condition_rules}"
+        "- Be conservative with estimates.\n"
+        "- No explanation, no markdown — JSON only"
+    )
+
+
+# Kept for backward compatibility / fallback when pet context is unavailable.
+FOOD_ESTIMATION_SYSTEM_PROMPT = _build_food_estimation_prompt(None, None, None, None)
 
 RECOMMENDATION_SYSTEM_PROMPT = (
     "You are a friendly veterinary nutritionist. Generate a short, personalized "
@@ -331,16 +394,53 @@ def _match_product_from_catalog(catalog: list, label: str, item_type: str) -> "P
 
 # ─── Step 3c: AI Food Estimation ────────────────────────────────────
 
+def _weight_bucket(weight_kg: float | None) -> str:
+    """Bucket weight so similar-sized pets can share cache entries."""
+    if not weight_kg or weight_kg <= 0:
+        return "unk"
+    if weight_kg < 5:
+        return "xs"
+    if weight_kg < 12:
+        return "s"
+    if weight_kg < 25:
+        return "m"
+    if weight_kg < 40:
+        return "l"
+    return "xl"
+
+
 async def estimate_food_nutrition(
-    db: Session, food_label: str, food_type: str,
+    db: Session,
+    food_label: str,
+    food_type: str,
+    species: str | None = None,
+    breed: str | None = None,
+    weight_kg: float | None = None,
+    age_description: str | None = None,
+    gender: str | None = None,
+    conditions: list[str] | None = None,
 ) -> dict | None:
     """
     Estimate nutrition for foods not matched in product_catalog.
 
     Pipeline: DB cache check → OpenAI call → cache result.
     Returns nutrition dict or None on failure.
+
+    The cache key embeds species + weight bucket + a hash of the pet's
+    diagnosed conditions so a 5kg cat, a 40kg healthy dog, and a 40kg dog
+    with kidney disease never share an estimate for the same food label.
     """
-    label_normalized = food_label.lower().strip()
+    species_norm = (species or "dog").lower().strip()
+    bucket = _weight_bucket(weight_kg)
+    conditions_sorted = sorted(c.lower().strip() for c in (conditions or []) if c)
+    cond_hash = (
+        hashlib.sha1(",".join(conditions_sorted).encode()).hexdigest()[:8]
+        if conditions_sorted else "none"
+    )
+    # Encode pet context into the cache key (avoids a schema migration).
+    label_normalized = (
+        f"{species_norm}|{bucket}|{cond_hash}|{food_label.lower().strip()}"
+    )
 
     # 1. Check DB cache
     try:
@@ -368,6 +468,7 @@ async def estimate_food_nutrition(
         result = await retry_openai_call(
             _call_openai_food_estimation,
             food_label, food_type,
+            species, breed, weight_kg, age_description, gender, conditions_sorted,
         )
     except Exception as e:
         logger.error("OpenAI food estimation failed: %s", e)
@@ -394,10 +495,25 @@ async def estimate_food_nutrition(
 
 
 async def _call_openai_food_estimation(
-    food_label: str, food_type: str,
+    food_label: str,
+    food_type: str,
+    species: str | None = None,
+    breed: str | None = None,
+    weight_kg: float | None = None,
+    age_description: str | None = None,
+    gender: str | None = None,
+    conditions: list[str] | None = None,
 ) -> dict | None:
     """Call OpenAI to estimate nutritional content of a food item."""
     client = _get_openai_client()
+    system_prompt = _build_food_estimation_prompt(
+        species=species,
+        breed=breed,
+        weight_kg=weight_kg,
+        age_description=age_description,
+        gender=gender,
+        conditions=conditions,
+    )
     user_prompt = f"Food name: {food_label}\nType: {food_type}"
 
     response = await client.chat.completions.create(
@@ -406,7 +522,7 @@ async def _call_openai_food_estimation(
         max_tokens=OPENAI_FOOD_ESTIMATION_MAX_TOKENS,
         response_format={"type": "json_object"},
         messages=[
-            {"role": "system", "content": FOOD_ESTIMATION_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
     )
@@ -553,9 +669,29 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
         else:
             unmatched_items.append(item)
 
-    # Fire breed-targets lookup and all per-item AI estimations in parallel
+    # Fire breed-targets lookup and all per-item AI estimations in parallel.
+    # Pass the full pet context (species, breed, weight, age, gender, and any
+    # diagnosed conditions) so estimates are tailored rather than generic.
+    pet_weight_kg = float(pet.weight) if getattr(pet, "weight", None) else None
+    pet_age_desc = _calculate_age_description(pet.dob)
+    pet_gender = getattr(pet, "gender", None)
+    condition_full_names = [c.name for c in conditions] if conditions else []
+
     targets_coro = get_nutrition_targets(db, pet.species, pet.breed, pet.dob)
-    estimation_coros = [estimate_food_nutrition(db, item.label, item.type) for item in unmatched_items]
+    estimation_coros = [
+        estimate_food_nutrition(
+            db,
+            item.label,
+            item.type,
+            species=pet.species,
+            breed=pet.breed,
+            weight_kg=pet_weight_kg,
+            age_description=pet_age_desc,
+            gender=pet_gender,
+            conditions=condition_full_names,
+        )
+        for item in unmatched_items
+    ]
 
     results = await asyncio.gather(targets_coro, *estimation_coros, return_exceptions=True)
     targets = results[0] if not isinstance(results[0], Exception) else dict(DEFAULT_TARGETS)

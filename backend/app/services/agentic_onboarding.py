@@ -1320,6 +1320,25 @@ def _summarise_extraction_for_onboarding(raw_json: str) -> dict:
         "allergies_medications": NOT_FOUND,
     }
 
+    vaccine_keywords = (
+        "vaccin",
+        "rabies",
+        "dhppil",
+        "dhppi",
+        "dhpp",
+        "leptospira",
+        "parvovirus",
+        "distemper",
+        "hepatitis",
+        "bordetella",
+        "kennel cough",
+        "nobivac",
+        "ccov",
+        "coronavirus",
+        "feline core",
+        "fvrcp",
+    )
+
     try:
         data = json.loads(raw_json)
         # Handle both list and {"items": [...]} wrapper
@@ -1349,7 +1368,7 @@ def _summarise_extraction_for_onboarding(raw_json: str) -> dict:
             label = item.get("item_name") or item.get("name") or ""
             entry = f"{label} ({date_str})" if date_str else label
 
-            if any(kw in name for kw in ("vaccin", "rabies", "dhppil", "leptospira", "parvovirus", "distemper", "hepatitis", "bordetella")):
+            if any(kw in name for kw in vaccine_keywords):
                 vaccine_parts.append(entry)
             elif any(kw in name for kw in ("deworm", "deworming", "anthelmintic")):
                 part = f"{medicine} ({date_str})" if medicine and date_str else (medicine or entry)
@@ -1527,22 +1546,70 @@ def _update_preventive_records_from_health(
             key = rec.preventive_master.item_name.lower()
             record_lookup[key] = (rec, rec.preventive_master)
 
-    def _try_update(keywords: list[str], raw_value: str, medicine: str | None = None) -> None:
+    def _try_update(
+        keywords: list[str],
+        raw_value: str,
+        medicine: str | None = None,
+        used_record_keys: set[str] | None = None,
+    ) -> bool:
         """Find the best matching record and update its last_done_date."""
         if not raw_value or not raw_value.strip():
-            return
+            return False
 
-        # Find matching record by keyword
+        raw_value_lower = raw_value.lower()
+        low_signal_keywords = {"vaccin", "nobivac"}
+
+        # Find matching record by keyword, preferring records whose name best
+        # matches the specific wording in raw_value.
+        candidates: list[tuple[int, int, str, object, object]] = []
+        for key, (rec, master) in record_lookup.items():
+            if used_record_keys and key in used_record_keys:
+                continue
+
+            key_matches = [kw for kw in keywords if kw in key]
+            if not key_matches:
+                continue
+
+            # Prioritize records whose keywords also appear in the input text.
+            primary_score = sum(
+                2
+                for kw in key_matches
+                if kw in raw_value_lower and kw not in low_signal_keywords
+            )
+            support_score = sum(
+                1
+                for kw in key_matches
+                if kw in raw_value_lower and kw in low_signal_keywords
+            )
+            score = primary_score + support_score
+            if score <= 0:
+                continue
+
+            # Prefer specific phrase matches over generic token matches.
+            exact_phrase_bonus = sum(1 for kw in key_matches if " " in kw and kw in raw_value_lower)
+            candidates.append((score, exact_phrase_bonus, key, rec, master))
+
         matched_rec = None
         matched_master = None
-        for key, (rec, master) in record_lookup.items():
-            if any(kw in key for kw in keywords):
-                matched_rec = rec
-                matched_master = master
-                break
+        if candidates:
+            # Highest score first, then exact phrase bonus.
+            candidates.sort(key=lambda row: (row[0], row[1]), reverse=True)
+            top_score = candidates[0][0]
+            top_bonus = candidates[0][1]
+            top_ties = [row for row in candidates if row[0] == top_score and row[1] == top_bonus]
+            if len(top_ties) > 1:
+                logger.info(
+                    "Skipping ambiguous preventive mapping for pet=%s input='%s' candidates=%s",
+                    str(pet.id),
+                    raw_value,
+                    [row[2] for row in top_ties],
+                )
+                return False
+
+            _score, _bonus, matched_key, matched_rec, matched_master = candidates[0]
 
         if matched_rec is None:
-            return
+            return False
 
         # Try to parse a date from the raw value
         # Look for date-like substrings (YYYY-MM-DD, DD/MM/YYYY, "Oct 2024", etc.)
@@ -1565,7 +1632,7 @@ def _update_preventive_records_from_health(
                 continue
 
         if parsed_date is None:
-            return
+            return False
 
         try:
             matched_rec.last_done_date = parsed_date
@@ -1594,12 +1661,44 @@ def _update_preventive_records_from_health(
                 matched_master.item_name if matched_master else "unknown",
                 str(e),
             )
+            return False
+
+        if used_record_keys is not None:
+            used_record_keys.add(matched_key)
+
+        return True
 
     # --- Vaccines ---
     vaccine_str = health.get("vaccines", "")
     if vaccine_str:
-        # Multiple vaccines may be listed; update the first matching record
-        _try_update(["vaccin", "rabies", "dhppil", "leptospira"], vaccine_str)
+        import re
+
+        vaccine_keywords = [
+            "vaccin",
+            "rabies",
+            "dhpp",
+            "dhppi",
+            "dhppil",
+            "leptospira",
+            "bordetella",
+            "kennel cough",
+            "nobivac",
+            "ccov",
+            "coronavirus",
+            "feline core",
+            "fvrcp",
+        ]
+        vaccine_entries = [part.strip() for part in re.split(r"[,;\n]+", vaccine_str) if part.strip()]
+        if not vaccine_entries:
+            vaccine_entries = [vaccine_str]
+
+        used_record_keys: set[str] = set()
+        for entry in vaccine_entries:
+            _try_update(
+                vaccine_keywords,
+                entry,
+                used_record_keys=used_record_keys,
+            )
 
     # --- Deworming ---
     deworming_str = health.get("deworming", "")

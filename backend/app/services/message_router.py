@@ -173,16 +173,6 @@ from app.services.whatsapp_sender import (
 logger = logging.getLogger(__name__)
 
 
-def _should_use_agentic_onboarding() -> bool:
-    """
-    Onboarding is intentionally deterministic in this deployment.
-
-    Always returns False so routing never enters the agentic onboarding path,
-    regardless of environment flags.
-    """
-    return False
-
-
 def _cancel_document_window_timer(user_id) -> None:
     """Cancel the pending no-upload auto-finalization timer for a user."""
     user_key = str(user_id)
@@ -406,11 +396,7 @@ def _should_use_agentic_order() -> bool:
     has_key = bool(getattr(settings, "OPENAI_API_KEY", None))
     if flag.lower() != "true" or not has_key:
         return False
-    try:
-        from app.services.agentic_onboarding import is_openai_available
-        return is_openai_available()
-    except Exception:
-        return False
+    return True
 
 
 def _get_mobile(user) -> str:
@@ -554,19 +540,6 @@ async def route_message(db: Session, message_data: dict) -> None:
                             from_number=from_number,
                             deadline=user.doc_upload_deadline,
                         )
-                return
-
-            # --- Legacy agentic state migration ---
-            # Onboarding is deterministic-only. If any existing user is still in
-            # the legacy agentic state, move them back to deterministic onboarding.
-            if user.onboarding_state == "agentic_onboarding":
-                user.onboarding_state = "welcome"
-                db.commit()
-                await send_text_message(
-                    db,
-                    from_number,
-                    "Let's continue setup. What's your pet's name?",
-                )
                 return
 
             # --- All other onboarding states: block non-text ---

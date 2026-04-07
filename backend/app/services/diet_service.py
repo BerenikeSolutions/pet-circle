@@ -22,6 +22,30 @@ PACKAGED_KW = [
     "orijen", "acana", "farmina", "science diet", "pro plan",
 ]
 
+# Keywords that indicate homemade / home-cooked food
+HOMEMADE_KW = [
+    # Explicit markers
+    "home", "homemade", "home made", "home-made", "ghar ka",
+    # Grains & staples
+    "khichdi", "dal", "roti", "rice", "chapati", "paratha", "dalia",
+    "oats", "porridge", "upma", "idli", "dosa",
+    # Proteins
+    "chicken", "egg", "mutton", "fish", "paneer", "tofu",
+    "liver", "keema",
+    # Vegetables
+    "carrot", "pumpkin", "lauki", "bottle gourd", "sweet potato",
+    "potato", "beans", "spinach", "palak", "beetroot", "broccoli",
+    "zucchini", "cucumber", "cabbage", "cauliflower",
+    # Dairy
+    "curd", "yogurt", "yoghurt", "dahi", "buttermilk", "chaas",
+    "cottage cheese",
+    # Cooking methods (indicate homemade)
+    "boiled", "cooked", "steamed", "baked", "mashed", "grilled",
+    "sauteed", "stewed",
+    # Fruits (given as home treats)
+    "apple", "banana", "watermelon", "papaya", "mango",
+]
+
 # ── Frequency word → multiplier and period ──────────────────────────
 _FREQ_WORDS: dict[str, tuple[int, str]] = {
     "daily": (1, "day"),
@@ -266,6 +290,9 @@ def classify_food(label: str, food_type: str) -> tuple[str, str]:
     for kw in PACKAGED_KW:
         if kw in label_lower:
             return "packaged", "🥣"
+    for kw in HOMEMADE_KW:
+        if kw in label_lower:
+            return "homemade", "🥗"
     return food_type, "🥗" if food_type == "homemade" else "🥣"
 
 

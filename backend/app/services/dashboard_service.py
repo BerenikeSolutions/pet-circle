@@ -344,12 +344,15 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
 
     # --- Load preventive records with master item names ---
     # Also compute health score inline to avoid a duplicate DB query.
+    # Eager-load custom_preventive_item so the conflict-rows loop below
+    # doesn't fire N+1 lazy queries when rendering user-scoped custom items.
     preventive_data = (
         db.query(PreventiveRecord, PreventiveMaster)
         .join(
             PreventiveMaster,
             PreventiveRecord.preventive_master_id == PreventiveMaster.id,
         )
+        .options(selectinload(PreventiveRecord.custom_preventive_item))
         .filter(PreventiveRecord.pet_id == pet_id)
         .order_by(PreventiveRecord.next_due_date.asc())
         .all()
@@ -658,9 +661,20 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
             })
 
     # --- Dashboard Rebuild v2 enrichments ---
+    # Hard 15s timeout per enrichment. Dashboard loads were hanging when an
+    # upstream OpenAI call stalled; with this ceiling the tab always renders
+    # with a sensible default instead of timing out the whole request.
+    _ENRICHMENT_TIMEOUT_SECONDS = 15
+
     async def _safe_async_call(label: str, default, coro):
         try:
-            return await coro
+            return await asyncio.wait_for(coro, timeout=_ENRICHMENT_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            logger.error(
+                "%s timed out after %ds for pet=%s",
+                label, _ENRICHMENT_TIMEOUT_SECONDS, pet_id,
+            )
+            return default
         except Exception as exc:
             logger.error("%s failed for pet=%s: %s", label, pet_id, exc)
             return default

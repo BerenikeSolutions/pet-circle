@@ -72,20 +72,66 @@ _RE_MEDICATION_SIGNAL = re.compile(
     re.IGNORECASE,
 )
 
+# Known preventive medication brand names — used to:
+# 1. Reject them from being stored as Condition records
+# 2. Map them to their tracked preventive item category
+_KNOWN_MEDICATION_BRANDS: set[str] = {
+    # Tick & Flea
+    "simparica", "simparica trio", "nexgard", "nexgard spectra",
+    "bravecto", "frontline", "frontline plus", "fipronil",
+    "revolution", "revolution plus", "advocate", "credelio",
+    "seresto", "advantix", "advantage",
+    # Deworming
+    "milbemax", "drontal", "drontal plus", "panacur", "prazitel",
+    "prazitel plus", "verminator", "fenbendazole", "praziquantel",
+    "pyrantel", "ivermectin", "albendazole",
+}
+
+# Maps medication brand names to their tracked preventive item name.
+_MEDICATION_TO_PREVENTIVE_ITEM: dict[str, str] = {
+    # Tick & Flea
+    "simparica": "Tick/Flea",
+    "simparica trio": "Tick/Flea",
+    "nexgard": "Tick/Flea",
+    "nexgard spectra": "Tick/Flea",
+    "bravecto": "Tick/Flea",
+    "frontline": "Tick/Flea",
+    "frontline plus": "Tick/Flea",
+    "fipronil": "Tick/Flea",
+    "revolution": "Tick/Flea",
+    "revolution plus": "Tick/Flea",
+    "advocate": "Tick/Flea",
+    "credelio": "Tick/Flea",
+    "seresto": "Tick/Flea",
+    "advantix": "Tick/Flea",
+    "advantage": "Tick/Flea",
+    # Deworming
+    "milbemax": "Deworming",
+    "drontal": "Deworming",
+    "drontal plus": "Deworming",
+    "panacur": "Deworming",
+    "prazitel": "Deworming",
+    "prazitel plus": "Deworming",
+    "verminator": "Deworming",
+    "fenbendazole": "Deworming",
+    "praziquantel": "Deworming",
+    "pyrantel": "Deworming",
+    "ivermectin": "Deworming",
+    "albendazole": "Deworming",
+}
+
 
 def _is_likely_medication_name(name: str) -> bool:
     """Return True if *name* looks like a drug/product rather than a diagnosed condition.
 
-    Conservative check — only rejects names that contain explicit dosage units
-    (e.g. "50mg") or pharmaceutical delivery form words (e.g. "Capsule", "Spray").
-    This prevents GPT mis-classifications such as "Simparica 50mg" or
-    "Doxycycline Tablet" from being stored as Condition records.
-
-    False-positive risk is low because real veterinary condition names
-    ("Hip Dysplasia", "Otitis Externa", "Diabetes Mellitus") never contain
-    dosage units or delivery form words.
+    Checks both explicit dosage/form signals (e.g. "50mg", "Capsule") and known
+    preventive medication brand names (e.g. "Simparica", "NexGard").
+    This prevents GPT mis-classifications from being stored as Condition records.
     """
-    return bool(_RE_MEDICATION_SIGNAL.search(name))
+    if _RE_MEDICATION_SIGNAL.search(name):
+        return True
+    name_lower = name.strip().lower()
+    return name_lower in _KNOWN_MEDICATION_BRANDS
 
 
 def _extract_partial_json_string_value(raw_json: str, key: str) -> str | None:
@@ -935,6 +981,10 @@ def _validate_extraction_json(raw_json: str) -> tuple[list[dict], str | None, st
     )
     metadata["extra_vaccines"] = extra_vaccines
 
+    # Derive tracked preventive items from medication brands found in conditions.
+    raw_conditions = metadata.get("conditions") or []
+    validated = _derive_items_from_medication_brands(validated, raw_conditions)
+
     return validated, document_name, extracted_pet_name, metadata
 
 
@@ -1042,6 +1092,39 @@ def _derive_items_from_vaccination_details(
         existing_names.add(_normalize_preventive_item_name(mapped_item))
 
     return existing_items + derived, extra_vaccines
+
+
+def _derive_items_from_medication_brands(
+    existing_items: list[dict],
+    conditions: list[dict],
+) -> list[dict]:
+    """
+    Scan condition medications for known tick/flea and deworming brands
+    and add corresponding tracked preventive items if not already present.
+    """
+    existing_item_names = {
+        _normalize_preventive_item_name(item.get("item_name", ""))
+        for item in existing_items
+    }
+    extra_items: list[dict] = []
+
+    for condition in (conditions or []):
+        if not isinstance(condition, dict):
+            continue
+        for med in (condition.get("medications") or []):
+            if not isinstance(med, dict):
+                continue
+            med_name = (med.get("name") or "").strip().lower()
+            for brand, tracked_item in _MEDICATION_TO_PREVENTIVE_ITEM.items():
+                if brand in med_name and _normalize_preventive_item_name(tracked_item) not in existing_item_names:
+                    extra_items.append({
+                        "item_name": tracked_item,
+                        "last_done_date": med.get("start_date"),
+                    })
+                    existing_item_names.add(_normalize_preventive_item_name(tracked_item))
+                    break
+
+    return existing_items + extra_items
 
 
 def _normalize_extra_vaccine_name(value: str | None) -> str:

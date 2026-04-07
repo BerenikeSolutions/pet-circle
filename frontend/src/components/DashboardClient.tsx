@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CarePlanItem, DashboardData } from "@/lib/api";
-import { fetchDashboard, getNudges } from "@/lib/api";
+import { fetchDashboard } from "@/lib/api";
 import ErrorBoundary from "./ErrorBoundary";
 import CartView, { type CartItem } from "./CartView";
 import CheckoutView from "./cart/CheckoutView";
@@ -44,7 +44,6 @@ function DashboardInner({ token }: { token: string }) {
   const [cart, setCart] = useState<CartItem[]>([]);
   const [confirmedItems, setConfirmedItems] = useState<CartItem[]>([]);
   const [confirmedTotal, setConfirmedTotal] = useState(0);
-  const [nudgeCount, setNudgeCount] = useState(0);
   const [isOnline, setIsOnline] = useState(
     typeof navigator !== "undefined" ? navigator.onLine : true
   );
@@ -60,15 +59,6 @@ function DashboardInner({ token }: { token: string }) {
     };
   }, []);
 
-  const loadNudgeCount = useCallback(async () => {
-    try {
-      const nudges = await getNudges(token);
-      setNudgeCount(nudges.filter((item) => !item.dismissed).length);
-    } catch {
-      // Preserve last known count on transient nudge API failures.
-    }
-  }, [token]);
-
   const load = useCallback(async () => {
     try {
       setError("");
@@ -83,7 +73,6 @@ function DashboardInner({ token }: { token: string }) {
 
       const result = await fetchDashboard(token);
       setData(result.data);
-        void loadNudgeCount();
       setStale(result.stale);
       setCachedAt(result.cachedAt);
       if (!result.stale) {
@@ -101,7 +90,7 @@ function DashboardInner({ token }: { token: string }) {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [token, loadNudgeCount]);
+  }, [token]);
 
   useEffect(() => {
     load();
@@ -267,10 +256,8 @@ function DashboardInner({ token }: { token: string }) {
             onGoToReminders={() => setView("reminders")}
             onGoToTrends={() => setView("trends")}
             onGoToRecords={() => setView("records")}
-            onGoToNudges={() => setView("nudges")}
             onGoToCart={() => setView("cart")}
             onAddToCart={addToCart}
-            nudgeCount={nudgeCount}
           />
         );
       }
@@ -343,7 +330,6 @@ function DashboardInner({ token }: { token: string }) {
             token={token}
             onBack={() => {
               setView("dashboard");
-              void loadNudgeCount();
             }}
             onAddToCart={addToCart}
             cart={cart}
