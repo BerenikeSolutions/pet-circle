@@ -72,6 +72,16 @@ _NOISE_CHUNK_RE = re.compile(
     r"/\s*day|\bday\b|morning|afternoon|evening|night|treat|snack)",
     re.IGNORECASE,
 )
+_FREQUENCY_FRAGMENT_RE = re.compile(
+    r"("
+    r"\bx\s*\d+(?:\.\d+)?\s*/\s*(?:day|week|month)\b|"
+    r"\b\d+(?:\.\d+)?\s*x\s*/\s*(?:day|week|month)\b|"
+    r"\b(?:once|twice|thrice|\d+\s*times?)\s*(?:a|per)\s*(?:day|week|month)\b|"
+    r"\b(?:daily|weekly|monthly)\b|"
+    r"/\s*(?:day|week|month)\b"
+    r")",
+    re.IGNORECASE,
+)
 _MEASURE_TOKEN_RE = re.compile(r"\b\d+(?:\.\d+)?\s*(?:g|kg|ml|l|cups?|tbsp|tsp|x)\b", re.IGNORECASE)
 
 
@@ -94,6 +104,8 @@ def _extract_main_food_items(*texts: str, apply_noise_filter: bool = True) -> li
         normalized = text.replace("×", "x")
         chunks = _DIET_SPLIT_RE.split(normalized)
         for chunk in chunks:
+            # Strip frequency snippets so labels stay as clean food names.
+            chunk = _FREQUENCY_FRAGMENT_RE.sub("", chunk)
             chunk = _MEASURE_TOKEN_RE.sub("", chunk)
             chunk = re.sub(r"\b\d+\b", "", chunk)
             chunk = re.sub(r"\s+", " ", chunk).strip(" .,-")

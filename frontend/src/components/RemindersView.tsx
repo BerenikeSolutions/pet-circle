@@ -191,8 +191,12 @@ function toReminderItems(records: DashboardData['preventive_records']): Reminder
     });
 }
 
-function mapStatusFromNext(nextISO: string | null, fallback: string): string {
-  if (!nextISO) return fallback;
+function mapStatusFromNext(nextISO: string | null, fallback: string, lastISO?: string): string {
+  if (!nextISO) {
+    // Keep missing last+next aligned with Care Plan "not started" urgency.
+    if (!lastISO) return 'overdue';
+    return fallback;
+  }
   const next = new Date(nextISO);
   if (Number.isNaN(next.getTime())) return fallback;
   const now = new Date();
@@ -354,7 +358,7 @@ export default function RemindersView({ data, token, onBack, onDashboardDataUpda
             freqLabel: recurrenceLabel(nextDays),
             lastISO: editVals.lastISO || entry.lastISO,
             nextISO,
-            status: mapStatusFromNext(nextISO, entry.status || 'upcoming'),
+            status: mapStatusFromNext(nextISO, entry.status || 'upcoming', editVals.lastISO || entry.lastISO),
             medicineName: selectedMedicine || entry.medicineName,
           }
     );
@@ -367,7 +371,7 @@ export default function RemindersView({ data, token, onBack, onDashboardDataUpda
           ...r,
           last_done_date: editVals.lastISO || r.last_done_date,
           next_due_date: nextISO,
-          status: mapStatusFromNext(nextISO, r.status || 'upcoming'),
+          status: mapStatusFromNext(nextISO, r.status || 'upcoming', editVals.lastISO || formatISO(r.last_done_date)),
           custom_recurrence_days: nextDays !== r.recurrence_days ? nextDays : r.custom_recurrence_days,
           medicine_name: selectedMedicine || r.medicine_name,
         };
@@ -499,7 +503,7 @@ export default function RemindersView({ data, token, onBack, onDashboardDataUpda
               </div>
 
               {secItems.map((item) => {
-                const effectiveStatus = mapStatusFromNext(item.nextISO, item.status || 'upcoming');
+                const effectiveStatus = mapStatusFromNext(item.nextISO, item.status || 'upcoming', item.lastISO);
                 const statusDot = getStatusDot(effectiveStatus);
                 return (
                   <div

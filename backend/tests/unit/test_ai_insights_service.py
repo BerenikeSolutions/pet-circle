@@ -86,6 +86,22 @@ def test_format_found_diet_summary_without_supplements_shows_no_supplements():
     assert summary == "Royal Canin Adult kibble. No supplements."
 
 
+def test_format_found_diet_summary_strips_weekly_frequency_from_food_label():
+    foods = [SimpleNamespace(type="homemade", label="egg khichdi / week", detail=None)]
+
+    summary = _format_found_diet_summary(foods, [])
+
+    assert summary == "Egg khichdi. No supplements."
+
+
+def test_format_found_diet_summary_preserves_brand_x_token():
+    foods = [SimpleNamespace(type="packaged", label="Brand X kibble", detail=None)]
+
+    summary = _format_found_diet_summary(foods, [])
+
+    assert summary == "Brand X kibble. No supplements."
+
+
 class _InsightQuery:
     def filter(self, *args, **kwargs):
         return self

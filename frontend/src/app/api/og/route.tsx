@@ -26,7 +26,9 @@ const API_BASE =
   'http://localhost:8000'
 
 /** Status label → short display text */
-function statusLabel(status: string): string {
+function statusLabel(status: string, lastDone?: string | null, nextDue?: string | null): string {
+  // Align with dashboard reminders/care-plan behavior for missing history.
+  if (!lastDone && !nextDue) return '✗ Overdue'
   switch (status) {
     case 'up_to_date': return '✓ Up to date'
     case 'upcoming':   return '⚠ Due soon'
@@ -72,21 +74,21 @@ export async function GET(req: NextRequest) {
   // HEALTH — vaccines, deworming, flea/tick from health circle
   const healthRecords = records.filter((r) => r.circle === 'health')
   const healthLines = healthRecords.slice(0, 3).map(
-    (r) => `${r.item_name}: ${statusLabel(r.status)}`
+    (r) => `${r.item_name}: ${statusLabel(r.status, r.last_done_date, r.next_due_date)}`
   )
   const healthStr = summarise(healthLines, 3, 'Not recorded')
 
   // NUTRITION — records in the nutrition circle
   const nutritionRecords = records.filter((r) => r.circle === 'nutrition')
   const nutritionLines = nutritionRecords.slice(0, 2).map(
-    (r) => `${r.item_name}: ${statusLabel(r.status)}`
+    (r) => `${r.item_name}: ${statusLabel(r.status, r.last_done_date, r.next_due_date)}`
   )
   const nutritionStr = summarise(nutritionLines, 2, 'Not recorded')
 
   // HYGIENE — records in the hygiene circle
   const hygieneRecords = records.filter((r) => r.circle === 'hygiene')
   const hygieneLines = hygieneRecords.slice(0, 2).map(
-    (r) => `${r.item_name}: ${statusLabel(r.status)}`
+    (r) => `${r.item_name}: ${statusLabel(r.status, r.last_done_date, r.next_due_date)}`
   )
   const hygieneStr = summarise(hygieneLines, 2, 'Not recorded')
 

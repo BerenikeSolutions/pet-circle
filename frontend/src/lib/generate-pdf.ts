@@ -561,6 +561,12 @@ export function generateHealthPdf(data: DashboardData): void {
 
   builder.sectionHeading('Preventive Care');
 
+  const displayStatus = (rec: PreventiveRecord): string => {
+    // Align with dashboard reminders/care-plan behavior for missing history.
+    if (!rec.last_done_date && !rec.next_due_date) return 'overdue';
+    return rec.status;
+  };
+
   const statusColor = (s: string) =>
     s === 'overdue' ? RED : s === 'upcoming' ? AMBER : s === 'done' ? GREEN : GREY_LIGHT;
   const statusLabel = (s: string) =>
@@ -577,8 +583,9 @@ export function generateHealthPdf(data: DashboardData): void {
 
     for (const rec of group) {
       builder.ensureSpace(10);
-      const sc = statusColor(rec.status);
-      const sl = statusLabel(rec.status);
+      const normalized = displayStatus(rec);
+      const sc = statusColor(normalized);
+      const sl = statusLabel(normalized);
 
       setTextColor(doc, GREY_DARK);
       doc.setFont('helvetica', 'bold');
