@@ -112,6 +112,33 @@ _MEDICATION_TO_PREVENTIVE_CATEGORIES: dict[str, frozenset[str]] = {
 _KNOWN_MEDICATION_BRANDS: set[str] = set(_MEDICATION_TO_PREVENTIVE_CATEGORIES.keys())
 
 
+def _build_medicine_coverage_prompt() -> str:
+    """Build a MEDICINE COVERAGE GUIDE prompt snippet from _MEDICATION_TO_PREVENTIVE_CATEGORIES.
+
+    Single source of truth — adding a brand to the dict automatically updates
+    both GPT prompts (onboarding + document extraction) and the fallback lookup.
+    """
+    both: list[str] = []
+    flea_only: list[str] = []
+    deworm_only: list[str] = []
+    for brand, cats in _MEDICATION_TO_PREVENTIVE_CATEGORIES.items():
+        title = brand.title()
+        if "flea_tick" in cats and "deworming" in cats:
+            both.append(title)
+        elif "flea_tick" in cats:
+            flea_only.append(title)
+        elif "deworming" in cats:
+            deworm_only.append(title)
+    lines = [
+        "- MEDICINE COVERAGE GUIDE (use this to set prevention_targets correctly):",
+        f"  BOTH deworming + flea_tick: {', '.join(both)}",
+        f"  flea_tick only: {', '.join(flea_only)}",
+        f"  deworming only: {', '.join(deworm_only)}",
+        "  For any medicine NOT in this list, use your medical knowledge to determine the correct targets.",
+    ]
+    return "\n".join(lines)
+
+
 def _get_preventive_categories_for_medicine(medication_name: str | None) -> set[str]:
     """Return compatible preventive categories for a medicine brand mention.
 
@@ -760,10 +787,7 @@ EXTRACTION_SYSTEM_PROMPT = (
     "- If a document lists preventive medicines without a diagnosis, keep conditions: [] and populate preventive_medications[].\n"
     "- For each preventive_medications entry, always set prevention_targets explicitly using one or both: deworming, flea_tick.\n"
     "- If the medicine coverage text indicates both internal parasites (worms/deworming) and external parasite control (flea/tick), include BOTH targets.\n"
-    "- MEDICINE COVERAGE GUIDE (use this to set prevention_targets correctly):\n"
-    "  BOTH deworming + flea_tick: Simparica, Simparica Trio, NexGard Spectra, Advocate, Revolution Plus, Broadline\n"
-    "  flea_tick only: NexGard, Bravecto, Frontline, Frontline Plus, Credelio, Seresto, Advantix, Advantage, Fipronil\n"
-    "  deworming only: Milbemax, Drontal, Drontal Plus, Panacur, Prazitel, Verminator, Fenbendazole, Praziquantel, Pyrantel, Ivermectin, Albendazole\n"
+    f"{_build_medicine_coverage_prompt()}\n"
     "- Drugs prescribed to treat a condition belong in that condition's medications[] array, not as a separate condition.\n"
     "- For contacts: extract vet/specialist contact details when explicitly present in the document.\n"
     "- If any field is missing in the document, use null for that field.\n"

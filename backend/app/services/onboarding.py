@@ -1949,8 +1949,11 @@ async def _parse_preventive_care(text: str) -> dict:
         blood_test (str|None)
         missing (list[str])         — which of the 4 categories were not mentioned
     """
+    from app.services.gpt_extraction import _build_medicine_coverage_prompt
+
     client = _get_openai_onboarding_client()
     today_str = date.today().isoformat()
+    medicine_guide = _build_medicine_coverage_prompt()
     prompt = (
         f"Today's date is {today_str}. "
         "Extract preventive care information from this message about a pet. "
@@ -1979,10 +1982,7 @@ async def _parse_preventive_care(text: str) -> dict:
         "'prevention_targets' keys.\n"
         "- prevention_targets must be an array containing one or both of: 'deworming', "
         "'flea_tick', based on what the medicine covers.\n"
-        "- MEDICINE COVERAGE GUIDE (use this to set prevention_targets correctly):\n"
-        "  BOTH deworming + flea_tick: Simparica, Simparica Trio, NexGard Spectra, Advocate, Revolution Plus, Broadline\n"
-        "  flea_tick only: NexGard, Bravecto, Frontline, Frontline Plus, Credelio, Seresto, Advantix, Advantage, Fipronil\n"
-        "  deworming only: Milbemax, Drontal, Drontal Plus, Panacur, Prazitel, Verminator, Fenbendazole, Praziquantel, Pyrantel, Ivermectin, Albendazole\n"
+        f"{medicine_guide}\n"
         "- If no medicine is provided, use an empty prevention_targets array.\n\n"
         'Return ONLY valid JSON, no markdown: '
         '{"vaccines": "date or timeframe"|null, '
