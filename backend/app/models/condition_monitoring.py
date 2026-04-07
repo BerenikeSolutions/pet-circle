@@ -30,6 +30,7 @@ class ConditionMonitoring(Base):
     frequency = Column(String(100), nullable=True)
     next_due_date = Column(Date, nullable=True)  # When next check is due
     last_done_date = Column(Date, nullable=True)  # When last performed
+    result_summary = Column(String(200), nullable=True)  # Short finding from last check
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

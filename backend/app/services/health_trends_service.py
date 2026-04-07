@@ -129,19 +129,19 @@ def _build_weight_signal(weights_desc: list[WeightHistory]) -> dict[str, Any] | 
         return None
 
     latest_five_desc = weights_desc[:5]
-    points = [
-        {"date": row.recorded_at.isoformat(), "value": float(row.weight)}
-        for row in sorted(latest_five_desc, key=lambda r: r.recorded_at)
-    ]
-    if not points:
+    sorted_rows = sorted(latest_five_desc, key=lambda r: r.recorded_at)
+    if not sorted_rows:
         return None
 
-    start = points[0]
-    end = points[-1]
-    delta = end["value"] - start["value"]
-    days = max((date.fromisoformat(end["date"]) - date.fromisoformat(start["date"])).days, 1)
+    start_row = sorted_rows[0]
+    end_row = sorted_rows[-1]
+    start_val = float(start_row.weight)
+    end_val = float(end_row.weight)
+    delta = end_val - start_val
+    days = max((end_row.recorded_at - start_row.recorded_at).days, 1)
     months = max(round(days / 30), 1)
 
+    alert = abs(delta) > 0.2
     if delta > 0.2:
         direction = "up"
         recommendation = "Weight has trended up. Ask your vet for a measured meal and walk plan over the next 8-12 weeks."
@@ -152,12 +152,25 @@ def _build_weight_signal(weights_desc: list[WeightHistory]) -> dict[str, Any] | 
         direction = "stable"
         recommendation = "Weight is stable. Continue the same routine and re-check weight at the next preventive visit."
 
-    headline = f"{delta:+.1f} kg over {months} month(s). BCS trending {direction}/9."
-    return {
+    # BCS from latest weight entry if available
+    bcs = end_row.bcs
+    bcs_str = f"{bcs}/9" if bcs else None
+    headline = f"{delta:+.1f} kg over {months} month(s)."
+    if bcs_str:
+        headline += f" BCS trending {bcs_str}."
+
+    points = [
+        {"date": row.recorded_at.isoformat(), "value": float(row.weight), "alert": (i == len(sorted_rows) - 1 and alert)}
+        for i, row in enumerate(sorted_rows)
+    ]
+    result: dict[str, Any] = {
         "points": points,
         "headline": headline,
         "recommendation": recommendation,
     }
+    if bcs_str:
+        result["bcs"] = bcs_str
+    return result
 
 
 def _build_metabolic(results: list[DiagnosticTestResult]) -> dict[str, Any] | None:
@@ -189,12 +202,13 @@ def _build_metabolic(results: list[DiagnosticTestResult]) -> dict[str, Any] | No
     stats = []
     for marker in _METABOLIC_MARKERS:
         row = marker_rows[marker]
-        stats.append(
-            {
-                "value": _format_value(row),
-                "label": row.parameter_name,
-            }
-        )
+        stat: dict[str, Any] = {
+            "value": _format_value(row),
+            "label": row.parameter_name,
+        }
+        if row.unit:
+            stat["unit"] = row.unit
+        stats.append(stat)
     return {
         "headline": "Metabolic and organ markers are within reference range.",
         "sub": "Keep the current routine and monitor during regular checkups.",
@@ -327,9 +341,21 @@ def _build_deworming_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster
             }
         )
 
+    done_count = sum(1 for n in nodes if n["state"] == "done")
+    missed_count = sum(1 for n in nodes if n["state"] == "missed")
+    has_now = any(n["state"] == "now" for n in nodes)
+
+    if missed_count > 0 or has_now:
+        footer = {"text": "🚨 Administer immediately", "color": "#b52020", "bg": "var(--tr)"}
+    elif done_count == len(nodes):
+        footer = {"text": "✓ Deworming on track", "color": "green", "bg": "#E8FFF1"}
+    else:
+        footer = {"text": "Review deworming schedule with your vet.", "color": "amber", "bg": "#FFF6E6"}
+
     return {
         "headline": "Deworming cadence",
         "nodes": nodes,
+        "footer": footer,
     }
 
 
@@ -337,17 +363,19 @@ def _build_condition_timeline(condition: Condition) -> list[dict[str, str | None
     """Build condition timeline nodes used in ask-vet cards."""
     timeline: list[dict[str, str | None]] = []
     if condition.diagnosed_at:
-        timeline.append({"label": "Diagnosed", "date": condition.diagnosed_at.isoformat(), "icon": "🩺"})
+        timeline.append({"label": "Diagnosed", "date": condition.diagnosed_at.isoformat(), "icon": "🩺", "finding": condition.condition_type})
 
     for med in sorted(condition.medications, key=lambda row: row.started_at or date.min):
         if med.started_at:
-            timeline.append({"label": f"{med.name} started", "date": med.started_at.isoformat(), "icon": "💊"})
+            finding = f"{med.dose} {med.frequency}".strip() if med.dose or med.frequency else None
+            timeline.append({"label": f"{med.name} started", "date": med.started_at.isoformat(), "icon": "💊", "finding": finding})
 
     for monitor in sorted(condition.monitoring, key=lambda row: row.last_done_date or row.next_due_date or date.min):
         if monitor.last_done_date:
-            timeline.append({"label": f"{monitor.name} done", "date": monitor.last_done_date.isoformat(), "icon": "✅"})
+            finding = monitor.result_summary or None
+            timeline.append({"label": f"{monitor.name} done", "date": monitor.last_done_date.isoformat(), "icon": "✅", "finding": finding})
         elif monitor.next_due_date:
-            timeline.append({"label": f"{monitor.name} due", "date": monitor.next_due_date.isoformat(), "icon": "📅"})
+            timeline.append({"label": f"{monitor.name} due", "date": monitor.next_due_date.isoformat(), "icon": "📅", "finding": None})
 
     timeline = sorted(timeline, key=lambda item: item.get("date") or "", reverse=True)
     return timeline[:5]

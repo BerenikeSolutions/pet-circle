@@ -196,6 +196,11 @@ export default function AskVetConditionCard({
                       {node.icon}
                     </div>
                     <div style={{ fontSize: 9, fontWeight: 600, color: "var(--t2)", textAlign: "center" }}>{node.label}</div>
+                    {node.finding && (
+                      <div style={{ fontSize: 8, fontWeight: 500, color: color, textAlign: "center", lineHeight: 1.2, maxWidth: 56, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {node.finding}
+                      </div>
+                    )}
                     <div style={{ fontSize: 8, color: "var(--t3)", textAlign: "center", lineHeight: 1.3 }}>
                       {node.date ? formatDisplayDate(node.date) : "Date unavailable"}
                     </div>

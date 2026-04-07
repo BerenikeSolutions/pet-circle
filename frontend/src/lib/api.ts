@@ -337,6 +337,7 @@ export interface AskVetTimelineNode {
   label: string;
   date: string | null;
   icon: string;
+  finding?: string;
 }
 
 export interface AskVetCondition {
@@ -372,17 +373,20 @@ export interface BloodPanelData {
 export interface WeightSignalPoint {
   date: string;
   value: number;
+  alert?: boolean;
 }
 
 export interface WeightSignalData {
   points: WeightSignalPoint[];
   headline: string;
   recommendation: string;
+  bcs?: string;
 }
 
 export interface MetabolicStat {
   value: string;
   label: string;
+  unit?: string;
 }
 
 export interface MetabolicData {
@@ -442,6 +446,7 @@ export interface DewormingNode {
 export interface DewormingCadence {
   headline: string;
   nodes: DewormingNode[];
+  footer?: CadenceFooter;
 }
 
 export interface CadenceData {

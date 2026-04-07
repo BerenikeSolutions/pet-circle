@@ -27,7 +27,8 @@ export default function MetabolicCard({ data }: MetabolicCardProps) {
             }}
           >
             <div style={{ fontSize: 20, fontWeight: 700, color: "var(--green)" }}>{stat.value}</div>
-            <div style={{ fontSize: 10, color: "#2e7d4a", fontWeight: 500, marginTop: 4 }}>{stat.label}</div>
+            {stat.unit && <div style={{ fontSize: 9, color: "#4a9a63", fontWeight: 400, marginTop: 1 }}>{stat.unit}</div>}
+            <div style={{ fontSize: 10, color: "#2e7d4a", fontWeight: 500, marginTop: stat.unit ? 2 : 4 }}>{stat.label}</div>
           </div>
         ))}
       </div>

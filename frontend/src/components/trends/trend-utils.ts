@@ -90,6 +90,13 @@ export function bloodPanelRowOrder(rows: BloodPanelRow[]): BloodPanelRow[] {
   };
 
   return [...rows].sort((left, right) => {
+    // When panel has >8 rows, sort abnormal results first for scanning efficiency
+    if (rows.length > 8) {
+      const leftAbnormal = left.status.toLowerCase() !== "normal" ? 0 : 1;
+      const rightAbnormal = right.status.toLowerCase() !== "normal" ? 0 : 1;
+      if (leftAbnormal !== rightAbnormal) return leftAbnormal - rightAbnormal;
+    }
+
     const leftGroup = groupOrder.find(([pattern]) => pattern.test(left.marker))?.[1] ?? 99;
     const rightGroup = groupOrder.find(([pattern]) => pattern.test(right.marker))?.[1] ?? 99;
     if (leftGroup !== rightGroup) return leftGroup - rightGroup;

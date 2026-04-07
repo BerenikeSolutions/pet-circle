@@ -76,7 +76,9 @@ export default function CareCadenceSection({ data }: CareCadenceSectionProps) {
           <div style={{ marginTop: 12 }}>
             <DewormingCadence data={data.deworming} />
           </div>
-          {footerPill("🚨 Administer immediately", "var(--tr)", "#b52020")}
+          {data.deworming.footer
+            ? footerPill(data.deworming.footer.text, data.deworming.footer.bg, data.deworming.footer.color)
+            : footerPill("🚨 Administer immediately", "var(--tr)", "#b52020")}
         </div>
       )}
     </section>

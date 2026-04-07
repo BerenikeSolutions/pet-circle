@@ -51,8 +51,14 @@ export default function BloodPanelTable({ data }: BloodPanelTableProps) {
             const outOfRange = isOutOfRange(row.status);
             const accent = outOfRange ? "var(--red)" : "var(--green)";
             return (
-              <tr key={`${row.marker}-${index}`} style={{ borderBottom: index < rows.length - 1 ? "1px solid var(--border)" : "none" }}>
-                <td style={{ padding: "10px 0", fontSize: 14, color: "var(--t1)" }}>{row.marker}</td>
+              <tr
+                key={`${row.marker}-${index}`}
+                style={{
+                  borderBottom: index < rows.length - 1 ? "1px solid var(--border)" : "none",
+                  ...(outOfRange ? { background: "rgba(255, 59, 48, 0.06)" } : {}),
+                }}
+              >
+                <td style={{ padding: "10px 0", fontSize: 14, fontWeight: outOfRange ? 600 : 400, color: "var(--t1)" }}>{row.marker}</td>
                 <td style={{ padding: "10px 0", fontSize: 11, color: "var(--t3)" }}>{row.range}</td>
                 <td style={{ padding: "10px 0", fontSize: 15, fontWeight: 600, textAlign: "right", color: accent }}>{row.value}</td>
                 <td style={{ padding: "10px 0 10px 8px", fontSize: 12, fontWeight: 600, textAlign: "right", color: accent }}>{row.status}</td>

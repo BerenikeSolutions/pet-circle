@@ -21,8 +21,8 @@ export default function SignalsSection({ data }: SignalsSectionProps) {
   return (
     <section>
       {data.blood_panel && <BloodPanelTable data={data.blood_panel} />}
-      {data.metabolic && <MetabolicCard data={data.metabolic} />}
       {data.weight && <WeightTrendCard data={data.weight} />}
+      {data.metabolic && <MetabolicCard data={data.metabolic} />}
     </section>
   );
 }

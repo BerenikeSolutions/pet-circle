@@ -13,7 +13,7 @@ Constraints:
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, Date, DateTime, ForeignKey, Numeric, String
+from sqlalchemy import Column, Date, DateTime, ForeignKey, Numeric, SmallInteger, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -34,6 +34,7 @@ class WeightHistory(Base):
     pet_id = Column(UUID(as_uuid=True), ForeignKey("pets.id", ondelete="CASCADE"), index=True, nullable=False)
     weight = Column(Numeric(5, 2), nullable=False)  # kg, max 999.99
     recorded_at = Column(Date, nullable=False)
+    bcs = Column(SmallInteger, nullable=True)  # Body Condition Score 1-9
     note = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
