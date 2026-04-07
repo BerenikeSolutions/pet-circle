@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 from app.services import gpt_extraction
 
@@ -143,30 +144,112 @@ def test_validate_extraction_skips_future_last_done_dates() -> None:
 def test_get_preventive_categories_for_medicine_supports_single_and_dual_use() -> None:
     assert gpt_extraction._get_preventive_categories_for_medicine("Drontal Plus") == {"deworming"}
     assert gpt_extraction._get_preventive_categories_for_medicine("Frontline Spot-On") == {"flea_tick"}
-    assert gpt_extraction._get_preventive_categories_for_medicine("Simparica Trio chew") == {
+    assert gpt_extraction._get_preventive_categories_for_medicine("NexGard Spectra chew") == {
         "deworming",
         "flea_tick",
     }
 
 
 def test_derive_items_from_medication_brands_expands_dual_use_medicine() -> None:
-    conditions = [
+    preventive_medications = [
         {
-            "medications": [
-                {
-                    "name": "Simparica Trio",
-                    "start_date": "2026-01-05",
-                }
-            ]
+            "name": "Simparica",
+            "start_date": "2026-01-05",
+            "prevention_targets": ["deworming", "flea_tick"],
         }
     ]
 
-    derived = gpt_extraction._derive_items_from_medication_brands([], conditions)
+    derived = gpt_extraction._derive_items_from_medication_brands([], [], preventive_medications)
     names = {item["item_name"] for item in derived}
 
     assert names == {"Deworming", "Tick/Flea"}
 
 
+def test_get_preventive_categories_for_medicine_has_no_simparica_hardcode() -> None:
+    assert gpt_extraction._get_preventive_categories_for_medicine("Simparica") == set()
+
+
+def test_validate_extraction_uses_preventive_medications_targets_for_simparica() -> None:
+    raw_json = json.dumps(
+        {
+            "document_name": "Preventive Medication Record",
+            "document_type": "pet_medical",
+            "document_category": "Prescription",
+            "items": [],
+            "conditions": [],
+            "preventive_medications": [
+                {
+                    "name": "Simparica",
+                    "start_date": "2026-01-05",
+                    "prevention_targets": ["flea_tick", "deworming"],
+                }
+            ],
+        }
+    )
+
+    items, _, _, metadata = gpt_extraction._validate_extraction_json(raw_json)
+
+    assert {item["item_name"] for item in items} == {"Deworming", "Tick/Flea"}
+    assert len(metadata["preventive_medications"]) == 1
+
+
+def test_validate_extraction_skips_future_preventive_medication_dates() -> None:
+    future_date = (datetime.utcnow().date() + timedelta(days=10)).isoformat()
+    raw_json = json.dumps(
+        {
+            "document_name": "Preventive Medication Record",
+            "document_type": "pet_medical",
+            "document_category": "Prescription",
+            "items": [],
+            "conditions": [],
+            "preventive_medications": [
+                {
+                    "name": "Simparica",
+                    "start_date": future_date,
+                    "prevention_targets": ["flea_tick", "deworming"],
+                }
+            ],
+        }
+    )
+
+    items, _, _, _ = gpt_extraction._validate_extraction_json(raw_json)
+
+    assert items == []
+
+
 def test_get_preventive_categories_for_medicine_ignores_non_string_input() -> None:
     assert gpt_extraction._get_preventive_categories_for_medicine(None) == set()
     assert gpt_extraction._get_preventive_categories_for_medicine(123) == set()
+
+
+def test_should_include_puppy_series_for_pet_uses_age_and_species() -> None:
+    today = datetime.utcnow().date()
+
+    young_dog = SimpleNamespace(species="dog", dob=today - timedelta(days=120))
+    adult_dog = SimpleNamespace(species="dog", dob=today - timedelta(days=800))
+    dog_without_dob = SimpleNamespace(species="dog", dob=None)
+    cat = SimpleNamespace(species="cat", dob=today - timedelta(days=120))
+    future_dob_dog = SimpleNamespace(species="dog", dob=today + timedelta(days=10))
+
+    assert gpt_extraction._should_include_puppy_series_for_pet(young_dog) is True
+    assert gpt_extraction._should_include_puppy_series_for_pet(adult_dog) is False
+    assert gpt_extraction._should_include_puppy_series_for_pet(dog_without_dob) is False
+    assert gpt_extraction._should_include_puppy_series_for_pet(cat) is False
+    assert gpt_extraction._should_include_puppy_series_for_pet(future_dob_dog) is False
+
+
+def test_filter_non_applicable_puppy_series_removes_puppy_dose_rows_for_adult_flow() -> None:
+    masters = [
+        SimpleNamespace(item_name="DHPPi", recurrence_days=365),
+        SimpleNamespace(item_name="Kennel Cough (Nobivac KC)", recurrence_days=365),
+        SimpleNamespace(item_name="DHPPi 1st Dose", recurrence_days=36500),
+        SimpleNamespace(item_name="Puppy Booster", recurrence_days=36500),
+    ]
+
+    filtered = gpt_extraction._filter_non_applicable_puppy_series(
+        masters,
+        include_puppy_series=False,
+    )
+
+    names = [m.item_name for m in filtered]
+    assert names == ["DHPPi", "Kennel Cough (Nobivac KC)"]

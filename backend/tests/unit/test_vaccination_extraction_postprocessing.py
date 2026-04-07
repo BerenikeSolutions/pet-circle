@@ -102,6 +102,26 @@ def test_dog_vaccine_aliases_map_to_required_options() -> None:
     assert metadata["extra_vaccines"] == []
 
 
+def test_combined_vaccine_detail_maps_multiple_vaccines() -> None:
+    raw = json.dumps(
+        {
+            "document_name": "Dog Vaccination Card",
+            "document_type": "pet_medical",
+            "document_category": "Vaccination",
+            "items": [],
+            "vaccination_details": [
+                {"vaccine_name": "Nobivac DHPPi + Nobivac KC + CCoV", "date": "01/04/2025"},
+            ],
+        }
+    )
+
+    items, _doc_name, _pet_name, metadata = _validate_extraction_json(raw)
+
+    names = {item["item_name"] for item in items}
+    assert names == {"DHPPi", "Kennel Cough (Nobivac KC)", "Canine Coronavirus (CCoV)"}
+    assert metadata["extra_vaccines"] == []
+
+
 def test_pet_name_matching_accepts_alias_style_extraction() -> None:
     assert _pet_name_matches_document_name("VEER / ZAYN", "Zayn") is True
 

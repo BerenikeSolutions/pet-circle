@@ -39,6 +39,7 @@ export interface PreventiveRecord {
   custom_recurrence_days: number | null;
   medicine_dependent?: boolean;
   medicine_name?: string | null;
+  created_at?: string | null;
   is_core?: boolean;
 }
 

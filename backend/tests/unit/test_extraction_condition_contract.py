@@ -13,7 +13,10 @@ import json
 import pytest
 
 from app.services import gpt_extraction
-from app.services.gpt_extraction import _is_likely_medication_name
+from app.services.gpt_extraction import (
+    _condition_matches_extracted_medication_name,
+    _is_likely_medication_name,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -224,3 +227,30 @@ class TestValidateExtractionJsonConditionsPassthrough:
 
         # Non-list is not stored — defaults to []
         assert metadata["conditions"] == []
+
+
+def test_condition_matches_extracted_medication_name_from_condition_meds() -> None:
+    raw_condition = {
+        "condition_name": "Simparica",
+        "medications": [{"name": "Simparica"}],
+    }
+
+    assert _condition_matches_extracted_medication_name(
+        raw_condition["condition_name"],
+        raw_condition,
+        [],
+    ) is True
+
+
+def test_condition_matches_extracted_medication_name_from_preventive_meds() -> None:
+    raw_condition = {
+        "condition_name": "Simparica",
+        "medications": [],
+    }
+    preventive_meds = [{"name": "Simparica"}]
+
+    assert _condition_matches_extracted_medication_name(
+        raw_condition["condition_name"],
+        raw_condition,
+        preventive_meds,
+    ) is True

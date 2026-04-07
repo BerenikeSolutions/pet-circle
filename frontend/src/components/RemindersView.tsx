@@ -116,9 +116,58 @@ function displayItemName(itemName: string): string {
   return itemName;
 }
 
+function dateRank(isoDate: string | null | undefined): number {
+  if (!isoDate) return Number.MIN_SAFE_INTEGER;
+  const ts = new Date(isoDate).getTime();
+  return Number.isNaN(ts) ? Number.MIN_SAFE_INTEGER : ts;
+}
+
 function toReminderItems(records: DashboardData['preventive_records']): ReminderItem[] {
-  return (records || [])
-    .filter((r) => !!r.is_core)
+  const coreRecords = (records || []).filter((r) => !!r.is_core);
+
+  // The backend update endpoints target a preventive item by name and operate
+  // on the latest active record. Mirror that here so saved values read back
+  // to the exact row users edit.
+  const latestByItem = new Map<string, DashboardData['preventive_records'][number]>();
+  for (const record of coreRecords) {
+    const key = (record.item_name || '').trim().toLowerCase();
+    if (!key) continue;
+
+    const existing = latestByItem.get(key);
+    if (!existing) {
+      latestByItem.set(key, record);
+      continue;
+    }
+
+    const recordLast = dateRank(record.last_done_date);
+    const existingLast = dateRank(existing.last_done_date);
+    if (recordLast > existingLast) {
+      latestByItem.set(key, record);
+      continue;
+    }
+    if (recordLast < existingLast) {
+      continue;
+    }
+
+    const recordNext = dateRank(record.next_due_date);
+    const existingNext = dateRank(existing.next_due_date);
+    if (recordNext > existingNext) {
+      latestByItem.set(key, record);
+      continue;
+    }
+    if (recordNext < existingNext) {
+      continue;
+    }
+
+    const recordCreated = dateRank(record.created_at);
+    const existingCreated = dateRank(existing.created_at);
+    if (recordCreated > existingCreated) {
+      latestByItem.set(key, record);
+      continue;
+    }
+  }
+
+  return Array.from(latestByItem.values())
     .sort((a, b) => {
       const ad = a.next_due_date ? new Date(a.next_due_date).getTime() : Number.MAX_SAFE_INTEGER;
       const bd = b.next_due_date ? new Date(b.next_due_date).getTime() : Number.MAX_SAFE_INTEGER;

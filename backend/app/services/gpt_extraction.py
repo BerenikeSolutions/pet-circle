@@ -76,8 +76,6 @@ _RE_MEDICATION_SIGNAL = re.compile(
 # Some medicines can reasonably be used for both deworming and flea/tick.
 _MEDICATION_TO_PREVENTIVE_CATEGORIES: dict[str, frozenset[str]] = {
     # Tick & Flea
-    "simparica": frozenset({"flea_tick"}),
-    "simparica trio": frozenset({"flea_tick", "deworming"}),
     "nexgard": frozenset({"flea_tick"}),
     "nexgard spectra": frozenset({"flea_tick", "deworming"}),
     "bravecto": frozenset({"flea_tick"}),
@@ -140,6 +138,40 @@ def _is_likely_medication_name(name: str) -> bool:
     if _RE_MEDICATION_SIGNAL.search(name):
         return True
     return bool(_get_preventive_categories_for_medicine(name))
+
+
+def _normalize_text_token(value: str | None) -> str:
+    """Normalize free text for resilient equality checks."""
+    token = (value or "").strip().lower()
+    token = re.sub(r"\s+", " ", token)
+    return token
+
+
+def _condition_matches_extracted_medication_name(
+    condition_name: str,
+    raw_condition: dict,
+    preventive_medications: list[dict],
+) -> bool:
+    """Return True when condition_name matches any extracted medication name.
+
+    This catches GPT misclassification where a medication gets emitted as a
+    condition name, without relying on brand-specific hardcoding.
+    """
+    condition_token = _normalize_text_token(condition_name)
+    if not condition_token:
+        return False
+
+    names: set[str] = set()
+    for med in (raw_condition.get("medications") or []):
+        if isinstance(med, dict):
+            names.add(_normalize_text_token(str(med.get("name") or "")))
+
+    for med in (preventive_medications or []):
+        if isinstance(med, dict):
+            names.add(_normalize_text_token(str(med.get("name") or "")))
+
+    names.discard("")
+    return condition_token in names
 
 
 def _extract_partial_json_string_value(raw_json: str, key: str) -> str | None:
@@ -663,6 +695,13 @@ EXTRACTION_SYSTEM_PROMPT = (
     '    - "monitoring": array of objects ([] if none), each with:\n'
     '      - "name": string (e.g., "Blood Work", "Follow-up Vet Visit")\n'
     '      - "frequency": string or null (e.g., "Every 6 months", "Yearly")\n'
+    '  - "preventive_medications": array of objects ([] if none) — preventive medicines used for deworming and/or flea/tick control even when no diagnosis is present, each with:\n'
+    '    - "name": string (medicine/product name as written)\n'
+    '    - "start_date": date string or null\n'
+    '    - "prevention_targets": array containing one or both of "deworming", "flea_tick"\n'
+    '    - "dose": string or null\n'
+    '    - "frequency": string or null\n'
+    '    - "route": string or null\n'
     '  - "contacts": array of objects (vet/clinic/specialist contacts found in the document; [] if none), each with:\n'
     '    - "role": "veterinarian" | "groomer" | "trainer" | "specialist" | "other"\n'
     '    - "name": string (person name)\n'
@@ -687,8 +726,12 @@ EXTRACTION_SYSTEM_PROMPT = (
     '    - "batch_number": string or null (vaccine lot/batch number, if present)\n\n'
     "Tracked preventive items (use these EXACT names):\n"
     "  - Rabies Vaccine\n"
+    "  - Rabies (Nobivac RL)\n"
     "  - Core Vaccine\n"
+    "  - DHPPi\n"
     "  - Feline Core\n"
+    "  - Kennel Cough (Nobivac KC)\n"
+    "  - Canine Coronavirus (CCoV)\n"
     "  - Deworming\n"
     "  - Tick/Flea\n"
     "  - Annual Checkup\n"
@@ -701,6 +744,7 @@ EXTRACTION_SYSTEM_PROMPT = (
     "- Do NOT infer dates — only extract what is explicitly stated.\n"
     "- Extract the pet's name EXACTLY as written in the document (if present).\n"
     "- For vaccination records, extract all available vaccine details (dose, batch, doctor, clinic, next due date) without guessing.\n"
+    "- For dog vaccination cards, include each administered vaccine row in items (e.g., DHPPi, Rabies, Kennel Cough, CCoV) when a done date is present.\n"
     "- For vaccination cards/booklets, treat the administered date as the handwritten/typed DATE GIVEN for each row.\n"
     "- NEVER use vaccine sticker metadata dates (manufacturing/expiry/lot label dates) as last_done_date.\n"
     "- In vaccination documents, do not add Annual Checkup to items unless a separate checkup event is explicitly documented outside the vaccine table.\n"
@@ -709,14 +753,16 @@ EXTRACTION_SYSTEM_PROMPT = (
     "- For fecal reports: use test_type 'fecal', parasite name as parameter_name, result as value_text, status_flag normal/abnormal.\n"
     "- For conditions: extract diagnosed diseases/disorders/syndromes with their medications and monitoring.\n"
     "- condition_name must be the DISEASE/DISORDER name only — never a drug, supplement, or vaccine brand name.\n"
-    "- If a document lists only prescribed drugs with no stated diagnosis, return conditions: [].\n"
+    "- If a document lists preventive medicines without a diagnosis, keep conditions: [] and populate preventive_medications[].\n"
+    "- For each preventive_medications entry, always set prevention_targets explicitly using one or both: deworming, flea_tick.\n"
+    "- If the medicine coverage text indicates both internal parasites (worms/deworming) and external parasite control (flea/tick), include BOTH targets.\n"
     "- Drugs prescribed to treat a condition belong in that condition's medications[] array, not as a separate condition.\n"
     "- For contacts: extract vet/specialist contact details when explicitly present in the document.\n"
     "- If any field is missing in the document, use null for that field.\n"
     "- If the document is not pet/veterinary related, set document_type to 'not_pet_related' and items to [].\n"
     '- If no preventive items are found, return {"document_name": "...", "document_type": "pet_medical", '
     '"document_category": "...", "diagnostic_summary": null, "pet_name": null, "items": [], '
-    '"conditions": [], "contacts": []}\n'
+    '"conditions": [], "preventive_medications": [], "contacts": []}\n'
     "- Return valid JSON only — no markdown, no explanation, no extra text."
 )
 
@@ -861,6 +907,7 @@ def _validate_extraction_json(raw_json: str) -> tuple[list[dict], str | None, st
         "vaccination_details": [],
         "extra_vaccines": [],
         "conditions": [],
+        "preventive_medications": [],
         "contacts": [],
     }
     if isinstance(parsed, dict):
@@ -883,6 +930,9 @@ def _validate_extraction_json(raw_json: str) -> tuple[list[dict], str | None, st
             # Conditions are passed through raw; _is_likely_medication_name guard
             # is applied downstream in extract_and_process_document.
             metadata["conditions"] = raw_conditions
+        raw_preventive_medications = parsed.get("preventive_medications")
+        if isinstance(raw_preventive_medications, list):
+            metadata["preventive_medications"] = raw_preventive_medications
         raw_contacts = parsed.get("contacts")
         if isinstance(raw_contacts, list):
             metadata["contacts"] = raw_contacts
@@ -989,9 +1039,14 @@ def _validate_extraction_json(raw_json: str) -> tuple[list[dict], str | None, st
     )
     metadata["extra_vaccines"] = extra_vaccines
 
-    # Derive tracked preventive items from medication brands found in conditions.
+    # Derive tracked preventive items from extracted medications.
     raw_conditions = metadata.get("conditions") or []
-    validated = _derive_items_from_medication_brands(validated, raw_conditions)
+    raw_preventive_medications = metadata.get("preventive_medications") or []
+    validated = _derive_items_from_medication_brands(
+        validated,
+        raw_conditions,
+        raw_preventive_medications,
+    )
 
     return validated, document_name, extracted_pet_name, metadata
 
@@ -1056,15 +1111,16 @@ def _derive_items_from_vaccination_details(
         if not vaccine_name:
             continue
 
-        # Try to map the vaccine name to a tracked item.
+        # Try to map the vaccine name to one or more tracked items.
+        # A single line can mention multiple antigens (e.g. "Nobivac DHPPi + KC").
         normalized_vaccine = vaccine_name.lower().strip()
-        mapped_item = None
+        mapped_items: list[str] = []
         for keyword, item_name in _VACCINE_DETAIL_TO_ITEM.items():
             if keyword in normalized_vaccine:
-                mapped_item = item_name
-                break
+                if item_name not in mapped_items:
+                    mapped_items.append(item_name)
 
-        if not mapped_item:
+        if not mapped_items:
             # Preserve vaccine rows that don't map to tracked preventive items.
             # These can be shown as separate extra vaccines to the pet parent.
             extra_vaccines.append(
@@ -1076,10 +1132,6 @@ def _derive_items_from_vaccination_details(
                     "batch_number": detail.get("batch_number"),
                 }
             )
-            continue
-
-        # Skip if already present in items.
-        if _normalize_preventive_item_name(mapped_item) in existing_names:
             continue
 
         # We need a date — try next_due_date is NOT last_done, we need administered date.
@@ -1096,8 +1148,12 @@ def _derive_items_from_vaccination_details(
         except ValueError:
             continue
 
-        derived.append({"item_name": mapped_item, "last_done_date": parsed})
-        existing_names.add(_normalize_preventive_item_name(mapped_item))
+        for mapped_item in mapped_items:
+            normalized_item = _normalize_preventive_item_name(mapped_item)
+            if normalized_item in existing_names:
+                continue
+            derived.append({"item_name": mapped_item, "last_done_date": parsed})
+            existing_names.add(normalized_item)
 
     return existing_items + derived, extra_vaccines
 
@@ -1105,10 +1161,15 @@ def _derive_items_from_vaccination_details(
 def _derive_items_from_medication_brands(
     existing_items: list[dict],
     conditions: list[dict],
+    preventive_medications: list[dict] | None = None,
 ) -> list[dict]:
     """
-    Scan condition medications for known tick/flea and deworming brands
-    and add corresponding tracked preventive items if not already present.
+    Scan extracted medication names and add corresponding tracked preventive
+    items if not already present.
+
+    Source priority:
+    1) explicit `prevention_targets` from preventive_medications
+    2) brand-name category mapping fallback
     """
     existing_item_names = {
         _normalize_preventive_item_name(item.get("item_name", ""))
@@ -1121,27 +1182,63 @@ def _derive_items_from_medication_brands(
         "flea_tick": "Tick/Flea",
     }
 
+    def _normalize_prevention_target(value: str) -> str | None:
+        token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if token in {"flea", "tick", "tick_flea", "flea_tick", "tick/flea", "flea/tick"}:
+            return "flea_tick"
+        if token in {"deworm", "deworming", "worms", "worm"}:
+            return "deworming"
+        return None
+
+    medication_rows: list[dict] = []
     for condition in (conditions or []):
         if not isinstance(condition, dict):
             continue
         for med in (condition.get("medications") or []):
-            if not isinstance(med, dict):
+            if isinstance(med, dict):
+                medication_rows.append(med)
+
+    for med in (preventive_medications or []):
+        if isinstance(med, dict):
+            medication_rows.append(med)
+
+    for med in medication_rows:
+        med_name_raw = med.get("name")
+        med_name = med_name_raw.strip() if isinstance(med_name_raw, str) else ""
+
+        start_date_raw = med.get("start_date")
+        if start_date_raw is None:
+            # Preventive records require a concrete done date; skip incomplete meds.
+            continue
+        try:
+            parsed_start_date = parse_date(str(start_date_raw))
+        except ValueError:
+            continue
+        if parsed_start_date > datetime.utcnow().date():
+            continue
+        normalized_start_date = format_date_for_db(parsed_start_date)
+
+        explicit_categories: set[str] = set()
+        raw_targets = med.get("prevention_targets")
+        if isinstance(raw_targets, list):
+            for target in raw_targets:
+                normalized_target = _normalize_prevention_target(str(target))
+                if normalized_target:
+                    explicit_categories.add(normalized_target)
+
+        categories = explicit_categories or _get_preventive_categories_for_medicine(med_name)
+        for category in categories:
+            tracked_item = category_to_item_name.get(category)
+            if not tracked_item:
                 continue
-            med_name_raw = med.get("name")
-            med_name = med_name_raw.strip() if isinstance(med_name_raw, str) else ""
-            categories = _get_preventive_categories_for_medicine(med_name)
-            for category in categories:
-                tracked_item = category_to_item_name.get(category)
-                if not tracked_item:
-                    continue
-                normalized_item = _normalize_preventive_item_name(tracked_item)
-                if normalized_item in existing_item_names:
-                    continue
-                extra_items.append({
-                    "item_name": tracked_item,
-                    "last_done_date": med.get("start_date"),
-                })
-                existing_item_names.add(normalized_item)
+            normalized_item = _normalize_preventive_item_name(tracked_item)
+            if normalized_item in existing_item_names:
+                continue
+            extra_items.append({
+                "item_name": tracked_item,
+                "last_done_date": normalized_start_date,
+            })
+            existing_item_names.add(normalized_item)
 
     return existing_items + extra_items
 
@@ -1353,6 +1450,35 @@ def _load_species_masters(db: Session, species: str) -> list[PreventiveMaster]:
         .filter(PreventiveMaster.species.in_([species, "both"]))
         .all()
     )
+
+
+def _should_include_puppy_series_for_pet(pet: Pet) -> bool:
+    """Return True when one-time puppy vaccine series should remain matchable.
+
+    Puppy-dose rows in preventive_master are marked with recurrence_days=36500.
+    Keep these rows only for young dogs (up to ~15 months), otherwise adult
+    extractions can incorrectly map to puppy-dose items.
+    """
+    if (pet.species or "").strip().lower() != "dog":
+        return False
+    if pet.dob is None:
+        return False
+
+    pet_age_days = (datetime.utcnow().date() - pet.dob).days
+    if pet_age_days < 0:
+        return False
+    return pet_age_days <= 450
+
+
+def _filter_non_applicable_puppy_series(
+    masters: list[PreventiveMaster],
+    *,
+    include_puppy_series: bool,
+) -> list[PreventiveMaster]:
+    """Filter out one-time puppy-dose masters unless explicitly needed."""
+    if include_puppy_series:
+        return masters
+    return [master for master in masters if (master.recurrence_days or 0) < 36500]
 
 
 def _normalize_preventive_item_name(name: str) -> str:
@@ -1693,6 +1819,7 @@ async def extract_and_process_document(
 
         # --- Store extracted conditions ---
         extracted_conditions = metadata.get("conditions") or []
+        extracted_preventive_meds = metadata.get("preventive_medications") or []
         for raw_condition in extracted_conditions:
             if not isinstance(raw_condition, dict):
                 continue
@@ -1709,6 +1836,18 @@ async def extract_and_process_document(
                 logger.warning(
                     "Skipping extracted condition '%s' — name appears to be a medication, "
                     "not a disease/condition. document_id=%s",
+                    condition_name,
+                    str(document_id),
+                )
+                continue
+            if _condition_matches_extracted_medication_name(
+                condition_name,
+                raw_condition,
+                extracted_preventive_meds,
+            ):
+                logger.warning(
+                    "Skipping extracted condition '%s' — matches extracted medication name. "
+                    "document_id=%s",
                     condition_name,
                     str(document_id),
                 )
@@ -1988,6 +2127,10 @@ async def extract_and_process_document(
         # Pre-load all preventive masters for this species once
         # to avoid per-item DB queries (N+1 prevention).
         species_masters = _load_species_masters(db, pet.species)
+        species_masters = _filter_non_applicable_puppy_series(
+            species_masters,
+            include_puppy_series=_should_include_puppy_series_for_pet(pet),
+        )
 
         for item in extracted_items:
             try:

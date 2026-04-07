@@ -443,6 +443,7 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
             "custom_recurrence_days": record.custom_recurrence_days,
             "medicine_dependent": master.medicine_dependent,
             "medicine_name": record.medicine_name if hasattr(record, 'medicine_name') and record.medicine_name else None,
+            "created_at": record.created_at.isoformat() if record.created_at else None,
             "is_core": bool(master.is_core) if master.is_core is not None else False,
         })
 
@@ -472,6 +473,7 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
                 "custom_recurrence_days": None,
                 "medicine_dependent": master.medicine_dependent,
                 "medicine_name": None,
+                "created_at": None,
                 "is_core": bool(master.is_core) if master.is_core is not None else False,
             })
 
