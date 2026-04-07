@@ -158,6 +158,7 @@ from app.models.pet import Pet
 from app.models.reminder import Reminder
 from app.models.user import User
 from app.services.onboarding import (
+    _count_tracked_preventive_items,
     _generate_care_plan_message,
     create_pending_user,
     get_or_create_user,
@@ -659,24 +660,24 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
     if not text:
         return
 
-    # --- "Nothing more" while care plan is being prepared ---
-    # If user says "nothing more" / "that's all" etc. and their care plan
-    # hasn't been delivered yet (deferred extraction), let them know.
-    if text_lower in NOTHING_MORE_PHRASES:
-        pet = (
-            db.query(Pet)
-            .filter(Pet.user_id == user.id, Pet.is_deleted == False)
-            .order_by(Pet.created_at.desc())
-            .first()
+    # --- Global suppression while care plan delivery is in progress ---
+    # When a deferred care-plan marker is active, no question is being
+    # asked of the user. Any incoming text (yes/no/ok/dashboard/anything)
+    # is irrelevant noise and is silently swallowed so it cannot derail
+    # the in-flight delivery flow. The care plan + dashboard link will
+    # be sent automatically when generation/extraction completes.
+    _deferred_pet = (
+        db.query(Pet)
+        .filter(Pet.user_id == user.id, Pet.is_deleted == False)
+        .order_by(Pet.created_at.desc())
+        .first()
+    )
+    if _deferred_pet and _has_pending_deferred_care_plan(db, _deferred_pet.id, user=user):
+        logger.info(
+            "Suppressing user message %r for pet=%s — care plan delivery in progress",
+            text_lower[:40], str(_deferred_pet.id),
         )
-        if pet and _has_pending_deferred_care_plan(db, pet.id, user=user):
-            await send_text_message(
-                db, from_number,
-                f"{pet.name}'s care plan is still being prepared — "
-                f"we're finishing up the health analysis from your uploaded documents. "
-                f"You'll receive it shortly! 🐾",
-            )
-            return
+        return
 
     # --- Check for pending reschedule before any other routing ---
     # If user recently pressed "Reschedule" on a reminder, route the
@@ -790,29 +791,9 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
     if text_lower in _dashboard_exact or text_lower.startswith("link") or any(
         phrase in text_lower for phrase in _dashboard_phrases
     ):
-        pet = (
-            db.query(Pet)
-            .filter(Pet.user_id == user.id, Pet.is_deleted == False)
-            .order_by(Pet.created_at.desc())
-            .first()
-        )
-
-        has_deferred_care_plan = (
-            bool(pet) and _has_pending_deferred_care_plan(db, pet.id, user=user)
-        )
-
-        # If the care plan delivery is in progress (deferred marker active),
-        # silently swallow the dashboard request. The user will receive the
-        # care plan + dashboard link from the in-flight delivery path
-        # (either _finalize_onboarding or extraction-completion handler).
-        # This prevents premature dashboard links and duplicate sends.
-        if pet and has_deferred_care_plan:
-            logger.info(
-                "Suppressing dashboard request for pet=%s — care plan delivery in progress",
-                str(pet.id),
-            )
-            return
-
+        # Note: deferred care-plan suppression is handled globally near the
+        # top of this function, so by the time we reach here we know no
+        # deferred delivery is in progress and it's safe to send the link.
         await _send_dashboard_links(db, user)
         return
 
@@ -2005,27 +1986,15 @@ async def _send_deferred_care_plan(
 
         from app.models.condition import Condition
         from app.models.diet_item import DietItem
-        from app.models.preventive_master import PreventiveMaster
-        from app.models.preventive_record import PreventiveRecord
 
         diet_count = db.query(DietItem).filter(DietItem.pet_id == pet.id).count()
         supplement_count = db.query(DietItem).filter(
             DietItem.pet_id == pet.id,
             DietItem.type == "supplement",
         ).count()
-        # Count preventive records with an actual date logged across health
-        # and hygiene circles (hygiene includes Tick/Flea which is clinically
-        # a health item). Nutrition items are excluded.
-        record_count = (
-            db.query(PreventiveRecord)
-            .join(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
-            .filter(
-                PreventiveRecord.pet_id == pet.id,
-                PreventiveRecord.last_done_date.isnot(None),
-                PreventiveMaster.circle.in_(["health", "hygiene"]),
-            )
-            .count()
-        )
+        # Use the same tracked preventive counting logic as onboarding and
+        # dashboard "What's Found" to keep user-visible counts consistent.
+        record_count = _count_tracked_preventive_items(db, pet.id)
         docs_uploaded = db.query(Document).filter(Document.pet_id == pet.id).count()
         conditions = (
             db.query(Condition)

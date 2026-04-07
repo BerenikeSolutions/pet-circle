@@ -646,12 +646,17 @@ export interface NudgeItem {
 // if the backend is temporarily unavailable. Cache is per-token.
 
 const CACHE_PREFIX = DASHBOARD_CACHE_PREFIX;
+const DASHBOARD_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
 
 function getCachedDashboard(token: string): { data: DashboardData; cachedAt: string } | null {
   try {
     const raw = localStorage.getItem(`${CACHE_PREFIX}${token}`);
     if (!raw) return null;
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    const cachedAt = Date.parse(parsed?.cachedAt || "");
+    if (!Number.isFinite(cachedAt)) return null;
+    if (Date.now() - cachedAt > DASHBOARD_CACHE_MAX_AGE_MS) return null;
+    return parsed;
   } catch {
     return null;
   }

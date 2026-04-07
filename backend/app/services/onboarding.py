@@ -31,6 +31,7 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 from openai import AsyncOpenAI
+from sqlalchemy import case
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -101,6 +102,20 @@ def is_doc_upload_deadline_expired(deadline: datetime | None) -> bool:
         deadline = deadline.replace(tzinfo=UTC)
 
     return datetime.now(UTC) > deadline
+
+
+def _count_tracked_preventive_items(db: Session, pet_id) -> int:
+    """Return tracked preventive items count used across care-plan surfaces."""
+    return (
+        db.query(PreventiveRecord)
+        .join(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
+        .filter(
+            PreventiveRecord.pet_id == pet_id,
+            PreventiveRecord.last_done_date.isnot(None),
+            PreventiveMaster.is_core.is_(True),
+        )
+        .count()
+    )
 
 # --- Colloquial input sets ---
 # Accepted variations for yes/no across all onboarding steps.
@@ -291,6 +306,16 @@ async def handle_onboarding_step(
         await _send_onboarding_resume(db, user, state, send_fn)
         return
 
+    # --- Irrelevant-input suppression ---
+    # Silently swallow casual ack words ("yes", "ok", "thanks", etc.) when the
+    # current step expects substantive input (breed, weight, food, etc.).
+    if _is_irrelevant_noise_for_state(state, text_lower):
+        logger.info(
+            "Suppressing irrelevant input %r during onboarding state=%s for user=%s",
+            text_lower[:40], state, str(user.id),
+        )
+        return
+
     # If the user asks for their dashboard / care plan link at ANY point
     # before onboarding is complete, tell them it's still being built
     # rather than silently routing the message into the current step
@@ -406,6 +431,43 @@ def _get_onboarding_timestamp(data: dict, key: str) -> float | None:
         return float(raw)
     except (TypeError, ValueError):
         return None
+
+
+# --- Irrelevant-input noise suppression ---
+#
+# Casual ack words that are *never* a valid response to the substantive
+# onboarding questions (breed, weight, food, supplements, preventive care).
+# These are treated as noise and trigger a re-ask (once) before being
+# silently swallowed.
+_NOISE_WORDS: frozenset[str] = frozenset({
+    "yes", "y", "yeah", "yea", "yep", "yup", "ya", "yah", "haan", "ha",
+    "no", "n", "nah", "nope", "nay", "na", "nahi",
+    "ok", "okay", "k", "kk", "okk",
+    "thanks", "thank you", "ty", "thx",
+    "got it", "alright", "aight", "cool", "nice", "great", "good",
+    "sure", "fine",
+    "hmm", "hm", "hmmm", "uh", "um", "uhh", "umm",
+})
+
+# States during which casual ack words are *legitimate* user responses and
+# must NOT be suppressed. The welcome step's consent question and the
+# document upload window (where "no/skip" is meaningful) need them.
+_NOISE_ALLOWED_STATES: frozenset[str] = frozenset({
+    "welcome",
+    "awaiting_documents",
+})
+
+
+def _is_irrelevant_noise_for_state(state: str, text_lower: str) -> bool:
+    """
+    Return True if `text_lower` is a casual ack word that cannot possibly
+    answer the question being asked in the current onboarding state.
+    """
+    if not text_lower:
+        return False
+    if state in _NOISE_ALLOWED_STATES:
+        return False
+    return text_lower in _NOISE_WORDS
 
 
 async def _send_onboarding_resume(db, user, state, send_fn):
@@ -1350,6 +1412,14 @@ def _match_specific_vaccine_master(
         .filter(
             PreventiveMaster.item_name == item_name,
             PreventiveMaster.species.in_([species, "both"]),
+            PreventiveMaster.is_core.is_(True),
+        )
+        .order_by(
+            case(
+                (PreventiveMaster.species == species, 0),
+                else_=1,
+            ),
+            PreventiveMaster.id.asc(),
         )
         .first()
     )
@@ -2639,20 +2709,9 @@ async def _finalize_onboarding(db, user, send_fn):
     # Always resolve token through active-token helper so expired historical
     # tokens are never sent in the final onboarding dashboard link.
     token = _recover_dashboard_token_for_finalize(db, pet.id)
-    # Count preventive records with an actual date logged across health
-    # and hygiene circles (hygiene includes Tick/Flea which is clinically
-    # a health item). Nutrition items are excluded. The last_done_date
-    # filter ensures seeded placeholder rows are not counted.
-    record_count = (
-        db.query(PreventiveRecord)
-        .join(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
-        .filter(
-            PreventiveRecord.pet_id == pet.id,
-            PreventiveRecord.last_done_date.isnot(None),
-            PreventiveMaster.circle.in_(["health", "hygiene"]),
-        )
-        .count()
-    )
+    # Keep onboarding care-plan messaging aligned with the dashboard
+    # "What's Found" summary to avoid cross-surface count drift.
+    record_count = _count_tracked_preventive_items(db, pet.id)
     conditions = (
         db.query(Condition)
         .filter(Condition.pet_id == pet.id, Condition.is_active == True)
