@@ -22,9 +22,11 @@ Retry policy:
 """
 
 import hashlib
+import json
 import logging
 import time
 from collections import OrderedDict
+from datetime import UTC, datetime, timedelta
 
 import httpx
 from sqlalchemy.orm import Session
@@ -38,20 +40,39 @@ from app.utils.retry import retry_whatsapp_call
 logger = logging.getLogger(__name__)
 
 # ── Outbound message dedup ─────────────────────────────────────────────
-# Prevents sending the exact same message to the same recipient within
-# a short window (e.g., race between timer and user "skip" both
-# triggering finalize, or Meta webhook retries causing double processing).
-_OUTBOUND_DEDUP_TTL = 10  # seconds
-_OUTBOUND_DEDUP_MAX = 500
+# Applies to all outbound message types (text/template/image/interactive).
+# Combines fast in-memory dedup with DB-backed lookback so retries and
+# process restarts do not resend the same payload.
+_OUTBOUND_DEDUP_TTL = 120  # seconds (in-memory hot dedup window)
+_OUTBOUND_DB_LOOKBACK_SECONDS = 300  # seconds (restart-safe dedup window)
+_OUTBOUND_INFLIGHT_TTL_SECONDS = 60  # seconds (concurrent caller guard)
+_OUTBOUND_DEDUP_MAX = 2000
 _outbound_dedup_cache: OrderedDict[str, float] = OrderedDict()
+_outbound_inflight_cache: OrderedDict[str, float] = OrderedDict()
 
 
-def _is_outbound_duplicate(to_number: str, text: str) -> bool:
-    """Return True if the same message was sent to the same number recently."""
-    key = hashlib.sha256(f"{to_number}:{text}".encode()).hexdigest()
-    now = time.monotonic()
+def _build_outbound_fingerprint(
+    to_number: str,
+    message_type: str,
+    payload: dict,
+) -> str:
+    """Create a stable hash for an outbound message payload."""
+    canonical = {
+        "to": to_number,
+        "message_type": message_type,
+        "payload": payload,
+    }
+    blob = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
-    # Evict stale entries.
+
+def _build_recipient_hash(to_number: str) -> str:
+    """Create a stable recipient hash for dedup matching without storing PII."""
+    return hashlib.sha256(to_number.encode("utf-8")).hexdigest()
+
+
+def _evict_outbound_dedup_cache(now: float) -> None:
+    """Drop stale and overflowed entries from in-memory dedup cache."""
     while _outbound_dedup_cache:
         oldest_key, oldest_ts = next(iter(_outbound_dedup_cache.items()))
         if now - oldest_ts > _OUTBOUND_DEDUP_TTL:
@@ -59,16 +80,101 @@ def _is_outbound_duplicate(to_number: str, text: str) -> bool:
         else:
             break
 
-    if key in _outbound_dedup_cache:
-        logger.info("Outbound dedup: skipping duplicate message to %s", mask_phone(to_number))
-        return True
-
-    _outbound_dedup_cache[key] = now
-    # Cap size.
     while len(_outbound_dedup_cache) > _OUTBOUND_DEDUP_MAX:
         _outbound_dedup_cache.popitem(last=False)
 
+    while _outbound_inflight_cache:
+        oldest_key, oldest_ts = next(iter(_outbound_inflight_cache.items()))
+        if now - oldest_ts > _OUTBOUND_INFLIGHT_TTL_SECONDS:
+            _outbound_inflight_cache.pop(oldest_key)
+        else:
+            break
+
+    while len(_outbound_inflight_cache) > _OUTBOUND_DEDUP_MAX:
+        _outbound_inflight_cache.popitem(last=False)
+
+
+def _seen_recent_duplicate_in_db(
+    db: Session,
+    message_type: str,
+    recipient_hash: str,
+    fingerprint: str,
+) -> bool:
+    """Check recent outgoing logs for the same message fingerprint."""
+    try:
+        cutoff = datetime.now(UTC) - timedelta(seconds=_OUTBOUND_DB_LOOKBACK_SECONDS)
+
+        recent_logs = (
+            db.query(MessageLog)
+            .filter(
+                MessageLog.direction == "outgoing",
+                MessageLog.message_type == message_type,
+                MessageLog.created_at >= cutoff,
+            )
+            .order_by(MessageLog.created_at.desc())
+            .all()
+        )
+
+        for row in recent_logs:
+            row_payload = row.payload if isinstance(row.payload, dict) else {}
+            meta = row_payload.get("_meta", {}) if isinstance(row_payload.get("_meta", {}), dict) else {}
+            if meta.get("dedup_status") != "sent":
+                continue
+            if meta.get("recipient_hash") != recipient_hash:
+                continue
+            if meta.get("dedup_fingerprint") == fingerprint:
+                return True
+    except Exception as e:
+        logger.warning("Outbound DB dedup check failed: %s", str(e))
     return False
+
+
+def _prepare_outbound_send(
+    db: Session,
+    to_number: str,
+    message_type: str,
+    payload: dict,
+) -> tuple[bool, str, str]:
+    """Check and reserve dedup state; returns (is_duplicate, fingerprint, recipient_hash)."""
+    recipient_hash = _build_recipient_hash(to_number)
+    fingerprint = _build_outbound_fingerprint(to_number, message_type, payload)
+    now = time.monotonic()
+    _evict_outbound_dedup_cache(now)
+
+    if fingerprint in _outbound_dedup_cache:
+        logger.info(
+            "Outbound dedup (memory): skipping duplicate %s to %s",
+            message_type,
+            mask_phone(to_number),
+        )
+        return True, fingerprint, recipient_hash
+
+    if fingerprint in _outbound_inflight_cache:
+        logger.info(
+            "Outbound dedup (inflight): skipping duplicate %s to %s",
+            message_type,
+            mask_phone(to_number),
+        )
+        return True, fingerprint, recipient_hash
+
+    if _seen_recent_duplicate_in_db(db, message_type, recipient_hash, fingerprint):
+        _outbound_dedup_cache[fingerprint] = now
+        logger.info(
+            "Outbound dedup (db): skipping duplicate %s to %s",
+            message_type,
+            mask_phone(to_number),
+        )
+        return True, fingerprint, recipient_hash
+
+    _outbound_inflight_cache[fingerprint] = now
+    return False, fingerprint, recipient_hash
+
+
+def _finalize_outbound_send(fingerprint: str, sent_successfully: bool) -> None:
+    """Release in-flight dedup reservation and persist sent cache on success."""
+    _outbound_inflight_cache.pop(fingerprint, None)
+    if sent_successfully:
+        _outbound_dedup_cache[fingerprint] = time.monotonic()
 
 
 def get_template_body(db: Session, template_name: str) -> str:
@@ -169,6 +275,9 @@ def _log_outgoing_message(
     mobile_number: str,
     message_type: str,
     payload: dict,
+    dedup_fingerprint: str,
+    recipient_hash: str,
+    send_status: str,
 ) -> None:
     """
     Log an outgoing WhatsApp message to message_logs.
@@ -182,11 +291,20 @@ def _log_outgoing_message(
         payload: The full API payload sent.
     """
     try:
+        payload_for_log = sanitize_payload(payload)
+        if not isinstance(payload_for_log, dict):
+            payload_for_log = {"raw": str(payload_for_log)}
+        payload_for_log["_meta"] = {
+            "dedup_fingerprint": dedup_fingerprint,
+            "recipient_hash": recipient_hash,
+            "dedup_status": send_status,
+        }
+
         log_entry = MessageLog(
             mobile_number=mask_phone(mobile_number),
             direction="outgoing",
             message_type=message_type,
-            payload=sanitize_payload(payload),
+            payload=payload_for_log,
         )
         db.add(log_entry)
         db.commit()
@@ -214,10 +332,6 @@ async def send_text_message(
     Returns:
         API response dict on success, None on failure.
     """
-    # Outbound dedup: skip if the exact same message was sent recently.
-    if _is_outbound_duplicate(to_number, text):
-        return None
-
     payload = {
         "messaging_product": "whatsapp",
         "to": to_number,
@@ -230,9 +344,20 @@ async def send_text_message(
         logger.warning("Outgoing rate limited for %s", mask_phone(to_number))
         return None
 
-    result = await _send_whatsapp_request(payload)
+    is_duplicate, fingerprint, recipient_hash = _prepare_outbound_send(db, to_number, "text", payload)
+    if is_duplicate:
+        return None
 
-    _log_outgoing_message(db, to_number, "text", payload)
+    result = await _send_whatsapp_request(payload)
+    send_status = "sent" if result else "failed"
+    _finalize_outbound_send(fingerprint, sent_successfully=bool(result))
+
+    _log_outgoing_message(
+        db, to_number, "text", payload,
+        dedup_fingerprint=fingerprint,
+        recipient_hash=recipient_hash,
+        send_status=send_status,
+    )
 
     if result:
         logger.info("Text message sent to %s", mask_phone(to_number))
@@ -275,9 +400,20 @@ async def send_image_message(
         logger.warning("Outgoing rate limited (image) for %s", mask_phone(to_number))
         return None
 
-    result = await _send_whatsapp_request(payload)
+    is_duplicate, fingerprint, recipient_hash = _prepare_outbound_send(db, to_number, "image", payload)
+    if is_duplicate:
+        return None
 
-    _log_outgoing_message(db, to_number, "image", payload)
+    result = await _send_whatsapp_request(payload)
+    send_status = "sent" if result else "failed"
+    _finalize_outbound_send(fingerprint, sent_successfully=bool(result))
+
+    _log_outgoing_message(
+        db, to_number, "image", payload,
+        dedup_fingerprint=fingerprint,
+        recipient_hash=recipient_hash,
+        send_status=send_status,
+    )
 
     if result:
         logger.info("Image message sent to %s", mask_phone(to_number))
@@ -338,9 +474,20 @@ async def send_template_message(
         logger.warning("Outgoing rate limited for %s", mask_phone(to_number))
         return None
 
-    result = await _send_whatsapp_request(payload)
+    is_duplicate, fingerprint, recipient_hash = _prepare_outbound_send(db, to_number, "template", payload)
+    if is_duplicate:
+        return None
 
-    _log_outgoing_message(db, to_number, "template", payload)
+    result = await _send_whatsapp_request(payload)
+    send_status = "sent" if result else "failed"
+    _finalize_outbound_send(fingerprint, sent_successfully=bool(result))
+
+    _log_outgoing_message(
+        db, to_number, "template", payload,
+        dedup_fingerprint=fingerprint,
+        recipient_hash=recipient_hash,
+        send_status=send_status,
+    )
 
     if result:
         logger.info(
@@ -399,9 +546,20 @@ async def send_interactive_buttons(
         logger.warning("Outgoing rate limited for %s", mask_phone(to_number))
         return None
 
-    result = await _send_whatsapp_request(payload)
+    is_duplicate, fingerprint, recipient_hash = _prepare_outbound_send(db, to_number, "interactive", payload)
+    if is_duplicate:
+        return None
 
-    _log_outgoing_message(db, to_number, "interactive", payload)
+    result = await _send_whatsapp_request(payload)
+    send_status = "sent" if result else "failed"
+    _finalize_outbound_send(fingerprint, sent_successfully=bool(result))
+
+    _log_outgoing_message(
+        db, to_number, "interactive", payload,
+        dedup_fingerprint=fingerprint,
+        recipient_hash=recipient_hash,
+        send_status=send_status,
+    )
 
     if result:
         logger.info("Interactive buttons sent to %s", mask_phone(to_number))

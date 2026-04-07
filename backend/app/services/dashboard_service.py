@@ -942,8 +942,8 @@ def update_preventive_date(
     if not pet or pet.is_deleted:
         raise ValueError("Pet not found or has been removed.")
 
-    # Find the preventive record by item_name.
-    # Join with preventive_master to match by item name.
+    # Find the same record variant the dashboard currently surfaces:
+    # latest active row for this item_name, preferring most recent completion.
     result = (
         db.query(PreventiveRecord, PreventiveMaster)
         .join(
@@ -953,8 +953,13 @@ def update_preventive_date(
         .filter(
             PreventiveRecord.pet_id == pet_id,
             PreventiveMaster.item_name == item_name,
-            # Do not allow updating cancelled records.
             PreventiveRecord.status != "cancelled",
+        )
+        .order_by(
+            PreventiveRecord.last_done_date.desc().nullslast(),
+            PreventiveRecord.next_due_date.desc().nullslast(),
+            PreventiveRecord.created_at.desc().nullslast(),
+            PreventiveRecord.id.desc(),
         )
         .first()
     )
@@ -974,9 +979,14 @@ def update_preventive_date(
     record.last_done_date = new_last_done_date
 
     # --- Recalculate next_due_date ---
-    # Recurrence days from DB preventive_master — never hardcoded.
+    # Respect custom recurrence when present; otherwise use master default.
+    effective_recurrence_days = (
+        record.custom_recurrence_days
+        if record.custom_recurrence_days
+        else master.recurrence_days
+    )
     record.next_due_date = compute_next_due_date(
-        new_last_done_date, master.recurrence_days
+        new_last_done_date, effective_recurrence_days
     )
 
     # --- Recalculate status ---

@@ -1163,6 +1163,12 @@ def dashboard_update_frequency(
                 PreventiveMaster.item_name == body.item_name,
                 PreventiveRecord.status != "cancelled",
             )
+            .order_by(
+                PreventiveRecord.last_done_date.desc().nullslast(),
+                PreventiveRecord.next_due_date.desc().nullslast(),
+                PreventiveRecord.created_at.desc().nullslast(),
+                PreventiveRecord.id.desc(),
+            )
             .first()
         )
         if not result:
@@ -1301,6 +1307,12 @@ def dashboard_update_medicine_name(
                 PreventiveRecord.pet_id == dt.pet_id,
                 PreventiveMaster.item_name == body.item_name,
                 PreventiveRecord.status != "cancelled",
+            )
+            .order_by(
+                PreventiveRecord.last_done_date.desc().nullslast(),
+                PreventiveRecord.next_due_date.desc().nullslast(),
+                PreventiveRecord.created_at.desc().nullslast(),
+                PreventiveRecord.id.desc(),
             )
             .first()
         )
