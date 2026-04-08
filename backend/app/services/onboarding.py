@@ -237,7 +237,7 @@ async def _send_dog_only_scope_message(
         mobile,
         f"Thanks for sharing. Right now, PetCircle onboarding supports *dogs only*. "
         f"I noted that {pet_name} is a *{species_label}*. "
-        "If you'd like, reply *WAITLIST* and we'll notify you when support opens for more species.",
+        "We'll notify you when support opens for more species.",
     )
 
 
