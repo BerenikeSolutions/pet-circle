@@ -29,12 +29,13 @@ from datetime import date, datetime, timedelta
 from typing import Any, TypedDict
 from uuid import UUID
 
-from sqlalchemy import func, text
+from sqlalchemy import func, or_, text
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.constants import OPENAI_QUERY_MODEL
 from app.models.condition import Condition
+from app.models.custom_preventive_item import CustomPreventiveItem
 from app.models.diet_item import DietItem
 from app.models.pet import Pet
 from app.models.pet_ai_insight import PetAiInsight
@@ -702,14 +703,18 @@ async def generate_recognition_bullets(db: Session, pet: Pet) -> list[Bullet]:
         or 0
     )
 
-    # Count core preventive items that have last_done_date filled.
+    # Count core preventive items and custom items that have last_done_date filled.
     on_schedule_preventive_count = (
         db.query(func.count(PreventiveRecord.id))
-        .join(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
+        .outerjoin(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
+        .outerjoin(CustomPreventiveItem, PreventiveRecord.custom_preventive_item_id == CustomPreventiveItem.id)
         .filter(
             PreventiveRecord.pet_id == pet.id,
-            PreventiveMaster.is_core.is_(True),
             PreventiveRecord.last_done_date.isnot(None),
+            or_(
+                PreventiveMaster.is_core.is_(True),
+                CustomPreventiveItem.id.isnot(None),
+            ),
         )
         .scalar()
         or 0

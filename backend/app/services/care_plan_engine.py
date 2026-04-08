@@ -918,8 +918,7 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
                 continue
 
             is_core_type = test_type in {"vaccine", "deworming", "tick_flea"}
-            is_blood_test_type = test_type == "cbc_chemistry" and "blood" in item_name.lower()
-            if record.last_done_date is None and not is_core_type and not is_blood_test_type:
+            if record.last_done_date is None and not is_core_type:
                 # Keep existing rule: non-core types only appear when there is
                 # historical completion evidence or an active prescription.
                 continue

@@ -31,7 +31,7 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 from openai import AsyncOpenAI
-from sqlalchemy import case, func
+from sqlalchemy import case, func, or_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -109,11 +109,15 @@ def _count_tracked_preventive_items(db: Session, pet_id) -> int:
     """Return tracked preventive items count used across care-plan surfaces."""
     return (
         db.query(PreventiveRecord)
-        .join(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
+        .outerjoin(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
+        .outerjoin(CustomPreventiveItem, PreventiveRecord.custom_preventive_item_id == CustomPreventiveItem.id)
         .filter(
             PreventiveRecord.pet_id == pet_id,
             PreventiveRecord.last_done_date.isnot(None),
-            PreventiveMaster.is_core.is_(True),
+            or_(
+                PreventiveMaster.is_core.is_(True),
+                CustomPreventiveItem.id.isnot(None),
+            ),
         )
         .count()
     )
