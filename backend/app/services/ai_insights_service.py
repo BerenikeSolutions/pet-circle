@@ -100,6 +100,41 @@ def _sentence_case(text: str) -> str:
     return cleaned[0].upper() + cleaned[1:]
 
 
+def _canonical_diet_item_text(text: str) -> str:
+    """Return a canonical representation for cross-list diet item matching."""
+    canonical = (text or "").lower().strip()
+    canonical = re.sub(r"[^a-z0-9]+", " ", canonical)
+    return re.sub(r"\s+", " ", canonical).strip()
+
+
+def _is_food_item_covered_by_supplements(food_item: str, supplement_items: list[str]) -> bool:
+    """Return True if a food item semantically overlaps with any supplement label."""
+    food_canonical = _canonical_diet_item_text(food_item)
+    if not food_canonical:
+        return False
+
+    food_tokens = set(food_canonical.split())
+    if not food_tokens:
+        return False
+
+    for supplement in supplement_items:
+        supplement_canonical = _canonical_diet_item_text(supplement)
+        if not supplement_canonical:
+            continue
+        if food_canonical == supplement_canonical:
+            return True
+
+        supplement_tokens = set(supplement_canonical.split())
+        if not supplement_tokens:
+            continue
+        # Keep only one-way subset matching to avoid suppressing legitimate foods
+        # that merely contain a generic supplement token.
+        if food_tokens.issubset(supplement_tokens):
+            return True
+
+    return False
+
+
 def _extract_main_food_items(*texts: str, apply_noise_filter: bool = True) -> list[str]:
     """Extract main food labels while removing quantity/frequency/noise fragments."""
     items: list[str] = []
@@ -136,6 +171,13 @@ def _extract_main_food_items(*texts: str, apply_noise_filter: bool = True) -> li
 
 def _format_found_diet_summary(food_items: list[DietItem], supplement_items: list[DietItem]) -> str:
     """Format the What We Found diet line with only main food items and supplements."""
+    supp_names: list[str] = []
+    if supplement_items:
+        for supp in supplement_items:
+            main = _sentence_case((supp.label or "").strip())
+            if main and main.lower() not in {x.lower() for x in supp_names}:
+                supp_names.append(main)
+
     main_foods: list[str] = []
     for food in food_items:
         # Keep primary labels intact (no noise filtering), then clean free-form detail.
@@ -144,17 +186,14 @@ def _format_found_diet_summary(food_items: list[DietItem], supplement_items: lis
 
     deduped_foods: list[str] = []
     for item in main_foods:
+        if _is_food_item_covered_by_supplements(item, supp_names):
+            continue
         if item.lower() not in {x.lower() for x in deduped_foods}:
             deduped_foods.append(item)
 
     parts: list[str] = [f"{item}." for item in deduped_foods]
 
     if supplement_items:
-        supp_names: list[str] = []
-        for supp in supplement_items:
-            main = _sentence_case((supp.label or "").strip())
-            if main and main.lower() not in {x.lower() for x in supp_names}:
-                supp_names.append(main)
         if supp_names:
             parts.append(f"Supplements - {', '.join(supp_names)}.")
         else:

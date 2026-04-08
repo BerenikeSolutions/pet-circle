@@ -343,6 +343,26 @@ async def handle_onboarding_step(
         )
         return
 
+    # Allow mid-onboarding typo corrections for pet name.
+    if state not in {"welcome", "complete"}:
+        pending_pet = _get_pending_pet(db, user.id)
+        corrected_name = _extract_pet_name_correction(text)
+        if (
+            pending_pet
+            and corrected_name
+            and corrected_name.strip().lower() != (pending_pet.name or "").strip().lower()
+        ):
+            pending_pet.name = corrected_name
+            db.commit()
+            resume_q = _get_question_for_state(state, pending_pet, _get_onboarding_data(user))
+            await send_fn(
+                db,
+                mobile,
+                f"Aww no worries at all. Thanks for correcting me. "
+                f"I'll use *{corrected_name}* from now on.\n\n{resume_q}",
+            )
+            return
+
     if state == "welcome":
         await _step_welcome(db, user, text, send_fn, message_data=message_data)
 
@@ -531,6 +551,76 @@ def _resolve_binary_confirmation_reply(text_lower: str) -> str | None:
         return "yes"
     if normalized in _NO_INPUTS:
         return "no"
+    return None
+
+
+def _extract_pet_name_correction(text: str) -> str | None:
+    """Extract corrected pet name from messages like 'actually his name is Mocha'."""
+    normalized = re.sub(r"\s+", " ", (text or "").strip())
+    if not normalized:
+        return None
+
+    patterns = (
+        r"\b(?:actually\s+)?(?:his|her|their)\s+name\s+is\s+([a-zA-Z][a-zA-Z\s'\-]{0,49})",
+        r"\b(?:i\s+typed\s+(?:it\s+)?wrong[, ]*)?(?:actually\s+)?name\s+is\s+([a-zA-Z][a-zA-Z\s'\-]{0,49})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, normalized, flags=re.IGNORECASE)
+        if not match:
+            continue
+        candidate = re.sub(r"\s+", " ", (match.group(1) or "").strip(" .,!?:;"))
+        candidate = re.split(r"\b(?:and|but|because|so)\b|[.,!?;]", candidate, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        if not candidate:
+            continue
+        words = candidate.split()
+        if len(words) > 4:
+            continue
+        return candidate[:100].title()
+    return None
+
+
+def _build_gender_neuter_confirmation(
+    text: str,
+    parsed_gender: str | None,
+    parsed_neutered: bool | None,
+    pet_name: str,
+) -> dict | None:
+    """Return a clarification prompt when gender/procedure details are inconsistent."""
+    normalized_text = re.sub(r"\s+", " ", (text or "").lower())
+    normalized = f" {normalized_text} "
+
+    male_terms = (" male ", " boy ", " he ", " him ", " his ")
+    female_terms = (" female ", " girl ", " she ", " her ", " hers ")
+    mentions_spayed = re.search(r"\bspay(?:ed|ing)?\b", normalized) is not None
+
+    male_indicated = parsed_gender == "male" or any(term in normalized for term in male_terms)
+    female_indicated = parsed_gender == "female" or any(term in normalized for term in female_terms)
+
+    # Example: "he weighs ... she is spayed" -> don't assume silently.
+    if male_indicated and female_indicated:
+        if mentions_spayed or (parsed_gender == "female" and parsed_neutered is True):
+            return {
+                "prompt": f"Just to confirm — {pet_name} is female and spayed, right?",
+                "confirm_mode": "binary",
+                "confirm_payload": {"gender": "female", "neutered": True},
+            }
+        return {
+            "prompt": f"I noticed both 'he' and 'she' in your message. Please reply with just male or female for {pet_name}.",
+            "confirm_mode": "gender_choice",
+            "confirm_payload": None,
+        }
+
+    # Example: "male ... spayed" -> gentle terminology correction.
+    if male_indicated and mentions_spayed:
+        return {
+            "prompt": (
+                f"For male dogs the procedure is neutering, not spaying. "
+                f"Is {pet_name} neutered?"
+            ),
+            "confirm_mode": "binary",
+            "confirm_payload": {"gender": "male", "neutered": True},
+        }
+
     return None
 
 
@@ -879,12 +969,116 @@ async def _step_gender_weight(db, user, text, send_fn):
 
     od = _get_onboarding_data(user)
     gw_attempts = od.get("gender_weight_attempts", 0)
+    skip_current_parse = False
 
-    if text_lower not in _SKIP_INPUTS:
+    if od.get("gender_neuter_confirm_pending"):
+        confirm_reply = _resolve_binary_confirmation_reply(text_lower)
+        confirm_mode = od.get("gender_neuter_confirm_mode") or "binary"
+        payload = od.get("gender_neuter_confirm_payload")
+
+        if confirm_mode == "gender_choice":
+            normalized = re.sub(r"[.!?,]+$", "", text_lower).strip().lower()
+            if normalized in {"male", "boy", "he", "him", "his"}:
+                pet.gender = "male"
+            elif normalized in {"female", "girl", "she", "her", "hers"}:
+                pet.gender = "female"
+            else:
+                db.commit()
+                await send_fn(
+                    db,
+                    mobile,
+                    f"Please reply with just *male* or *female* for {pet.name}.",
+                )
+                return
+
+            if isinstance(payload, dict):
+                try:
+                    if payload.get("weight_kg") is not None:
+                        weight_value = float(payload.get("weight_kg"))
+                        if 0 < weight_value <= MAX_PET_WEIGHT_KG:
+                            pet.weight = weight_value
+                except (TypeError, ValueError):
+                    pass
+                if payload.get("neutered") is not None:
+                    pet.neutered = bool(payload.get("neutered"))
+
+            _set_onboarding_data(user, "gender_neuter_confirm_pending", False)
+            _set_onboarding_data(user, "gender_neuter_confirm_mode", None)
+            _set_onboarding_data(user, "gender_neuter_confirm_payload", None)
+            skip_current_parse = True
+        elif confirm_reply == "yes":
+            _set_onboarding_data(user, "gender_neuter_confirm_pending", False)
+            _set_onboarding_data(user, "gender_neuter_confirm_mode", None)
+            _set_onboarding_data(user, "gender_neuter_confirm_payload", None)
+            if isinstance(payload, dict):
+                if payload.get("gender") in {"male", "female"}:
+                    pet.gender = payload["gender"]
+                if payload.get("neutered") is not None:
+                    pet.neutered = bool(payload.get("neutered"))
+                try:
+                    if payload.get("weight_kg") is not None:
+                        weight_value = float(payload.get("weight_kg"))
+                        if 0 < weight_value <= MAX_PET_WEIGHT_KG:
+                            pet.weight = weight_value
+                except (TypeError, ValueError):
+                    pass
+            skip_current_parse = True
+        elif confirm_reply == "no":
+            _set_onboarding_data(user, "gender_neuter_confirm_pending", False)
+            _set_onboarding_data(user, "gender_neuter_confirm_mode", None)
+            _set_onboarding_data(user, "gender_neuter_confirm_payload", None)
+            db.commit()
+            await send_fn(
+                db,
+                mobile,
+                f"Thanks for clarifying. Could you share {pet.name}'s gender, "
+                f"approximate weight, and neutered/spayed status again? "
+                f"(e.g., male, 22 kg, neutered)",
+            )
+            return
+        else:
+            db.commit()
+            await send_fn(
+                db,
+                mobile,
+                f"Just reply *yes* or *no* so I can confirm {pet.name}'s details.",
+            )
+            return
+
+    if text_lower not in _SKIP_INPUTS and not skip_current_parse:
         parsed = await _parse_gender_weight_neutered(text)
         gender = parsed.get("gender")
         weight_kg = parsed.get("weight_kg")
         neutered = parsed.get("neutered")
+
+        consistency_prompt = _build_gender_neuter_confirmation(
+            text=text,
+            parsed_gender=gender,
+            parsed_neutered=neutered,
+            pet_name=pet.name,
+        )
+        if consistency_prompt is not None:
+            confirm_payload = consistency_prompt.get("confirm_payload")
+            if isinstance(confirm_payload, dict):
+                confirm_payload = dict(confirm_payload)
+                if weight_kg is not None:
+                    confirm_payload["weight_kg"] = weight_kg
+            elif weight_kg is not None:
+                confirm_payload = {"weight_kg": weight_kg}
+            _set_onboarding_data(user, "gender_neuter_confirm_pending", True)
+            _set_onboarding_data(
+                user,
+                "gender_neuter_confirm_mode",
+                consistency_prompt.get("confirm_mode") or "binary",
+            )
+            _set_onboarding_data(
+                user,
+                "gender_neuter_confirm_payload",
+                confirm_payload,
+            )
+            db.commit()
+            await send_fn(db, mobile, consistency_prompt["prompt"])
+            return
 
         # If nothing at all was parsed and this is the first attempt, clarify.
         if gender is None and weight_kg is None and neutered is None and gw_attempts < 1:
@@ -931,7 +1125,6 @@ async def _step_gender_weight(db, user, text, send_fn):
         age_years = (today - pet.dob).days / 365.25
     elif pet.age_text:
         # Try to extract age_years from age_text.
-        import re
         nums = re.findall(r"[\d.]+", pet.age_text)
         if nums:
             try:

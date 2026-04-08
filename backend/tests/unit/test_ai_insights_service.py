@@ -134,6 +134,31 @@ def test_format_found_diet_summary_drops_standalone_sometimes_with_punctuation()
     assert summary == "No supplements."
 
 
+def test_format_found_diet_summary_does_not_duplicate_supplements_in_food_items():
+    foods = [
+        SimpleNamespace(type="homemade", label="turmeric", detail=None),
+        SimpleNamespace(type="packaged", label="omega", detail=None),
+        SimpleNamespace(type="packaged", label="Royal Canin Adult kibble", detail=None),
+    ]
+    supplements = [
+        SimpleNamespace(type="supplement", label="turmeric", detail=None),
+        SimpleNamespace(type="supplement", label="omega", detail=None),
+    ]
+
+    summary = _format_found_diet_summary(foods, supplements)
+
+    assert summary == "Royal Canin Adult kibble. Supplements - Turmeric, Omega."
+
+
+def test_format_found_diet_summary_keeps_legit_food_with_overlapping_token():
+    foods = [SimpleNamespace(type="packaged", label="Omega kibble", detail=None)]
+    supplements = [SimpleNamespace(type="supplement", label="omega", detail=None)]
+
+    summary = _format_found_diet_summary(foods, supplements)
+
+    assert summary == "Omega kibble. Supplements - Omega."
+
+
 class _InsightQuery:
     def filter(self, *args, **kwargs):
         return self

@@ -583,9 +583,9 @@ def _compute_next_due(
     Rules (requirement 9.10):
     - PRESCRIPTION_ACTIVE → use prescription.due_date.
     - PERIODIC → derive frequency from median gap (overrides baseline).
-    - NO_HISTORY → today + baseline_days (recommended start date).
+    - NO_HISTORY → None (no last date exists to compute from).
     - All others → last_report_date + baseline_days.
-    - Returns None if there are no reports and classification is not NO_HISTORY.
+    - Returns None if there are no reports.
 
     Args:
         classification: Result of _classify_test.
@@ -600,7 +600,7 @@ def _compute_next_due(
         return prescription.due_date
 
     if classification == Classification.NO_HISTORY:
-        return date.today() + timedelta(days=baseline_days)
+        return None
 
     if not reports:
         return None

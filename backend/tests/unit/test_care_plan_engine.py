@@ -405,9 +405,9 @@ class TestComputeNextDue:
         )
         assert result == rx.due_date
 
-    def test_no_history_returns_today_plus_baseline(self):
+    def test_no_history_returns_none(self):
         result = _compute_next_due(Classification.NO_HISTORY, [], self.BASELINE)
-        assert result == TODAY + timedelta(days=self.BASELINE)
+        assert result is None
 
     def test_single_report_uses_baseline(self):
         last = TODAY - timedelta(days=100)
