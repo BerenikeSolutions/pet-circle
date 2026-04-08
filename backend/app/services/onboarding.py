@@ -349,6 +349,12 @@ async def handle_onboarding_step(
         corrected_name = _extract_pet_name_correction(text)
         if (
             pending_pet
+            and not corrected_name
+            and _looks_like_name_correction_intent(text_lower)
+        ):
+            corrected_name = await _ai_extract_pet_name_correction(text, pending_pet.name)
+        if (
+            pending_pet
             and corrected_name
             and corrected_name.strip().lower() != (pending_pet.name or "").strip().lower()
         ):
@@ -577,6 +583,65 @@ def _extract_pet_name_correction(text: str) -> str | None:
             continue
         return candidate[:100].title()
     return None
+
+
+def _looks_like_name_correction_intent(text_lower: str) -> bool:
+    """Return True when the message likely attempts to correct pet name text."""
+    normalized = re.sub(r"\s+", " ", (text_lower or "").strip().lower())
+    if not normalized:
+        return False
+
+    signals = (
+        "name",
+        "typed wrong",
+        "type wrong",
+        "wrong name",
+        "not ",
+        "instead",
+        "correction",
+        "correct name",
+    )
+    return any(signal in normalized for signal in signals)
+
+
+async def _ai_extract_pet_name_correction(text: str, current_name: str | None = None) -> str | None:
+    """Use AI to infer corrected pet name from free-form typo/correction messages."""
+    client = _get_openai_onboarding_client()
+    prompt = (
+        "You are extracting a corrected pet name from a WhatsApp onboarding message. "
+        "The user may say they typed the name wrong and provide the corrected name in informal wording. "
+        "Return ONLY valid JSON with this schema: "
+        '{"is_correction": true|false, "corrected_name": string|null}. '
+        "If no clear corrected name is present, set corrected_name to null and is_correction to false. "
+        "Use title case for names. Keep only the pet's name words, not extra phrases. "
+        "Do not hallucinate names.\n\n"
+        f"Current registered name: {current_name or 'unknown'}\n"
+        f"User message: {text}"
+    )
+    try:
+        response = await retry_openai_call(
+            client.chat.completions.create,
+            model="gpt-4.1-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=80,
+        )
+        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        data = json.loads(raw)
+        corrected = str(data.get("corrected_name") or "").strip()
+        if not corrected:
+            return None
+        corrected = re.sub(r"\s+", " ", corrected).strip(" .,!?:;")
+        corrected = corrected[:100].title()
+        if not corrected:
+            return None
+        words = corrected.split()
+        if len(words) > 4:
+            return None
+        return corrected
+    except Exception as e:
+        logger.warning("AI pet-name correction parse failed: %s", str(e))
+        return None
 
 
 def _build_gender_neuter_confirmation(

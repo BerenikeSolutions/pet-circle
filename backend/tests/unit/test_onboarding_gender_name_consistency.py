@@ -41,6 +41,38 @@ async def test_handle_onboarding_step_applies_pet_name_correction(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_handle_onboarding_step_applies_ai_pet_name_correction(monkeypatch) -> None:
+    user = SimpleNamespace(
+        id="user-1",
+        onboarding_state="awaiting_gender_weight",
+        onboarding_data={},
+        mobile_number="enc",
+        _plaintext_mobile="+911234567890",
+    )
+    pet = SimpleNamespace(name="Mochi")
+    db = SimpleNamespace(commit=lambda: None)
+    send_fn = AsyncMock()
+
+    monkeypatch.setattr(onboarding, "_is_greeting", lambda _text: False)
+    monkeypatch.setattr(onboarding, "_is_irrelevant_noise_for_state", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(onboarding, "_get_pending_pet", lambda _db, _user_id: pet)
+    monkeypatch.setattr(onboarding, "_step_gender_weight", AsyncMock())
+    monkeypatch.setattr(onboarding, "_extract_pet_name_correction", lambda _text: None)
+    monkeypatch.setattr(onboarding, "_ai_extract_pet_name_correction", AsyncMock(return_value="Mocha"))
+
+    await onboarding.handle_onboarding_step(
+        db,
+        user,
+        "you took the pet's name as Mocha, I typed wrong instead of Mochi",
+        send_fn,
+    )
+
+    assert pet.name == "Mocha"
+    sent_text = send_fn.await_args_list[-1].args[2]
+    assert "I'll use *Mocha* from now on" in sent_text
+
+
+@pytest.mark.asyncio
 async def test_step_gender_weight_flags_pronoun_inconsistency(monkeypatch) -> None:
     user = SimpleNamespace(
         id="user-1",
