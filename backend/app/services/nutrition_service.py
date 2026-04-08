@@ -13,7 +13,6 @@ Pipeline:
     4. Aggregate, compare against targets, generate recommendations
 """
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -39,6 +38,8 @@ from app.models.nutrition_target_cache import NutritionTargetCache
 from app.models.pet import Pet
 from app.models.product_catalog import ProductCatalog
 from app.services.diet_service import split_diet_items_by_type
+from app.services.weight_service import DEFAULT_RANGE as DEFAULT_IDEAL_WEIGHT_RANGE
+from app.services.weight_service import get_ideal_range
 from app.utils.retry import retry_openai_call
 
 logger = logging.getLogger(__name__)
@@ -126,11 +127,43 @@ def _calculate_age_description(dob: date | None) -> str:
     return f"{years} year{'s' if years != 1 else ''} and {months} month{'s' if months != 1 else ''} old"
 
 
+def _normalize_gender_for_lookup(gender: str | None) -> str | None:
+    """Normalize gender to male/female; treat unknown values as absent."""
+    if not gender:
+        return None
+    normalized = gender.lower().strip()
+    if normalized in {"male", "m", "boy"}:
+        return "male"
+    if normalized in {"female", "f", "girl"}:
+        return "female"
+    return None
+
+
+def _midpoint_from_confident_ideal_range(weight_range: dict | None) -> float | None:
+    """Return midpoint only when the ideal-weight range is likely trustworthy."""
+    if not isinstance(weight_range, dict):
+        return None
+
+    min_w = weight_range.get("min")
+    max_w = weight_range.get("max")
+    if not isinstance(min_w, (int, float)) or not isinstance(max_w, (int, float)):
+        return None
+    if min_w <= 0 or max_w <= min_w:
+        return None
+
+    default_min = float(DEFAULT_IDEAL_WEIGHT_RANGE.get("min", 0))
+    default_max = float(DEFAULT_IDEAL_WEIGHT_RANGE.get("max", 0))
+    if float(min_w) == default_min and float(max_w) == default_max:
+        return None
+
+    return round((float(min_w) + float(max_w)) / 2, 1)
+
+
 # --- System Prompts ---
 
 NUTRITION_TARGET_SYSTEM_PROMPT = (
     "You are a board-certified veterinary nutritionist. Given a pet's species, breed, "
-    "and age, return the recommended DAILY nutritional targets.\n\n"
+    "age, weight, and gender (when provided), return the recommended DAILY nutritional targets.\n\n"
     "Rules:\n"
     "- Return ONLY valid JSON with these exact keys:\n"
     "  calories (int, kcal/day), protein (int, % of diet), fat (int, %), carbs (int, %), "
@@ -140,6 +173,8 @@ NUTRITION_TARGET_SYSTEM_PROMPT = (
     "- Use established AAFCO/FEDIAF/NRC standards for the specific breed\n"
     "- Account for breed-specific predispositions (e.g., joint issues in large breeds)\n"
     "- Account for age category (puppies need more protein, seniors need joint support)\n"
+    "- Account for body weight when estimating calorie and nutrient requirements\n"
+    "- Account for gender-related body composition differences when gender is provided\n"
     "- No explanation, no markdown — JSON only"
 )
 
@@ -240,6 +275,8 @@ async def get_nutrition_targets(
     species: str | None,
     breed: str | None,
     dob: date | None,
+    weight_kg: float | None,
+    gender: str | None,
 ) -> dict:
     """
     Get breed-specific daily nutrition targets, using cached AI lookups.
@@ -251,7 +288,39 @@ async def get_nutrition_targets(
 
     breed_normalized = breed.lower().strip()
     species_normalized = species.lower().strip()
-    age_category = _calculate_age_category(species_normalized, dob)
+    age_category = _calculate_age_category(species_normalized, dob) if dob else "na"
+    gender_normalized = _normalize_gender_for_lookup(gender)
+
+    # If weight is missing, approximate from breed + age (+ gender when available).
+    # When age/gender are missing, they are ignored as requested.
+    effective_weight_kg = weight_kg if (weight_kg and weight_kg > 0) else None
+    if effective_weight_kg is None:
+        try:
+            if gender_normalized:
+                ideal_range = await get_ideal_range(
+                    db,
+                    species_normalized,
+                    breed_normalized,
+                    gender_normalized,
+                    dob,
+                )
+                effective_weight_kg = _midpoint_from_confident_ideal_range(ideal_range)
+            else:
+                male_range = await get_ideal_range(db, species_normalized, breed_normalized, "male", dob)
+                female_range = await get_ideal_range(db, species_normalized, breed_normalized, "female", dob)
+                candidates: list[float] = []
+                for r in (male_range, female_range):
+                    midpoint = _midpoint_from_confident_ideal_range(r)
+                    if midpoint is not None:
+                        candidates.append(midpoint)
+                if candidates:
+                    effective_weight_kg = round(sum(candidates) / len(candidates), 1)
+        except Exception as e:
+            logger.warning("Could not approximate weight for nutrition targets: %s", e)
+
+    weight_bucket = _weight_bucket(effective_weight_kg)
+    gender_tag = (gender_normalized[0] if gender_normalized else "u")
+    age_context_key = f"{age_category}|{gender_tag}|{weight_bucket}"
 
     # 1. Check DB cache
     try:
@@ -260,7 +329,7 @@ async def get_nutrition_targets(
             .filter(
                 NutritionTargetCache.species == species_normalized,
                 NutritionTargetCache.breed_normalized == breed_normalized,
-                NutritionTargetCache.age_category == age_category,
+                NutritionTargetCache.age_category == age_context_key,
             )
             .first()
         )
@@ -269,22 +338,26 @@ async def get_nutrition_targets(
             if cached.created_at.replace(tzinfo=None) > staleness_cutoff:
                 logger.info(
                     "Nutrition target cache hit: %s %s %s",
-                    species_normalized, breed_normalized, age_category,
+                    species_normalized, breed_normalized, age_context_key,
                 )
                 return cached.targets_json
             else:
                 db.delete(cached)
                 db.commit()
-                logger.info("Deleted stale nutrition target cache for %s %s", breed_normalized, age_category)
+                logger.info("Deleted stale nutrition target cache for %s %s", breed_normalized, age_context_key)
     except Exception as e:
         logger.warning("Nutrition target cache lookup failed: %s", e)
 
     # 2. Call OpenAI
-    age_description = _calculate_age_description(dob)
+    age_description = _calculate_age_description(dob) if dob else None
     try:
         result = await retry_openai_call(
             _call_openai_nutrition_targets,
-            species_normalized, breed_normalized, age_description,
+            species_normalized,
+            breed_normalized,
+            age_description,
+            effective_weight_kg,
+            gender_normalized,
         )
     except Exception as e:
         logger.error("OpenAI nutrition target lookup failed: %s", e)
@@ -304,12 +377,12 @@ async def get_nutrition_targets(
         cache_entry = NutritionTargetCache(
             species=species_normalized,
             breed_normalized=breed_normalized,
-            age_category=age_category,
+            age_category=age_context_key,
             targets_json=result,
         )
         db.add(cache_entry)
         db.commit()
-        logger.info("Cached nutrition targets for %s %s %s", species_normalized, breed_normalized, age_category)
+        logger.info("Cached nutrition targets for %s %s %s", species_normalized, breed_normalized, age_context_key)
     except Exception as e:
         db.rollback()
         logger.info("Nutrition target cache race condition (already cached): %s", e)
@@ -318,11 +391,25 @@ async def get_nutrition_targets(
 
 
 async def _call_openai_nutrition_targets(
-    species: str, breed: str, age_description: str,
+    species: str,
+    breed: str,
+    age_description: str | None,
+    weight_kg: float | None,
+    gender: str | None,
 ) -> dict | None:
     """Call OpenAI for breed-specific daily nutrition targets."""
     client = _get_openai_client()
-    user_prompt = f"Species: {species}\nBreed: {breed}\nAge: {age_description}"
+    prompt_lines = [
+        f"Species: {species}",
+        f"Breed: {breed}",
+    ]
+    if age_description:
+        prompt_lines.append(f"Age: {age_description}")
+    if isinstance(weight_kg, (int, float)) and weight_kg > 0:
+        prompt_lines.append(f"Weight_kg: {float(weight_kg):g}")
+    if gender:
+        prompt_lines.append(f"Gender: {gender}")
+    user_prompt = "\n".join(prompt_lines)
 
     response = await client.chat.completions.create(
         model=OPENAI_QUERY_MODEL,
@@ -677,28 +764,39 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
     pet_gender = getattr(pet, "gender", None)
     condition_full_names = [c.name for c in conditions] if conditions else []
 
-    targets_coro = get_nutrition_targets(db, pet.species, pet.breed, pet.dob)
-    estimation_coros = [
-        estimate_food_nutrition(
+    # Resolve target and item estimations in a serialized manner to avoid
+    # concurrent use of the same SQLAlchemy session across awaited tasks.
+    try:
+        targets = await get_nutrition_targets(
             db,
-            item.label,
-            item.type,
-            species=pet.species,
-            breed=pet.breed,
-            weight_kg=pet_weight_kg,
-            age_description=pet_age_desc,
-            gender=pet_gender,
-            conditions=condition_full_names,
+            pet.species,
+            pet.breed,
+            pet.dob,
+            pet_weight_kg,
+            pet_gender,
         )
-        for item in unmatched_items
-    ]
+    except Exception as e:
+        logger.error("Nutrition target lookup failed in analysis: %s", e)
+        targets = dict(DEFAULT_TARGETS)
 
-    results = await asyncio.gather(targets_coro, *estimation_coros, return_exceptions=True)
-    targets = results[0] if not isinstance(results[0], Exception) else dict(DEFAULT_TARGETS)
-    estimations = [
-        r if not isinstance(r, Exception) else None
-        for r in results[1:]
-    ]
+    estimations: list[dict | None] = []
+    for item in unmatched_items:
+        try:
+            estimated = await estimate_food_nutrition(
+                db,
+                item.label,
+                item.type,
+                species=pet.species,
+                breed=pet.breed,
+                weight_kg=pet_weight_kg,
+                age_description=pet_age_desc,
+                gender=pet_gender,
+                conditions=condition_full_names,
+            )
+        except Exception as e:
+            logger.error("Food estimation failed for %s: %s", item.label, e)
+            estimated = None
+        estimations.append(estimated)
 
     # Aggregate nutritional values
     actual = {

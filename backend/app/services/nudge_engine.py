@@ -13,7 +13,7 @@ import logging
 from datetime import date, datetime, timedelta
 
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.core.constants import (
     NUDGE_CACHE_HOURS,
@@ -57,6 +57,8 @@ CHECKUP_KEYWORDS = {"checkup", "annual", "wellness", "blood test", "preventive b
 def _classify_item(item_name: str) -> str | None:
     """Classify a preventive_master item_name into a nudge category."""
     name_lower = item_name.lower()
+    if re.search(r"\b\d+\s*[- ]?in\s*[- ]?1\b", name_lower):
+        return "vaccine"
     for kw in VACCINE_KEYWORDS:
         if kw in name_lower:
             return "vaccine"
@@ -70,6 +72,15 @@ def _classify_item(item_name: str) -> str | None:
         if kw in name_lower:
             return "checkup"
     return None
+
+
+def _record_item_name(record: PreventiveRecord) -> str:
+    """Resolve a human-readable preventive item name for master/custom records."""
+    if record.preventive_master and record.preventive_master.item_name:
+        return record.preventive_master.item_name
+    if record.custom_preventive_item and record.custom_preventive_item.item_name:
+        return record.custom_preventive_item.item_name
+    return record.medicine_name or "Unknown"
 
 
 def _make_nudge(pet_id, category: str, priority: str, title: str, message: str,
@@ -99,7 +110,10 @@ def _generate_vaccine_nudges(db: Session, pet_id, pet_name: str, species: str) -
     today = date.today()
     records = (
         db.query(PreventiveRecord)
-        .join(PreventiveMaster)
+        .options(
+            selectinload(PreventiveRecord.preventive_master),
+            selectinload(PreventiveRecord.custom_preventive_item),
+        )
         .filter(
             PreventiveRecord.pet_id == pet_id,
             PreventiveRecord.status != "cancelled",
@@ -108,9 +122,9 @@ def _generate_vaccine_nudges(db: Session, pet_id, pet_name: str, species: str) -
     )
 
     for rec in records:
-        if not rec.preventive_master or not _classify_item(rec.preventive_master.item_name) == "vaccine":
+        item_name = _record_item_name(rec)
+        if _classify_item(item_name) != "vaccine":
             continue
-        item_name = rec.preventive_master.item_name
 
         if rec.status == "overdue":
             nudges.append(_make_nudge(
@@ -152,7 +166,10 @@ def _generate_deworming_nudges(db: Session, pet_id, pet_name: str, species: str)
     today = date.today()
     records = (
         db.query(PreventiveRecord)
-        .join(PreventiveMaster)
+        .options(
+            selectinload(PreventiveRecord.preventive_master),
+            selectinload(PreventiveRecord.custom_preventive_item),
+        )
         .filter(
             PreventiveRecord.pet_id == pet_id,
             PreventiveRecord.status != "cancelled",
@@ -161,9 +178,9 @@ def _generate_deworming_nudges(db: Session, pet_id, pet_name: str, species: str)
     )
 
     for rec in records:
-        if not rec.preventive_master or _classify_item(rec.preventive_master.item_name) != "deworming":
+        item_name = _record_item_name(rec)
+        if _classify_item(item_name) != "deworming":
             continue
-        item_name = rec.preventive_master.item_name
 
         if rec.status == "overdue":
             nudges.append(_make_nudge(
@@ -189,7 +206,10 @@ def _generate_flea_nudges(db: Session, pet_id, pet_name: str, species: str) -> l
     today = date.today()
     records = (
         db.query(PreventiveRecord)
-        .join(PreventiveMaster)
+        .options(
+            selectinload(PreventiveRecord.preventive_master),
+            selectinload(PreventiveRecord.custom_preventive_item),
+        )
         .filter(
             PreventiveRecord.pet_id == pet_id,
             PreventiveRecord.status != "cancelled",
@@ -198,9 +218,9 @@ def _generate_flea_nudges(db: Session, pet_id, pet_name: str, species: str) -> l
     )
 
     for rec in records:
-        if not rec.preventive_master or _classify_item(rec.preventive_master.item_name) != "flea":
+        item_name = _record_item_name(rec)
+        if _classify_item(item_name) != "flea":
             continue
-        item_name = rec.preventive_master.item_name
 
         if rec.status == "overdue":
             nudges.append(_make_nudge(
@@ -361,9 +381,9 @@ def _generate_checkup_nudges(db: Session, pet_id, pet_name: str) -> list[Nudge]:
                 icon="🩸",
             ))
     else:
-        # No blood test on record at all — medium priority
+        # No blood test on record at all — urgent priority
         nudges.append(_make_nudge(
-            pet_id, "checkup", "medium",
+            pet_id, "checkup", "urgent",
             "No blood test on record",
             f"Consider scheduling a blood test for {pet_name}.",
             icon="🩸",
@@ -372,7 +392,10 @@ def _generate_checkup_nudges(db: Session, pet_id, pet_name: str) -> list[Nudge]:
     # Check full preventive panel (any checkup-classified preventive record)
     checkup_records = (
         db.query(PreventiveRecord)
-        .join(PreventiveMaster)
+        .options(
+            selectinload(PreventiveRecord.preventive_master),
+            selectinload(PreventiveRecord.custom_preventive_item),
+        )
         .filter(
             PreventiveRecord.pet_id == pet_id,
             PreventiveRecord.status != "cancelled",
@@ -381,7 +404,8 @@ def _generate_checkup_nudges(db: Session, pet_id, pet_name: str) -> list[Nudge]:
     )
     latest_checkup_date = None
     for rec in checkup_records:
-        if rec.preventive_master and _classify_item(rec.preventive_master.item_name) == "checkup":
+        item_name = _record_item_name(rec)
+        if _classify_item(item_name) == "checkup":
             if rec.last_done_date:
                 if latest_checkup_date is None or rec.last_done_date > latest_checkup_date:
                     latest_checkup_date = rec.last_done_date

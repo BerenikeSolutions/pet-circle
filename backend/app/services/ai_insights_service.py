@@ -85,8 +85,8 @@ _FREQUENCY_QUALIFIER_RE = re.compile(
     r"^\s*(?:occasional(?:ly)?|sometimes|rarely|infrequently)\s+",
     re.IGNORECASE,
 )
-_LEADING_PERIODIC_QUALIFIER_RE = re.compile(
-    r"^\s*(?:daily|weekly|monthly)\s+([a-z][a-z\-]*)\s*$",
+_STANDALONE_FREQUENCY_QUALIFIER_RE = re.compile(
+    r"^\s*(?:occasional(?:ly)?|sometimes|rarely|infrequently)\s*$",
     re.IGNORECASE,
 )
 _MEASURE_TOKEN_RE = re.compile(r"\b\d+(?:\.\d+)?\s*(?:g|kg|ml|l|cups?|tbsp|tsp|x)\b", re.IGNORECASE)
@@ -114,9 +114,9 @@ def _extract_main_food_items(*texts: str, apply_noise_filter: bool = True) -> li
             # Strip frequency snippets so labels stay as clean food names.
             chunk = _FREQUENCY_FRAGMENT_RE.sub("", chunk)
             chunk = _FREQUENCY_QUALIFIER_RE.sub("", chunk)
-            periodic_match = _LEADING_PERIODIC_QUALIFIER_RE.match(chunk)
-            if periodic_match:
-                chunk = periodic_match.group(1)
+            standalone_probe = re.sub(r"\s+", " ", chunk).strip(" .,!?:;-")
+            if _STANDALONE_FREQUENCY_QUALIFIER_RE.match(standalone_probe):
+                continue
             chunk = _MEASURE_TOKEN_RE.sub("", chunk)
             chunk = re.sub(r"\b\d+\b", "", chunk)
             chunk = re.sub(r"\s+", " ", chunk).strip(" .,-")

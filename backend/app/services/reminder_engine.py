@@ -64,6 +64,7 @@ from app.models.condition import Condition
 from app.models.condition_medication import ConditionMedication
 from app.models.condition_monitoring import ConditionMonitoring
 from app.models.contact import Contact
+from app.models.custom_preventive_item import CustomPreventiveItem
 from app.models.diet_item import DietItem
 from app.models.hygiene_preference import HygienePreference
 from app.models.message_log import MessageLog
@@ -316,10 +317,11 @@ def _collect_candidates(db: Session, today: date) -> list[ReminderCandidate]:
 def _candidates_from_preventive_records(db: Session, today: date) -> list[ReminderCandidate]:
     """Build candidates from preventive_records with status upcoming/overdue."""
     rows = (
-        db.query(PreventiveRecord, Pet, User, PreventiveMaster)
+        db.query(PreventiveRecord, Pet, User, PreventiveMaster, CustomPreventiveItem)
         .join(Pet, PreventiveRecord.pet_id == Pet.id)
         .join(User, Pet.user_id == User.id)
         .outerjoin(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
+        .outerjoin(CustomPreventiveItem, PreventiveRecord.custom_preventive_item_id == CustomPreventiveItem.id)
         .filter(
             PreventiveRecord.status.in_(["upcoming", "overdue"]),
             PreventiveRecord.next_due_date.isnot(None),
@@ -333,12 +335,16 @@ def _candidates_from_preventive_records(db: Session, today: date) -> list[Remind
     vaccine_groups: dict[tuple, list] = {}
     candidates: list[ReminderCandidate] = []
 
-    for record, pet, user, master in rows:
+    for record, pet, user, master, custom_item in rows:
         if not record.next_due_date:
             continue
 
         due = record.next_due_date
-        item_name = master.item_name if master else (record.medicine_name or "Unknown")
+        item_name = (
+            (master.item_name if master else None)
+            or (custom_item.item_name if custom_item else None)
+            or (record.medicine_name or "Unknown")
+        )
         category = _classify_item(item_name)
         snooze = _snooze_for_category(category)
 
@@ -1098,6 +1104,8 @@ def _get_breed_consequence(db: Session, breed: str | None, category: str) -> str
 def _classify_item(item_name: str) -> str:
     """Classify a preventive master item name into a reminder category."""
     name_lower = item_name.lower()
+    if re.search(r"\b\d+\s*[- ]?in\s*[- ]?1\b", name_lower):
+        return "vaccine"
     if any(k in name_lower for k in VACCINE_KEYWORDS):
         return "vaccine"
     if any(k in name_lower for k in DEWORMING_KEYWORDS):

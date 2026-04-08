@@ -136,3 +136,83 @@ def test_route_message_transcript_dashboard_precedence(monkeypatch):
     msg["text"] = "dashboard link"
     asyncio.run(message_router.route_message(db, msg))  # type: ignore[arg-type]
     assert calls["dashboard_links"] == 1
+
+
+def test_route_message_onboarding_uses_button_payload_as_text(monkeypatch):
+    pet = SimpleNamespace(id="pet-rt-2", name="Zayn", created_at=1)
+    user = SimpleNamespace(
+        id="user-rt-2",
+        onboarding_state="awaiting_preventive",
+        onboarding_completed_at=None,
+        order_state=None,
+        active_reminder_id=None,
+        mobile_number="enc",
+    )
+    db = _FakeDB(pet=pet)
+
+    captured = {"text": None}
+
+    def fake_get_or_create_user(_db, _from_number):
+        return user, True
+
+    async def fake_send_text(_db, _to, _text):
+        return None
+
+    async def fake_onboarding_step(_db, _user, text, _send_fn, message_data=None):
+        captured["text"] = text
+
+    monkeypatch.setattr(message_router, "get_or_create_user", fake_get_or_create_user)
+    monkeypatch.setattr(message_router, "send_text_message", fake_send_text)
+    monkeypatch.setattr(message_router, "handle_onboarding_step", fake_onboarding_step)
+
+    msg = {
+        "from_number": "919188877766",
+        "type": "button",
+        "message_id": "wamid.route.btn.1",
+        "text": None,
+        "button_payload": "no",
+    }
+
+    asyncio.run(message_router.route_message(db, msg))  # type: ignore[arg-type]
+
+    assert captured["text"] == "no"
+
+
+def test_route_message_onboarding_uses_uppercase_button_payload_as_text(monkeypatch):
+    pet = SimpleNamespace(id="pet-rt-3", name="Zayn", created_at=1)
+    user = SimpleNamespace(
+        id="user-rt-3",
+        onboarding_state="awaiting_preventive",
+        onboarding_completed_at=None,
+        order_state=None,
+        active_reminder_id=None,
+        mobile_number="enc",
+    )
+    db = _FakeDB(pet=pet)
+
+    captured = {"text": None}
+
+    def fake_get_or_create_user(_db, _from_number):
+        return user, True
+
+    async def fake_send_text(_db, _to, _text):
+        return None
+
+    async def fake_onboarding_step(_db, _user, text, _send_fn, message_data=None):
+        captured["text"] = text
+
+    monkeypatch.setattr(message_router, "get_or_create_user", fake_get_or_create_user)
+    monkeypatch.setattr(message_router, "send_text_message", fake_send_text)
+    monkeypatch.setattr(message_router, "handle_onboarding_step", fake_onboarding_step)
+
+    msg = {
+        "from_number": "919188877766",
+        "type": "button",
+        "message_id": "wamid.route.btn.2",
+        "text": None,
+        "button_payload": "NO",
+    }
+
+    asyncio.run(message_router.route_message(db, msg))  # type: ignore[arg-type]
+
+    assert captured["text"] == "NO"

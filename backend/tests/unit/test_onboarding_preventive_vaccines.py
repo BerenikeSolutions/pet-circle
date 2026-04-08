@@ -180,3 +180,74 @@ def test_enrich_preventive_categories_from_catalog_backfills_missing_bucket() ->
         "medicine": "Simparica Trio",
         "prevention_targets": [],
     }
+
+
+def test_all_of_the_above_fills_missing_preventive_categories() -> None:
+    parsed = {
+        "vaccines": None,
+        "vaccine_specifics": [],
+        "deworming": {"date": "March 2026", "medicine": "Simparica", "prevention_targets": ["deworming", "flea_tick"]},
+        "flea_tick": {"date": "March 2026", "medicine": "Simparica", "prevention_targets": ["deworming", "flea_tick"]},
+        "blood_test": "March 2026",
+        "missing": ["vaccines"],
+    }
+
+    enriched = onboarding._apply_all_preventive_categories_intent("all of the above last month", parsed)
+    normalized = onboarding._normalize_preventive_medicine_categories(enriched)
+
+    assert normalized["vaccines"] == "March 2026"
+    assert normalized["missing"] == []
+
+
+def test_all_of_the_above_with_exclusion_does_not_fill_excluded_category() -> None:
+    parsed = {
+        "vaccines": None,
+        "vaccine_specifics": [],
+        "deworming": {"date": "March 2026", "medicine": "Simparica", "prevention_targets": ["deworming", "flea_tick"]},
+        "flea_tick": {"date": "March 2026", "medicine": "Simparica", "prevention_targets": ["deworming", "flea_tick"]},
+        "blood_test": "March 2026",
+        "missing": ["vaccines"],
+    }
+
+    enriched = onboarding._apply_all_preventive_categories_intent(
+        "all of the above except vaccines",
+        parsed,
+    )
+    normalized = onboarding._normalize_preventive_medicine_categories(enriched)
+
+    assert normalized["vaccines"] is None
+    assert "vaccines" in normalized["missing"]
+
+
+def test_all_of_the_above_does_not_override_explicit_vaccine_none() -> None:
+    parsed = {
+        "vaccines": "none",
+        "vaccine_specifics": [],
+        "deworming": {"date": "March 2026", "medicine": "Simparica", "prevention_targets": ["deworming", "flea_tick"]},
+        "flea_tick": {"date": "March 2026", "medicine": "Simparica", "prevention_targets": ["deworming", "flea_tick"]},
+        "blood_test": "March 2026",
+        "missing": ["vaccines"],
+    }
+
+    enriched = onboarding._apply_all_preventive_categories_intent("all of the above last month", parsed)
+    normalized = onboarding._normalize_preventive_medicine_categories(enriched)
+
+    assert normalized["vaccines"] == "none"
+    assert "vaccines" not in normalized["missing"]
+
+
+def test_all_of_the_above_not_blood_test_does_not_fill_blood_test() -> None:
+    parsed = {
+        "vaccines": "March 2026",
+        "vaccine_specifics": [],
+        "deworming": {"date": "March 2026", "medicine": "Simparica", "prevention_targets": ["deworming", "flea_tick"]},
+        "flea_tick": {"date": "March 2026", "medicine": "Simparica", "prevention_targets": ["deworming", "flea_tick"]},
+        "blood_test": None,
+        "missing": ["blood_test"],
+    }
+
+    enriched = onboarding._apply_all_preventive_categories_intent("all of the above not blood test", parsed)
+    normalized = onboarding._normalize_preventive_medicine_categories(enriched)
+
+    assert normalized["blood_test"] is None
+    assert "blood_test" in normalized["missing"]

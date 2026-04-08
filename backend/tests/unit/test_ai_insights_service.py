@@ -118,12 +118,20 @@ def test_format_found_diet_summary_preserves_daily_brand_name():
     assert summary == "Daily Delight kibble. No supplements."
 
 
-def test_format_found_diet_summary_strips_weekly_leading_qualifier():
-    foods = [SimpleNamespace(type="homemade", label="weekly egg", detail=None)]
+def test_format_found_diet_summary_drops_standalone_sometimes():
+    foods = [SimpleNamespace(type="homemade", label="sometimes", detail=None)]
 
     summary = _format_found_diet_summary(foods, [])
 
-    assert summary == "Egg. No supplements."
+    assert summary == "No supplements."
+
+
+def test_format_found_diet_summary_drops_standalone_sometimes_with_punctuation():
+    foods = [SimpleNamespace(type="homemade", label="sometimes.", detail=None)]
+
+    summary = _format_found_diet_summary(foods, [])
+
+    assert summary == "No supplements."
 
 
 class _InsightQuery:

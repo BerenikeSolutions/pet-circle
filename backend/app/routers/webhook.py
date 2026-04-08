@@ -395,12 +395,16 @@ def _extract_message_data(payload: dict) -> dict:
         # in constants — never hardcoded in this extraction layer.
         button_obj = message.get("button", {})
         result["button_payload"] = button_obj.get("payload")
+        # Keep the human-visible button text too so onboarding can process
+        # simple replies like "Yes" / "No" as regular input.
+        result["text"] = button_obj.get("text")
 
     elif msg_type == "interactive":
         # Interactive list/button reply — different structure from simple buttons.
         interactive_obj = message.get("interactive", {})
         button_reply = interactive_obj.get("button_reply", {})
         result["button_payload"] = button_reply.get("id")
+        result["text"] = button_reply.get("title")
         result["type"] = "button"  # Normalize to "button" for downstream processing.
 
     return result

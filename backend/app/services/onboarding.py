@@ -31,7 +31,7 @@ from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 from openai import AsyncOpenAI
-from sqlalchemy import case
+from sqlalchemy import case, func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -54,6 +54,7 @@ from app.models.deferred_care_plan_pending import DeferredCarePlanPending
 from app.models.condition import Condition
 from app.models.document import Document
 from app.models.pet import Pet
+from app.models.custom_preventive_item import CustomPreventiveItem
 from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
 from app.models.product_catalog import ProductCatalog
@@ -547,7 +548,7 @@ async def _send_onboarding_resume(db, user, state, send_fn):
     if last_saved:
         greeting += f"\n\nLast saved: {last_saved}."
 
-    next_question = _get_question_for_state(state, pet)
+    next_question = _get_question_for_state(state, pet, _get_onboarding_data(user))
     await send_fn(db, mobile, f"{greeting}\n\n{next_question}")
 
 
@@ -583,9 +584,33 @@ def _get_last_saved_detail(user, pet, db) -> str:
     return ""
 
 
-def _get_question_for_state(state: str, pet=None) -> str:
+def _build_supplements_example(onboarding_data: dict | None = None) -> str:
+    """Build supplements examples, omitting omega when already captured in meal details."""
+    labels = (onboarding_data or {}).get("meal_supplement_labels") or []
+    has_omega = any(
+        re.search(r"\bomega\s*[- ]?\s*3\b", str(label).strip().lower()) is not None
+        for label in labels
+    )
+    if has_omega:
+        return "joint support, calcium, probiotics"
+    return "joint support, Omega-3, calcium"
+
+
+def _supplements_question_for_pet(pet_name: str, onboarding_data: dict | None = None) -> str:
+    """Return the supplements question with context-aware examples."""
+    example_text = _build_supplements_example(onboarding_data)
+    return (
+        f"Is {pet_name} on any supplements right now? "
+        f"(e.g., {example_text} — or just say None)"
+    )
+
+
+def _get_question_for_state(state: str, pet=None, onboarding_data: dict | None = None) -> str:
     """Return the question prompt corresponding to the current onboarding state."""
     pet_name = pet.name if pet else "your pet"
+
+    if state == "awaiting_supplements":
+        return _supplements_question_for_pet(pet_name, onboarding_data)
 
     prompts = {
         "welcome": "What's your pet's name?",
@@ -602,10 +627,6 @@ def _get_question_for_state(state: str, pet=None) -> str:
         ),
         "awaiting_meal_details": (
             f"What does {pet_name}'s typical daily diet look like?"
-        ),
-        "awaiting_supplements": (
-            f"Is {pet_name} on any supplements right now? "
-            f"(e.g., joint support, Omega-3, calcium — or just say None)"
         ),
         "awaiting_preventive": (
             f"What do you remember about {pet_name}'s vaccines, deworming, "
@@ -991,6 +1012,7 @@ async def _step_food_type(db, user, text, send_fn):
     _set_onboarding_data(user, "food_type", food_type)
     _set_onboarding_data(user, "meal_details_attempts", 0)
     _set_onboarding_data(user, "meal_confirm_pending", False)
+    _set_onboarding_data(user, "meal_supplement_labels", [])
     user.onboarding_state = "awaiting_meal_details"
 
     # Contextual meal details question — store the example so we can
@@ -998,7 +1020,7 @@ async def _step_food_type(db, user, text, send_fn):
     _MEAL_EXAMPLES = {
         "home": "boiled chicken + rice in the morning, dal + roti at night, occasional egg",
         "packaged": "Royal Canin Adult kibble 50g × 3 times a day, small treat in the evening",
-        "mix": "Pedigree kibble in the morning, home-cooked khichdi at night, egg twice a week",
+        "mix": "Royal Canin kibble 2 cups/day + 1 cup cooked carrot",
     }
     example_text = _MEAL_EXAMPLES.get(food_type, _MEAL_EXAMPLES["mix"])
     _set_onboarding_data(user, "meal_example_shown", example_text)
@@ -1066,13 +1088,17 @@ async def _step_meal_details(db, user, text, send_fn):
             # Parse the resolved diet text into items.
             items = await _parse_diet_input(final_diet)
             await _store_meal_items(db, pet, items, food_type)
+            meal_supp_labels = await _store_meal_supplement_items(db, pet, final_diet)
+            _set_onboarding_data(user, "meal_supplement_labels", meal_supp_labels)
+
+        if text_lower in _SKIP_INPUTS:
+            _set_onboarding_data(user, "meal_supplement_labels", [])
 
         user.onboarding_state = "awaiting_supplements"
         db.commit()
         await send_fn(
             db, mobile,
-            f"Noted. Is {pet.name} on any supplements right now? "
-            f"(e.g., joint support, Omega-3, calcium — or just say None)",
+            f"Noted. {_supplements_question_for_pet(pet.name, _get_onboarding_data(user))}",
         )
         return
 
@@ -1107,14 +1133,17 @@ async def _step_meal_details(db, user, text, send_fn):
 
         items = await _parse_diet_input(text)
         await _store_meal_items(db, pet, items, food_type)
+        meal_supp_labels = await _store_meal_supplement_items(db, pet, text)
+        _set_onboarding_data(user, "meal_supplement_labels", meal_supp_labels)
+    else:
+        _set_onboarding_data(user, "meal_supplement_labels", [])
 
     user.onboarding_state = "awaiting_supplements"
     db.commit()
 
     await send_fn(
         db, mobile,
-        f"Noted. Is {pet.name} on any supplements right now? "
-        f"(e.g., joint support, Omega-3, calcium — or just say None)",
+        f"Noted. {_supplements_question_for_pet(pet.name, _get_onboarding_data(user))}",
     )
 
 
@@ -1183,6 +1212,7 @@ async def _step_preventive(db, user, text, send_fn):
         return
 
     text_lower = text.strip().lower()
+    normalized = re.sub(r"[.!?,]+$", "", text_lower)
     od = _get_onboarding_data(user)
     confirm_pending = od.get("preventive_confirm_pending", False)
     example_shown = od.get("preventive_example_shown", "")
@@ -1224,7 +1254,12 @@ async def _step_preventive(db, user, text, send_fn):
         return
 
     # Skip / nothing done.
-    if text_lower in _SKIP_INPUTS or text_lower in _NONE_KEYWORDS or text_lower in {"nothing done", "no idea", "don't remember", "dont remember"}:
+    if (
+        normalized in _SKIP_INPUTS
+        or normalized in _NONE_KEYWORDS
+        or normalized in _NO_INPUTS
+        or normalized in {"nothing done", "no idea", "don't remember", "dont remember"}
+    ):
         await _transition_to_documents(db, user, pet, send_fn)
         return
 
@@ -1315,6 +1350,53 @@ async def _step_preventive(db, user, text, send_fn):
     await _transition_to_documents(db, user, pet, send_fn)
 
 
+async def _extract_meal_supplement_items(text: str) -> list[tuple[str, str]]:
+    """Extract supplement-only items from meal details without hardcoded names."""
+    client = _get_openai_onboarding_client()
+    prompt = (
+        "A pet parent shared their pet's meal details. Extract ONLY supplement items. "
+        "Supplements include capsules/oils/powders/tablets/herbal add-ons and health "
+        "support additives, even when mixed into food (like a measured pinch, drops, or dose). "
+        "Do NOT include normal staple foods/meals. "
+        "Return JSON only with format: "
+        '{"supplements": [{"label": "short name", "detail": "dose/frequency or empty"}]}. '
+        "If none found, return {\"supplements\": []}.\n\n"
+        f"Meal text: {text}"
+    )
+    try:
+        response = await retry_openai_call(
+            client.chat.completions.create,
+            model="gpt-4.1-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=350,
+        )
+        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        data = json.loads(raw)
+        items = data.get("supplements", [])
+        return [
+            (item.get("label", "").strip(), (item.get("detail", "") or "").strip())
+            for item in items
+            if (item.get("label") or "").strip()
+        ]
+    except Exception as e:
+        logger.warning("Meal supplement extraction failed: %s", str(e))
+        return []
+
+
+async def _store_meal_supplement_items(db, pet, meal_text: str) -> list[str]:
+    """Persist supplement items inferred from meal-details response."""
+    supplements = await _extract_meal_supplement_items(meal_text)
+    stored_labels: list[str] = []
+    for label, detail in supplements:
+        try:
+            await add_diet_item(db, pet.id, "supplement", label, detail or None)
+            stored_labels.append(label)
+        except Exception as e:
+            logger.error("Failed to save meal-derived supplement for pet %s: %s", str(pet.id), str(e))
+    return stored_labels
+
+
 async def _step_prev_retry(db, user, text, send_fn):
     """
     Step 8: Collect remaining preventive info. Never re-asks again.
@@ -1328,9 +1410,14 @@ async def _step_prev_retry(db, user, text, send_fn):
         return
 
     text_lower = text.strip().lower()
+    normalized = re.sub(r"[.!?,]+$", "", text_lower)
 
     # Even if skip / none, just proceed.
-    if text_lower not in _SKIP_INPUTS and text_lower not in _NONE_KEYWORDS:
+    if (
+        normalized not in _SKIP_INPUTS
+        and normalized not in _NONE_KEYWORDS
+        and normalized not in _NO_INPUTS
+    ):
         parsed = await _parse_preventive_care(text)
         await _store_preventive_data(db, pet, parsed)
 
@@ -1411,6 +1498,89 @@ def _upsert_preventive_record(db, pet, master, parsed_date, medicine_name: str |
             medicine_name=medicine_name,
         )
         db.add(record)
+
+
+def _normalize_custom_vaccine_name(name: str | None) -> str:
+    """Normalize a user-mentioned custom vaccine label for persistence."""
+    cleaned = re.sub(r"\s+", " ", (name or "").strip())
+    return cleaned[:120]
+
+
+def _prefer_user_scoped_custom_vaccine(name: str | None) -> bool:
+    """Return True when a vaccine should be stored as a user-scoped custom item."""
+    normalized = (name or "").strip().lower()
+    if not normalized:
+        return True
+
+    # Combo labels like 5-in-1/7-in-1 are user phrasing and should not fan out
+    # into shared core masters unless explicitly mapped by product evidence.
+    if re.search(r"\b\d+\s*[- ]?in\s*[- ]?1\b", normalized):
+        return True
+
+    return False
+
+
+def _upsert_user_custom_vaccine_record(db: Session, pet: Pet, vaccine_name: str, parsed_date: date) -> None:
+    """Create/update a per-user custom vaccine item and pet preventive record."""
+    from app.services.preventive_calculator import compute_next_due_date, compute_status
+
+    custom_name = _normalize_custom_vaccine_name(vaccine_name)
+    if not custom_name:
+        return
+
+    custom_item = (
+        db.query(CustomPreventiveItem)
+        .filter(
+            CustomPreventiveItem.user_id == pet.user_id,
+            func.lower(CustomPreventiveItem.item_name) == custom_name.lower(),
+            CustomPreventiveItem.species == pet.species,
+        )
+        .first()
+    )
+    if custom_item is None:
+        custom_item = CustomPreventiveItem(
+            user_id=pet.user_id,
+            item_name=custom_name,
+            category="complete",
+            circle="health",
+            species=pet.species,
+            recurrence_days=365,
+            medicine_dependent=False,
+            reminder_before_days=30,
+            overdue_after_days=14,
+        )
+        db.add(custom_item)
+        db.flush()
+
+    recurrence_days = custom_item.recurrence_days or 365
+    reminder_before_days = custom_item.reminder_before_days or 30
+    next_due = compute_next_due_date(parsed_date, recurrence_days)
+    status = compute_status(next_due, reminder_before_days)
+
+    existing = (
+        db.query(PreventiveRecord)
+        .filter(
+            PreventiveRecord.pet_id == pet.id,
+            PreventiveRecord.custom_preventive_item_id == custom_item.id,
+        )
+        .first()
+    )
+    if existing:
+        if not existing.last_done_date or parsed_date > existing.last_done_date:
+            existing.last_done_date = parsed_date
+            existing.next_due_date = next_due
+            existing.status = status
+        return
+
+    db.add(
+        PreventiveRecord(
+            pet_id=pet.id,
+            custom_preventive_item_id=custom_item.id,
+            last_done_date=parsed_date,
+            next_due_date=next_due,
+            status=status,
+        )
+    )
 
 
 def _essential_annual_vaccine_masters(db: Session, species: str) -> list[PreventiveMaster]:
@@ -1667,12 +1837,18 @@ async def _store_preventive_data(db, pet, parsed: dict):
     for spec in parsed.get("vaccine_specifics") or []:
         if not isinstance(spec, dict):
             continue
-        master = _match_specific_vaccine_master(db, pet.species, spec.get("name", ""))
-        if master is None:
+        raw_vaccine_name = str(spec.get("name") or "").strip()
+        if not raw_vaccine_name:
             continue
+        master = None
+        if not _prefer_user_scoped_custom_vaccine(raw_vaccine_name):
+            master = _match_specific_vaccine_master(db, pet.species, raw_vaccine_name)
         spec_date = await _parse_preventive_date_value(spec.get("date") or "", pet)
         if spec_date:
-            _upsert_preventive_record(db, pet, master, spec_date)
+            if master is not None:
+                _upsert_preventive_record(db, pet, master, spec_date)
+            else:
+                _upsert_user_custom_vaccine_record(db, pet, raw_vaccine_name, spec_date)
 
     # --- Remaining categories: one master per species ---
     _ITEM_NAME_MAP = {
@@ -1803,10 +1979,11 @@ async def _ai_clarify_input(
         f"Expected input format/examples: {expected_format}\n"
         f"The user replied: \"{user_message}\"\n\n"
         "Their reply doesn't clearly match what's needed. "
-        "Generate a short, warm, clarifying question (1-2 sentences max) that:\n"
-        "- Acknowledges what they said without being dismissive\n"
+        "Generate a short, clear clarifying question (1-2 sentences max) that:\n"
+        "- Starts by saying you didn't fully understand/catch their reply\n"
+        "- Does NOT sound congratulatory or appreciative (avoid phrases like 'Great', 'Awesome', 'Thanks for sharing', 'Got it')\n"
         "- Gently asks for the specific information needed\n"
-        "- Gives a concrete example if helpful\n"
+        "- If you include an example, reuse the same pattern/topic as the expected_format above (do not switch to a different style)\n"
         "- Uses a conversational WhatsApp tone (not formal)\n"
         "- Does NOT use emojis excessively (max 1)\n\n"
         "Return ONLY the clarifying message text, nothing else."
@@ -1826,7 +2003,10 @@ async def _ai_clarify_input(
         logger.warning("AI clarification failed: %s", str(e))
 
     # Fallback to a generic re-ask if AI fails.
-    return f"I didn't quite catch that. Could you rephrase? {expected_format}"
+    return (
+        "I didn't quite catch that. Could you share it in this format: "
+        f"{expected_format}"
+    )
 
 
 _SAME_AS_EXAMPLE_PHRASES = frozenset({
@@ -2257,6 +2437,7 @@ async def _parse_preventive_care(text: str) -> dict:
             "blood_test": data.get("blood_test"),
             "missing": data.get("missing", []),
         }
+        parsed = _apply_all_preventive_categories_intent(text, parsed)
         return _normalize_preventive_medicine_categories(parsed)
     except Exception as e:
         logger.warning("Preventive care GPT parse failed: %s", str(e))
@@ -2268,6 +2449,134 @@ async def _parse_preventive_care(text: str) -> dict:
             "blood_test": None,
             "missing": [],
         }
+
+
+def _contains_all_preventive_categories_intent(text: str) -> bool:
+    """Return True when user intent clearly covers all preventive categories."""
+    lowered = (text or "").strip().lower()
+    if not lowered:
+        return False
+
+    positive_phrases = (
+        "all of the above",
+        "all the above",
+        "all above",
+        "everything above",
+        "all of these",
+        "all four",
+    )
+    if not any(phrase in lowered for phrase in positive_phrases):
+        return False
+
+    if "only" in lowered:
+        return False
+    if "except" in lowered or "but not" in lowered:
+        return False
+
+    # Explicit negation of any tracked category should disable global fill.
+    negated_category_pattern = (
+        r"\bnot\s+(vaccines?|deworm(ing)?|worms?|flea|tick|"
+        r"flea\s*(and|&)\s*tick|blood\s*tests?)\b"
+    )
+    if re.search(negated_category_pattern, lowered):
+        return False
+
+    return True
+
+
+def _infer_preventive_timeframe_from_text(text: str) -> str | None:
+    """Extract a best-effort shared timeframe phrase from user text."""
+    lowered = (text or "").strip().lower()
+    if not lowered:
+        return None
+
+    if "last month" in lowered:
+        return "last month"
+    if "this month" in lowered:
+        return "this month"
+    if "today" in lowered:
+        return "today"
+    if "yesterday" in lowered:
+        return "yesterday"
+
+    relative_match = re.search(r"\b\d+\s+(day|days|week|weeks|month|months|year|years)\s+ago\b", lowered)
+    if relative_match:
+        return relative_match.group(0)
+
+    month_match = re.search(
+        r"\b(january|february|march|april|may|june|july|august|september|october|november|december|"
+        r"jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\b",
+        lowered,
+    )
+    if month_match:
+        return month_match.group(0)
+
+    return None
+
+
+def _apply_all_preventive_categories_intent(text: str, parsed: dict) -> dict:
+    """Fill missing preventive categories when user says 'all of the above'."""
+    if not _contains_all_preventive_categories_intent(text):
+        return parsed
+
+    updated = dict(parsed or {})
+
+    def _pick_shared_date(data: dict) -> str | None:
+        vaccines = data.get("vaccines")
+        if isinstance(vaccines, str) and vaccines and vaccines != "none":
+            return vaccines
+
+        specifics = data.get("vaccine_specifics") or []
+        if isinstance(specifics, list):
+            for entry in specifics:
+                if isinstance(entry, dict) and entry.get("date"):
+                    return entry["date"]
+
+        for key in ("deworming", "flea_tick"):
+            value = data.get(key)
+            if isinstance(value, dict) and value.get("date"):
+                return value.get("date")
+            if isinstance(value, str) and value and value != "none":
+                return value
+
+        blood_test = data.get("blood_test")
+        if isinstance(blood_test, str) and blood_test and blood_test != "none":
+            return blood_test
+
+        return _infer_preventive_timeframe_from_text(text)
+
+    shared_date = _pick_shared_date(updated)
+    if not shared_date:
+        return updated
+
+    vaccines_value = updated.get("vaccines")
+    explicit_vaccine_none = isinstance(vaccines_value, str) and vaccines_value == "none"
+    has_vaccine_data = bool(
+        explicit_vaccine_none
+        or (isinstance(vaccines_value, str) and vaccines_value and vaccines_value != "none")
+        or (isinstance(updated.get("vaccine_specifics"), list) and updated.get("vaccine_specifics"))
+    )
+    if not has_vaccine_data:
+        updated["vaccines"] = shared_date
+
+    if not updated.get("deworming"):
+        updated["deworming"] = {
+            "date": shared_date,
+            "medicine": None,
+            "prevention_targets": [],
+        }
+
+    if not updated.get("flea_tick"):
+        updated["flea_tick"] = {
+            "date": shared_date,
+            "medicine": None,
+            "prevention_targets": [],
+        }
+
+    if not updated.get("blood_test"):
+        updated["blood_test"] = shared_date
+
+    return updated
 
 
 def _normalize_preventive_medicine_categories(parsed: dict) -> dict:

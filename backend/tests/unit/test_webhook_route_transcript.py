@@ -215,3 +215,69 @@ def test_webhook_returns_200_while_background_task_finishes_later(client, app, m
                 pass
         webhook._DEDUP_CACHE.clear()
         app.dependency_overrides.clear()
+
+
+def test_extract_message_data_button_includes_button_text() -> None:
+    payload = {
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messages": [
+                                {
+                                    "from": "919188877700",
+                                    "id": "wamid.btn.1",
+                                    "type": "button",
+                                    "button": {
+                                        "payload": "NO",
+                                        "text": "No",
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+
+    result = webhook._extract_message_data(payload)
+
+    assert result["type"] == "button"
+    assert result["button_payload"] == "NO"
+    assert result["text"] == "No"
+
+
+def test_extract_message_data_interactive_button_includes_title() -> None:
+    payload = {
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "value": {
+                            "messages": [
+                                {
+                                    "from": "919188877700",
+                                    "id": "wamid.btn.2",
+                                    "type": "interactive",
+                                    "interactive": {
+                                        "button_reply": {
+                                            "id": "no",
+                                            "title": "No",
+                                        }
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+
+    result = webhook._extract_message_data(payload)
+
+    assert result["type"] == "button"
+    assert result["button_payload"] == "no"
+    assert result["text"] == "No"

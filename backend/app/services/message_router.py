@@ -552,7 +552,7 @@ async def route_message(db: Session, message_data: dict) -> None:
                     await _handle_media(db, user, message_data)
                     return
                 # Text input → route to onboarding handler (handles "skip" + rejection).
-                text = (message_data.get("text") or "").strip()
+                text = (message_data.get("text") or message_data.get("button_payload") or "").strip()
                 if text:
                     await handle_onboarding_step(db, user, text, send_text_message, message_data=message_data)
                     if user.onboarding_state == "awaiting_documents":
@@ -564,7 +564,7 @@ async def route_message(db: Session, message_data: dict) -> None:
                 return
 
             # --- All other onboarding states: block non-text ---
-            text = (message_data.get("text") or "").strip()
+            text = (message_data.get("text") or message_data.get("button_payload") or "").strip()
             if not text:
                 # Only send the "please send text" prompt once per user.
                 # Check message_logs for whether we already sent it.
