@@ -90,3 +90,29 @@ def test_noise_suppression_still_blocks_supplement_ack_noise() -> None:
         "ok",
         {},
     ) is True
+
+
+def test_noise_suppression_allows_preventive_negative_reply() -> None:
+    assert onboarding._is_irrelevant_noise_for_state(
+        "awaiting_preventive",
+        "no",
+        {},
+    ) is False
+    assert onboarding._is_irrelevant_noise_for_state(
+        "awaiting_preventive",
+        "none",
+        {},
+    ) is False
+
+
+def test_noise_suppression_allows_prev_retry_negative_reply() -> None:
+    assert onboarding._is_irrelevant_noise_for_state(
+        "awaiting_prev_retry",
+        "no",
+        {},
+    ) is False
+    assert onboarding._is_irrelevant_noise_for_state(
+        "awaiting_prev_retry",
+        "n",
+        {},
+    ) is False

@@ -502,6 +502,13 @@ def _is_irrelevant_noise_for_state(
     ):
         return False
 
+    # In preventive steps, explicit negative replies are valid because users
+    # can answer "no"/"none" to indicate no history for missing categories.
+    if state in {"awaiting_preventive", "awaiting_prev_retry"} and (
+        normalized in _NO_INPUTS or normalized in _NONE_KEYWORDS
+    ):
+        return False
+
     if state in _NOISE_ALLOWED_STATES:
         return False
     if _has_pending_confirmation_prompt(state, onboarding_data):

@@ -873,6 +873,8 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
         # User-set custom recurrence per item_key (latest record wins).
         # When present, overrides baseline_days for next_due and freq_label.
         custom_recurrence_by_key: dict[str, int] = {}
+        # Track medicine_name per item_key for dual-use frequency unification.
+        medicine_by_key: dict[str, str] = {}
 
         record_rows = (
             db.query(PreventiveRecord, PreventiveMaster)
@@ -923,6 +925,9 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
             # Track user-set custom recurrence (latest record per key wins).
             if record.custom_recurrence_days:
                 custom_recurrence_by_key[item_key] = record.custom_recurrence_days
+            # Track medicine name for dual-use frequency unification.
+            if record.medicine_name:
+                medicine_by_key[item_key] = record.medicine_name.strip().lower()
             # Keep the item key even when no completion date exists so core
             # preventive rows (vaccines/deworming/flea-tick) still appear.
             if record.last_done_date is not None:
@@ -1013,6 +1018,28 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
         today = date.today()
         next_year = today + timedelta(days=_NEXT_YEAR_THRESHOLD_DAYS)
 
+        # ── Dual-use medicine frequency unification ──────────────────────
+        # When the same medicine (e.g. Simparica) is used for both deworming
+        # and tick_flea, unify the effective frequency to the shortest interval
+        # so the dashboard shows the same frequency for both items.
+        _DUAL_USE_KEYS = {"deworming", "tick_flea"}
+        dual_medicines: dict[str, set[str]] = {}  # medicine → {item_keys}
+        for ik, med in medicine_by_key.items():
+            tt = test_type_by_key.get(ik)
+            if tt in _DUAL_USE_KEYS and med:
+                dual_medicines.setdefault(med, set()).add(ik)
+        dual_use_override: dict[str, int] = {}
+        for med, iks in dual_medicines.items():
+            covered_types = {test_type_by_key.get(k) for k in iks}
+            if covered_types >= _DUAL_USE_KEYS:
+                # Same medicine covers both — use the shortest baseline.
+                shortest = min(
+                    _get_baseline_protocol(life_stage, test_type_by_key[k])
+                    for k in iks
+                )
+                for k in iks:
+                    dual_use_override[k] = shortest
+
         # Buckets keyed by item_key (conflict resolution applied inline).
         attend_items: dict[str, CarePlanItemDict] = {}
         continue_items: dict[str, CarePlanItemDict] = {}
@@ -1028,11 +1055,12 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
             baseline_days = _get_baseline_protocol(life_stage, test_type)
             prescription = prescriptions_by_key.get(item_key)
 
-            # When the user has set a custom recurrence via the dashboard,
-            # use it for next_due and freq_label so the care plan reflects
-            # user edits.  Classification still uses baseline_days (the
-            # algorithm evaluates adherence against the medical protocol).
-            effective_days = custom_recurrence_by_key.get(item_key) or baseline_days
+            # Priority: custom recurrence (user-set) > dual-use override > baseline.
+            effective_days = (
+                custom_recurrence_by_key.get(item_key)
+                or dual_use_override.get(item_key)
+                or baseline_days
+            )
 
             classification = _classify_test(filtered, baseline_days, prescription)
             next_due = _compute_next_due(classification, filtered, effective_days, prescription)
