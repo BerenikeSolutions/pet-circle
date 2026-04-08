@@ -157,6 +157,7 @@ _CAT_BREEDS: dict[str, str] = {
 
     # British Shorthair
     "british shorthair": "British Shorthair",
+    "british short hair": "British Shorthair",
     "brit": "British Shorthair",
     "british": "British Shorthair",
     "bsh": "British Shorthair",
@@ -183,6 +184,7 @@ _CAT_BREEDS: dict[str, str] = {
     # Exotic
     "exotic": "Exotic Shorthair",
     "exotic shorthair": "Exotic Shorthair",
+    "exotic short hair": "Exotic Shorthair",
 
     # Rex
     "cornish rex": "Cornish Rex",
@@ -196,8 +198,10 @@ _CAT_BREEDS: dict[str, str] = {
 
     # Domestic
     "domestic shorthair": "Domestic Shorthair",
+    "domestic short hair": "Domestic Shorthair",
     "dsh": "Domestic Shorthair",
     "domestic longhair": "Domestic Longhair",
+    "domestic long hair": "Domestic Longhair",
     "dlh": "Domestic Longhair",
 
     # Tabby

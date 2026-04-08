@@ -213,6 +213,10 @@ def _detect_species_intent(text_lower: str) -> str | None:
                 break
 
     if not matched_species:
+        # Fallback: check if input is a known breed name in breed dictionaries.
+        inferred = _infer_species_from_breed(normalized)
+        if inferred:
+            return inferred
         return None
 
     if "dog" in matched_species:
