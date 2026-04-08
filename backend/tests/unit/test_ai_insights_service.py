@@ -27,6 +27,9 @@ class _ScalarQuery:
     def join(self, *args, **kwargs):
         return self
 
+    def outerjoin(self, *args, **kwargs):
+        return self
+
     def scalar(self):
         return self._value
 
