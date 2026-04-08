@@ -2437,6 +2437,16 @@ async def _parse_preventive_care(text: str) -> dict:
             "blood_test": data.get("blood_test"),
             "missing": data.get("missing", []),
         }
+        # Guardrail: if GPT missed a specific combo vaccine mention like
+        # "5-in-1" and only returned a generic vaccines date, convert it into
+        # vaccine_specifics so we do not fan out generic updates to all core vaccines.
+        combo_match = re.search(r"\b(\d+\s*[- ]?in\s*[- ]?1)\b", (text or "").lower())
+        if combo_match and not parsed.get("vaccine_specifics"):
+            combo_name = re.sub(r"\s+", " ", combo_match.group(1)).replace(" -", "-").replace("- ", "-")
+            combo_date = parsed.get("vaccines")
+            if isinstance(combo_date, str) and combo_date and combo_date != "none":
+                parsed["vaccine_specifics"] = [{"name": combo_name, "date": combo_date}]
+                parsed["vaccines"] = None
         parsed = _apply_all_preventive_categories_intent(text, parsed)
         return _normalize_preventive_medicine_categories(parsed)
     except Exception as e:

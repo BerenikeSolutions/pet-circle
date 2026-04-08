@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from app.models.condition import Condition
 from app.models.condition_medication import ConditionMedication
+from app.models.custom_preventive_item import CustomPreventiveItem
 from app.models.diet_item import DietItem
 from app.models.order import Order
 from app.models.pet import Pet
@@ -231,8 +232,12 @@ _ITEM_NAME_PATTERNS: list[tuple[str, str]] = [
     ("stool", "fecal"),
     ("deworming", "deworming"),
     ("deworm", "deworming"),
+    ("in-1", "vaccine"),
+    (" in 1", "vaccine"),
     ("tick", "tick_flea"),
     ("flea", "tick_flea"),
+    ("preventive blood test", "cbc_chemistry"),
+    ("blood test", "cbc_chemistry"),
     ("leptospirosis", "vaccine"),
     ("bordetella", "vaccine"),
     ("kennel cough", "vaccine"),
@@ -877,10 +882,14 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
         medicine_by_key: dict[str, str] = {}
 
         record_rows = (
-            db.query(PreventiveRecord, PreventiveMaster)
-            .join(
+            db.query(PreventiveRecord, PreventiveMaster, CustomPreventiveItem)
+            .outerjoin(
                 PreventiveMaster,
                 PreventiveRecord.preventive_master_id == PreventiveMaster.id,
+            )
+            .outerjoin(
+                CustomPreventiveItem,
+                PreventiveRecord.custom_preventive_item_id == CustomPreventiveItem.id,
             )
             .filter(
                 PreventiveRecord.pet_id == pet.id,
@@ -893,15 +902,24 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
         # non-puppy pets.  Adults should only see the annual DHPPi + Rabies.
         _skip_puppy_series = life_stage != LifeStage.PUPPY
 
-        for record, master in record_rows:
-            if _skip_puppy_series and master.recurrence_days and master.recurrence_days >= 36500:
+        for record, master, custom_item in record_rows:
+            if master and _skip_puppy_series and master.recurrence_days and master.recurrence_days >= 36500:
                 continue
-            test_type = _normalize_item_name(master.item_name)
+
+            item_name = (
+                (master.item_name if master else None)
+                or (custom_item.item_name if custom_item else None)
+            )
+            if not item_name:
+                continue
+
+            test_type = _normalize_item_name(item_name)
             if test_type == "other":
                 continue
 
             is_core_type = test_type in {"vaccine", "deworming", "tick_flea"}
-            if record.last_done_date is None and not is_core_type:
+            is_blood_test_type = test_type == "cbc_chemistry" and "blood" in item_name.lower()
+            if record.last_done_date is None and not is_core_type and not is_blood_test_type:
                 # Keep existing rule: non-core types only appear when there is
                 # historical completion evidence or an active prescription.
                 continue
@@ -917,11 +935,11 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
             ):
                 continue
 
-            item_key = _build_item_key(test_type, master.item_name)
+            item_key = _build_item_key(test_type, item_name)
             if item_key not in records_by_key:
                 records_by_key[item_key] = []
                 test_type_by_key[item_key] = test_type
-                item_names_by_key[item_key] = master.item_name
+                item_names_by_key[item_key] = item_name
             # Track user-set custom recurrence (latest record per key wins).
             if record.custom_recurrence_days:
                 custom_recurrence_by_key[item_key] = record.custom_recurrence_days
