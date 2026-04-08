@@ -145,6 +145,17 @@ _DOC_SKIP_PHRASES = (
 )
 _DOC_UPLOAD_INTENT_WORDS = ("upload", "sending", "send", "attach", "attached")
 
+_SPECIES_INTENT_PATTERNS: dict[str, tuple[str, ...]] = {
+    "dog": (r"\bdog\b", r"\bdogs\b", r"\bpuppy\b", r"\bcanine\b"),
+    "cat": (r"\bcat\b", r"\bcats\b", r"\bkitten\b", r"\bfeline\b"),
+    "rabbit": (r"\brabbit\b", r"\brabbits\b", r"\bbunny\b", r"\bbunnies\b", r"\bholland\s+lop\b"),
+    "bird": (r"\bbird\b", r"\bbirds\b", r"\bparrot\b", r"\bparakeet\b", r"\bcockatiel\b"),
+    "fish": (r"\bfish\b", r"\bfishes\b", r"\bgoldfish\b", r"\bbetta\b"),
+    "hamster": (r"\bhamster\b", r"\bhamsters\b"),
+    "guinea pig": (r"\bguinea\s+pig\b", r"\bguinea\s+pigs\b"),
+    "turtle": (r"\bturtle\b", r"\btortoise\b"),
+}
+
 
 def _is_doc_skip_intent(text_lower: str) -> bool:
     """Return True when the user indicates they are skipping document upload."""
@@ -166,6 +177,60 @@ def _is_doc_skip_intent(text_lower: str) -> bool:
             return True
 
     return False
+
+
+def _detect_species_intent(text_lower: str) -> str | None:
+    """Detect explicit species mention from free-text onboarding input."""
+    normalized = (text_lower or "").strip().lower()
+    if not normalized:
+        return None
+
+    shorthand_map = {
+        "d": "dog",
+        "dog": "dog",
+        "c": "cat",
+        "cat": "cat",
+        "r": "rabbit",
+    }
+    if normalized in shorthand_map:
+        return shorthand_map[normalized]
+
+    def _is_negated_match(source_text: str, match_start: int) -> bool:
+        """Return True when species keyword is immediately negated."""
+        prefix = source_text[max(0, match_start - 12):match_start]
+        return bool(re.search(r"(?:^|\b)(?:not|no)\b(?:\s+\w+){0,2}\s*$", prefix))
+
+    matched_species: list[str] = []
+    for species, patterns in _SPECIES_INTENT_PATTERNS.items():
+        for pattern in patterns:
+            match = re.search(pattern, normalized)
+            if match and not _is_negated_match(normalized, match.start()):
+                matched_species.append(species)
+                break
+
+    if not matched_species:
+        return None
+
+    if "dog" in matched_species:
+        return "dog"
+    return matched_species[0]
+
+
+async def _send_dog_only_scope_message(
+    db: Session,
+    mobile: str,
+    send_fn,
+    pet_name: str,
+    species_label: str,
+) -> None:
+    """Send a graceful out-of-scope message for non-dog onboarding."""
+    await send_fn(
+        db,
+        mobile,
+        f"Thanks for sharing. Right now, PetCircle onboarding supports *dogs only*. "
+        f"I noted that {pet_name} is a *{species_label}*. "
+        "If you'd like, reply *WAITLIST* and we'll notify you when support opens for more species.",
+    )
 
 
 def get_or_create_user(db: Session, mobile_number: str) -> tuple[User | None, bool]:
@@ -889,12 +954,19 @@ async def _step_breed_age(db, user, text, send_fn):
     od = _get_onboarding_data(user)
     attempts = od.get("breed_age_attempts", 0)
 
+    if text_lower == "waitlist" and od.get("non_dog_waitlist_prompted"):
+        await send_fn(
+            db,
+            mobile,
+            "You're on our waitlist for non-dog species support. We'll share updates here.",
+        )
+        return
+
     # Handle species sub-question: if we're waiting for dog/cat answer.
     if od.get("needs_species"):
-        species_map = {"d": "dog", "dog": "dog", "c": "cat", "cat": "cat"}
-        species = species_map.get(text_lower)
-        if species:
-            pet.species = species
+        detected_species = _detect_species_intent(text_lower)
+        if detected_species == "dog":
+            pet.species = "dog"
             _set_onboarding_data(user, "needs_species", False)
             _set_onboarding_data(user, "gender_weight_attempts", 0)
             user.onboarding_state = "awaiting_gender_weight"
@@ -905,7 +977,16 @@ async def _step_breed_age(db, user, text, send_fn):
                 f"Are they neutered or spayed? (e.g., male, 22, neutered)",
             )
             return
-        await send_fn(db, mobile, f"Please reply *dog* or *cat*.")
+        if detected_species and detected_species != "dog":
+            _set_onboarding_data(user, "non_dog_waitlist_prompted", True)
+            db.commit()
+            await _send_dog_only_scope_message(db, mobile, send_fn, pet.name, detected_species)
+            return
+        await send_fn(
+            db,
+            mobile,
+            "Please reply *dog* to continue. We currently support dogs only.",
+        )
         return
 
     # Handle skip.
@@ -920,13 +1001,19 @@ async def _step_breed_age(db, user, text, send_fn):
         )
         return
 
+    explicit_species = _detect_species_intent(text_lower)
+    if explicit_species and explicit_species != "dog":
+        _set_onboarding_data(user, "non_dog_waitlist_prompted", True)
+        db.commit()
+        await _send_dog_only_scope_message(db, mobile, send_fn, pet.name, explicit_species)
+        return
+
     # GPT parse breed + age.
     parsed = await _parse_breed_age(text)
     breed_raw = parsed.get("breed")
     species_gpt = parsed.get("species")
     age_years = parsed.get("age_years")
     age_text_raw = parsed.get("age_text")
-    confident = parsed.get("confident", False)
 
     # Normalize and save breed if provided.
     if breed_raw:
@@ -943,8 +1030,13 @@ async def _step_breed_age(db, user, text, send_fn):
             species_gpt = _infer_species_from_breed(breed_raw)
 
     # Set species if newly identified.
-    if species_gpt in {"dog", "cat"}:
+    if species_gpt == "dog":
         pet.species = species_gpt
+    elif species_gpt and species_gpt != "dog":
+        _set_onboarding_data(user, "non_dog_waitlist_prompted", True)
+        db.commit()
+        await _send_dog_only_scope_message(db, mobile, send_fn, pet.name, str(species_gpt))
+        return
 
     # Save age if provided.
     # Prefer explicit DOB from GPT (user gave a birth date like "11/11/2021").
@@ -1019,7 +1111,7 @@ async def _step_breed_age(db, user, text, send_fn):
         db.commit()
         await send_fn(
             db, mobile,
-            f"Got it! Is {pet.name} a *dog* or a *cat*?",
+            f"Got it! Is {pet.name} a *dog*? We currently support dogs only.",
         )
         return
 
