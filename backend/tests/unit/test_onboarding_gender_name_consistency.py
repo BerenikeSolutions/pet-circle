@@ -9,6 +9,14 @@ os.environ.setdefault("APP_ENV", "test")
 from app.services import onboarding
 
 
+def test_sanitize_pet_name_candidate_strips_typed_wrong_suffix() -> None:
+    assert onboarding._sanitize_pet_name_candidate("Mocha, I typed wrong") == "Mocha"
+
+
+def test_extract_pet_name_correction_ignores_typed_wrong_suffix() -> None:
+    assert onboarding._extract_pet_name_correction("Actually his name is Mocha, I typed wrong") == "Mocha"
+
+
 @pytest.mark.asyncio
 async def test_handle_onboarding_step_applies_pet_name_correction(monkeypatch) -> None:
     user = SimpleNamespace(

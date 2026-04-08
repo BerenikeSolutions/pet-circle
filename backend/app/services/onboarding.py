@@ -560,6 +560,24 @@ def _resolve_binary_confirmation_reply(text_lower: str) -> str | None:
     return None
 
 
+def _sanitize_pet_name_candidate(candidate: str) -> str:
+    """Normalize a pet-name candidate and strip trailing correction chatter."""
+    cleaned = re.sub(r"\s+", " ", (candidate or "").strip())
+    if not cleaned:
+        return ""
+
+    cleaned = re.split(
+        r"\b(?:i\s+typed\s+(?:it\s+)?wrong|typed\s+wrong|type\s+wrong|that\s+was\s+wrong|my\s+bad|sorry)\b",
+        cleaned,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip()
+    cleaned = re.split(r"[.,!?;]", cleaned, maxsplit=1)[0].strip()
+    cleaned = cleaned.strip("\"'` ")
+
+    return cleaned[:100]
+
+
 def _extract_pet_name_correction(text: str) -> str | None:
     """Extract corrected pet name from messages like 'actually his name is Mocha'."""
     normalized = re.sub(r"\s+", " ", (text or "").strip())
@@ -575,7 +593,8 @@ def _extract_pet_name_correction(text: str) -> str | None:
         if not match:
             continue
         candidate = re.sub(r"\s+", " ", (match.group(1) or "").strip(" .,!?:;"))
-        candidate = re.split(r"\b(?:and|but|because|so)\b|[.,!?;]", candidate, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        candidate = re.split(r"\b(?:and|but|because|so)\b", candidate, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+        candidate = _sanitize_pet_name_candidate(candidate)
         if not candidate:
             continue
         words = candidate.split()
@@ -631,7 +650,7 @@ async def _ai_extract_pet_name_correction(text: str, current_name: str | None = 
         corrected = str(data.get("corrected_name") or "").strip()
         if not corrected:
             return None
-        corrected = re.sub(r"\s+", " ", corrected).strip(" .,!?:;")
+        corrected = _sanitize_pet_name_candidate(corrected)
         corrected = corrected[:100].title()
         if not corrected:
             return None
@@ -818,7 +837,7 @@ async def _step_welcome(db, user, text, send_fn, message_data: dict | None = Non
         if profile_name:
             user.full_name = profile_name.strip().title()
 
-    pet_name = text.strip().title()
+    pet_name = _sanitize_pet_name_candidate(text).title()
     if len(pet_name) < 1 or len(pet_name) > 100:
         await send_fn(db, mobile, "Please enter a valid pet name.")
         return
