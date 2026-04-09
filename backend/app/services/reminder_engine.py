@@ -73,6 +73,7 @@ from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
 from app.models.reminder import Reminder
 from app.models.user import User
+from app.services.care_plan_engine import get_display_name
 from app.services.reminder_templates import (
     MAX_REMINDERS_PER_PET_PER_DAY,
     MIN_DAYS_BETWEEN_SAME_ITEM_REMINDERS,
@@ -360,14 +361,15 @@ def _candidates_from_preventive_records(db: Session, today: date) -> list[Remind
                                         "mandatory": [], "optional": [],
                                         "record_ids": []}
             is_essential = master and master.category == "essential"
+            display = get_display_name(item_name)
             if is_essential:
-                vaccine_groups[key]["mandatory"].append(item_name)
+                vaccine_groups[key]["mandatory"].append(display)
             else:
-                vaccine_groups[key]["optional"].append(item_name)
+                vaccine_groups[key]["optional"].append(display)
             vaccine_groups[key]["record_ids"].append(record.id)
             continue
 
-        item_desc = item_name
+        item_desc = get_display_name(item_name)
         candidates.append(ReminderCandidate(
             pet=pet, user=user,
             category=category, item_desc=item_desc,

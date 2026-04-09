@@ -496,6 +496,12 @@ async def handle_onboarding_step(
     elif state == "awaiting_prev_retry":
         await _step_prev_retry(db, user, text, send_fn)
 
+    elif state == "awaiting_vaccine_type":
+        await _step_vaccine_type(db, user, text, send_fn)
+
+    elif state == "awaiting_flea_brand":
+        await _step_flea_brand(db, user, text, send_fn)
+
     elif state == "awaiting_documents":
         await _step_awaiting_documents(db, user, text_lower, send_fn)
 
@@ -1703,6 +1709,32 @@ async def _step_preventive(db, user, text, send_fn):
         await send_fn(db, mobile, clarification)
         return
 
+    # --- Detect generic vaccine mention and flea without brand ---
+    needs_vaccine_type_q = _is_generic_vaccine_mention(parsed)
+    needs_flea_brand_q = _is_flea_without_brand(parsed)
+
+    if needs_vaccine_type_q:
+        # Save parsed data for use after vaccine type answer.
+        _set_onboarding_data(user, "pending_preventive_parsed", parsed)
+        _set_onboarding_data(user, "pending_flea_brand_needed", needs_flea_brand_q)
+        _set_onboarding_data(user, "preventive_attempts", attempts)
+        _set_onboarding_data(user, "preventive_missing", missing)
+        user.onboarding_state = "awaiting_vaccine_type"
+        db.commit()
+        await send_fn(db, mobile, _vaccine_type_question(pet.name))
+        return
+
+    if needs_flea_brand_q:
+        # Save parsed data for use after flea brand answer.
+        _set_onboarding_data(user, "pending_preventive_parsed", parsed)
+        _set_onboarding_data(user, "pending_flea_brand_needed", True)
+        _set_onboarding_data(user, "preventive_attempts", attempts)
+        _set_onboarding_data(user, "preventive_missing", missing)
+        user.onboarding_state = "awaiting_flea_brand"
+        db.commit()
+        await send_fn(db, mobile, _flea_brand_question(pet.name))
+        return
+
     # Store whatever was parsed.
     await _store_preventive_data(db, pet, parsed)
 
@@ -1826,7 +1858,263 @@ async def _step_prev_retry(db, user, text, send_fn):
         and normalized not in _NO_INPUTS
     ):
         parsed = await _parse_preventive_care(text)
+
+        # Apply the same generic vaccine / flea-without-brand detection as
+        # in _step_preventive, but since this is the final retry step we
+        # don't loop — vaccine type and flea brand questions still apply.
+        needs_vaccine_type_q = _is_generic_vaccine_mention(parsed)
+        needs_flea_brand_q = _is_flea_without_brand(parsed)
+
+        if needs_vaccine_type_q:
+            _set_onboarding_data(user, "pending_preventive_parsed", parsed)
+            _set_onboarding_data(user, "pending_flea_brand_needed", needs_flea_brand_q)
+            _set_onboarding_data(user, "preventive_missing", [])
+            _set_onboarding_data(user, "preventive_attempts", 1)
+            user.onboarding_state = "awaiting_vaccine_type"
+            db.commit()
+            await send_fn(db, mobile, _vaccine_type_question(pet.name))
+            return
+
+        if needs_flea_brand_q:
+            _set_onboarding_data(user, "pending_preventive_parsed", parsed)
+            _set_onboarding_data(user, "pending_flea_brand_needed", True)
+            _set_onboarding_data(user, "preventive_missing", [])
+            _set_onboarding_data(user, "preventive_attempts", 1)
+            user.onboarding_state = "awaiting_flea_brand"
+            db.commit()
+            await send_fn(db, mobile, _flea_brand_question(pet.name))
+            return
+
         await _store_preventive_data(db, pet, parsed)
+
+    await _transition_to_documents(db, user, pet, send_fn)
+
+
+# ---------------------------------------------------------------------------
+# Vaccine type selection helpers (new vaccine-specific question flow)
+# ---------------------------------------------------------------------------
+
+def _is_generic_vaccine_mention(parsed: dict) -> bool:
+    """
+    Return True if GPT detected a generic vaccine date (no specific vaccine named).
+    In that case we must ask the user which vaccines their pet actually receives.
+    """
+    generic = parsed.get("vaccines")
+    if not generic or generic == "none":
+        return False
+    specific_with_dates = [
+        s for s in (parsed.get("vaccine_specifics") or [])
+        if isinstance(s, dict)
+        and str(s.get("name") or "").strip()
+        and str(s.get("date") or "").strip()
+    ]
+    return len(specific_with_dates) == 0
+
+
+def _is_flea_without_brand(parsed: dict) -> bool:
+    """
+    Return True if GPT detected a flea/tick date but no medicine/brand name.
+    In that case we must ask for the brand so reminders use the right interval.
+    """
+    flea_tick = parsed.get("flea_tick")
+    if not flea_tick or flea_tick == "none":
+        return False
+    if isinstance(flea_tick, dict):
+        date_val = (flea_tick.get("date") or "").strip()
+        medicine = (flea_tick.get("medicine") or "").strip()
+        return bool(date_val) and not medicine
+    # Plain string date — no medicine.
+    return bool(str(flea_tick).strip())
+
+
+def _vaccine_type_question(pet_name: str) -> str:
+    """Build the vaccine type selection question for the given pet name."""
+    return (
+        f"Which vaccines does {pet_name} receive?\n\n"
+        f"(In India, Rabies and DHPPi are mandatory. Corona and Kennel Cough are "
+        f"optional based on your vet's advice.)\n\n"
+        f"Reply with:\n"
+        f"1️⃣ Mandatory only (Rabies + DHPPi)\n"
+        f"2️⃣ Mandatory + Corona\n"
+        f"3️⃣ Mandatory + Kennel Cough\n"
+        f"4️⃣ All four (Rabies, DHPPi, Corona, Kennel Cough)"
+    )
+
+
+def _flea_brand_question(pet_name: str) -> str:
+    """Build the flea/tick brand question for the given pet name."""
+    return (
+        f"Which brand do you use for flea and tick protection?\n\n"
+        f"(This helps us set the frequency right — for example, if {pet_name} is on "
+        f"*Simparica*, reminder will be set to every 2 months)\n\n"
+        f"Reply with the brand name, or type *not sure* if you don't remember."
+    )
+
+
+def _resolve_vaccine_type_selection(text: str) -> list[str]:
+    """
+    Map the user's reply to a list of vaccine master item_names to update.
+
+    Returns [] if the user says they have not vaccinated (never done).
+    Returns the appropriate list based on option 1–4 or keyword match.
+    """
+    t = text.strip().lower()
+    t = re.sub(r"[.!?,]+$", "", t)
+
+    # "Never done" / skip variants → no vaccines to record.
+    never_keywords = {
+        "never", "never done", "not vaccinated", "no vaccine", "no vaccines",
+        "none", "nope", "n/a", "na", "skip", "not done", "not sure",
+    }
+    if t in never_keywords:
+        return []
+
+    # Option 4 — All four.
+    if t in {"4", "all", "all four", "all 4", "all vaccines", "all four vaccines"}:
+        return [
+            "Rabies Vaccine",
+            "DHPPi",
+            "Canine Coronavirus (CCoV)",
+            "Kennel Cough (Nobivac KC)",
+        ]
+    # Option 3 — Mandatory + Kennel Cough.
+    if (
+        t in {"3", "mandatory + kennel cough", "kennel cough", "mandatory + kennel"}
+        or ("kennel" in t and "corona" not in t)
+    ):
+        return ["Rabies Vaccine", "DHPPi", "Kennel Cough (Nobivac KC)"]
+    # Option 2 — Mandatory + Corona.
+    if (
+        t in {"2", "mandatory + corona", "corona", "mandatory + coronavirus"}
+        or ("corona" in t and "kennel" not in t)
+    ):
+        return ["Rabies Vaccine", "DHPPi", "Canine Coronavirus (CCoV)"]
+    # Option 1 — Mandatory only (default / most common).
+    if t in {
+        "1", "mandatory", "mandatory only", "only mandatory",
+        "rabies and dhppi", "rabies + dhppi", "dhppi and rabies",
+    }:
+        return ["Rabies Vaccine", "DHPPi"]
+
+    # If all four keywords present, treat as option 4.
+    if "kennel" in t and "corona" in t:
+        return [
+            "Rabies Vaccine",
+            "DHPPi",
+            "Canine Coronavirus (CCoV)",
+            "Kennel Cough (Nobivac KC)",
+        ]
+
+    # Default fallback — mandatory only.
+    return ["Rabies Vaccine", "DHPPi"]
+
+
+async def _step_vaccine_type(db, user, text, send_fn):
+    """
+    Handle the user's vaccine type selection reply.
+
+    Reads the pending parsed data from onboarding_data, applies the selected
+    vaccine list, then either asks the flea brand question or stores data and
+    transitions to documents.
+    """
+    mobile = user._plaintext_mobile
+    pet = _get_pending_pet(db, user.id)
+    if not pet:
+        user.onboarding_state = "welcome"
+        db.commit()
+        await send_fn(db, mobile, "Something went wrong. Let's start — what's your pet's name?")
+        return
+
+    od = _get_onboarding_data(user)
+    parsed = dict(od.get("pending_preventive_parsed") or {})
+    flea_brand_needed = od.get("pending_flea_brand_needed", False)
+    missing = od.get("preventive_missing", [])
+    attempts = od.get("preventive_attempts", 0)
+
+    # Resolve which vaccine names the user selected.
+    vaccine_names = _resolve_vaccine_type_selection(text)
+    parsed["vaccine_names_to_update"] = vaccine_names
+
+    if flea_brand_needed:
+        # Store updated parsed data and ask flea brand question next.
+        _set_onboarding_data(user, "pending_preventive_parsed", parsed)
+        _set_onboarding_data(user, "pending_flea_brand_needed", True)
+        _set_onboarding_data(user, "preventive_missing", missing)
+        _set_onboarding_data(user, "preventive_attempts", attempts)
+        user.onboarding_state = "awaiting_flea_brand"
+        db.commit()
+        await send_fn(db, mobile, _flea_brand_question(pet.name))
+        return
+
+    # No flea brand needed — store and proceed.
+    await _store_preventive_data(db, pet, parsed)
+
+    if missing and attempts < 1:
+        _set_onboarding_data(user, "preventive_attempts", 1)
+        user.onboarding_state = "awaiting_prev_retry"
+        db.commit()
+        missing_names = {
+            "vaccines": "vaccines",
+            "deworming": "deworming",
+            "flea_tick": "flea & tick treatment",
+            "blood_test": "blood tests",
+        }
+        missing_readable = [missing_names.get(m, m) for m in missing]
+        missing_str = " and ".join(missing_readable)
+        await send_fn(db, mobile, f"Got it! What about {missing_str}?")
+        return
+
+    await _transition_to_documents(db, user, pet, send_fn)
+
+
+async def _step_flea_brand(db, user, text, send_fn):
+    """
+    Handle the user's flea/tick brand reply.
+
+    Reads the pending parsed data, injects the brand into flea_tick.medicine,
+    stores all preventive data, then transitions to documents.
+    """
+    mobile = user._plaintext_mobile
+    pet = _get_pending_pet(db, user.id)
+    if not pet:
+        user.onboarding_state = "welcome"
+        db.commit()
+        await send_fn(db, mobile, "Something went wrong. Let's start — what's your pet's name?")
+        return
+
+    od = _get_onboarding_data(user)
+    parsed = dict(od.get("pending_preventive_parsed") or {})
+    missing = od.get("preventive_missing", [])
+    attempts = od.get("preventive_attempts", 0)
+
+    # Inject brand into flea_tick entry (unless user said "not sure").
+    brand = text.strip()
+    skip_keywords = {"not sure", "don't know", "dont know", "no idea", "skip", "n/a", "na"}
+    if brand.lower() not in skip_keywords and brand:
+        flea_tick = parsed.get("flea_tick")
+        if isinstance(flea_tick, dict):
+            flea_tick["medicine"] = brand
+            parsed["flea_tick"] = flea_tick
+        elif isinstance(flea_tick, str) and flea_tick and flea_tick != "none":
+            # Convert plain-string date to dict form with medicine.
+            parsed["flea_tick"] = {"date": flea_tick, "medicine": brand}
+
+    await _store_preventive_data(db, pet, parsed)
+
+    if missing and attempts < 1:
+        _set_onboarding_data(user, "preventive_attempts", 1)
+        user.onboarding_state = "awaiting_prev_retry"
+        db.commit()
+        missing_names = {
+            "vaccines": "vaccines",
+            "deworming": "deworming",
+            "flea_tick": "flea & tick treatment",
+            "blood_test": "blood tests",
+        }
+        missing_readable = [missing_names.get(m, m) for m in missing]
+        missing_str = " and ".join(missing_readable)
+        await send_fn(db, mobile, f"Got it! What about {missing_str}?")
+        return
 
     await _transition_to_documents(db, user, pet, send_fn)
 
@@ -2206,17 +2494,31 @@ async def _store_preventive_data(db, pet, parsed: dict):
     ]
 
     generic = parsed.get("vaccines")
+    vaccine_names_to_update = parsed.get("vaccine_names_to_update")  # Set by vaccine type Q&A
     if generic and generic != "none" and not specific_with_dates:
         gen_date = await _parse_preventive_date_value(generic, pet)
         if gen_date:
-            masters = _essential_annual_vaccine_masters(db, pet.species)
-            if not masters:
-                logger.warning(
-                    "No essential annual vaccine masters found for species=%s",
-                    pet.species,
-                )
-            for master in masters:
-                _upsert_preventive_record(db, pet, master, gen_date)
+            if vaccine_names_to_update is not None:
+                # User was asked which vaccines — only update the ones they selected.
+                for vname in vaccine_names_to_update:
+                    master = _match_specific_vaccine_master(db, pet.species, vname)
+                    if master:
+                        _upsert_preventive_record(db, pet, master, gen_date)
+                    else:
+                        logger.warning(
+                            "No master found for selected vaccine '%s' species=%s",
+                            vname, pet.species,
+                        )
+            else:
+                # Legacy path: no vaccine type Q&A ran — fan out to all essential vaccines.
+                masters = _essential_annual_vaccine_masters(db, pet.species)
+                if not masters:
+                    logger.warning(
+                        "No essential annual vaccine masters found for species=%s",
+                        pet.species,
+                    )
+                for master in masters:
+                    _upsert_preventive_record(db, pet, master, gen_date)
 
     # --- Specific vaccines → update only the named master(s) ---
     for spec in parsed.get("vaccine_specifics") or []:

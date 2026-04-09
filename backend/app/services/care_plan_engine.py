@@ -285,6 +285,16 @@ _DISPLAY_NAME: dict[str, str] = {
     "tick/flea": "Flea & Tick Protection",
 }
 
+
+def get_display_name(item_name: str) -> str:
+    """Return the friendly display name for a preventive master item_name.
+
+    Falls back to the original item_name if no override is defined.
+    Used by care_plan_engine (dashboard) and reminder_engine (WhatsApp messages)
+    to ensure consistent naming across all surfaces.
+    """
+    return _DISPLAY_NAME.get(item_name.strip().lower(), item_name)
+
 # Map test_types that should be grouped under another section's key.
 # Deworming items appear under the "Vaccines & Preventive Care" section.
 _SECTION_GROUP: dict[str, str] = {
@@ -1055,42 +1065,49 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
         # even without records).  All other test types (dental, fecal, xray,
         # cbc, urinalysis, usg, ecg, echo) only appear when the pet has
         # uploaded documents proving prior completion or a vet prescription.
-        _ALWAYS_SHOW_TYPES: set[str] = {"vaccine", "tick_flea", "deworming"}
-        has_any_vaccine_record = any(k.startswith("vaccine:") for k in all_item_keys)
+        _ALWAYS_SHOW_TYPES: set[str] = {"tick_flea", "deworming"}
         for ls, tt in BASELINE_PROTOCOL:
             if ls != life_stage.value:
                 continue
             # Skip non-mandatory types that have no records or prescriptions.
             if tt not in _ALWAYS_SHOW_TYPES:
                 continue
-            # If the pet already has specific vaccine records, don't add the
-            # generic "vaccine" baseline — that would show a duplicate generic
-            # row alongside the specific DHPPi / Rabies / etc rows.
-            if tt == "vaccine" and has_any_vaccine_record:
-                continue
+            # Vaccines are handled exclusively by the mandatory phantom block
+            # below (specific vaccine item_keys like "vaccine:rabies vaccine").
+            # The generic "vaccine" key is never added here to avoid a
+            # duplicate fallback row alongside the named vaccine rows.
             if tt not in all_item_keys:
                 all_item_keys.add(tt)
                 test_type_by_key.setdefault(tt, tt)
 
-        # ── Inject core preventive_master vaccines without records ──────────
-        # Core items (is_core=TRUE) like Kennel Cough and CCoV must appear on
-        # the care plan even when the pet has no uploaded records for them.
-        core_masters = (
+        # ── Inject mandatory preventive items without records → Quick Fixes ──
+        # Mandatory items (is_mandatory=TRUE): Rabies, DHPPi, Feline Core,
+        # Deworming, Tick/Flea.  These always appear on the dashboard even when
+        # the pet has no records — they land in the Quick Fixes bucket with a
+        # "Not started" status (displayed as "Recommended" tag).
+        #
+        # Optional vaccines (Kennel Cough, Canine Coronavirus — is_mandatory=FALSE)
+        # are NOT injected here: they only appear when an actual record exists
+        # (i.e., the user said their pet receives those vaccines).
+        mandatory_masters = (
             db.query(PreventiveMaster)
             .filter(
-                PreventiveMaster.is_core == True,
-                PreventiveMaster.circle == "health",
+                PreventiveMaster.is_mandatory == True,
                 PreventiveMaster.species.in_([pet.species, "both"]),
             )
             .all()
         )
-        for master in core_masters:
+        _mandatory_phantom_types: set[str] = {"vaccine", "deworming", "tick_flea"}
+        for master in mandatory_masters:
             if _skip_puppy_series and master.recurrence_days and master.recurrence_days >= 36500:
                 continue
             test_type = _normalize_item_name(master.item_name)
-            if test_type == "other":
+            if test_type not in _mandatory_phantom_types:
                 continue
-            item_key = _build_item_key(test_type, master.item_name)
+            item_key = _build_item_key(
+                test_type,
+                master.item_name if test_type == "vaccine" else None,
+            )
             if item_key not in all_item_keys:
                 all_item_keys.add(item_key)
                 records_by_key.setdefault(item_key, [])
@@ -1167,29 +1184,36 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
                 "orderable": False,
             }
 
-            # ── Conflict resolution: ATTEND TO > CONTINUE > SUGGESTED ────────
-            # Core preventive items (vaccines, deworming, tick/flea) never go
-            # to the Add/Suggested bucket.  They are either Attend To (urgent/
-            # overdue/not-started) or Continue (on-track/due-soon).
+            # ── Conflict resolution: ATTEND TO > CONTINUE > QUICK FIXES ─────
+            # Core preventive types (vaccines, deworming, tick/flea).
             _CORE_TYPES: set[str] = {"vaccine", "deworming", "tick_flea"}
             is_core = test_type in _CORE_TYPES
 
-            is_overdue = status_tag in ("Overdue", "Not started")
+            is_overdue = status_tag == "Overdue"
+            is_no_history = classification == Classification.NO_HISTORY
 
             if classification == Classification.PRESCRIPTION_ACTIVE or is_overdue:
-                # Attend To bucket.  Move out of any other bucket.
+                # Attend To — overdue or active prescription (tag: Urgent).
                 attend_items[item_key] = item
                 continue_items.pop(item_key, None)
                 add_items.pop(item_key, None)
 
+            elif is_no_history:
+                # No history → Quick Fixes to Add (tag: Recommended).
+                # Applies to all types including core preventives.
+                # Mandatory items reach here via phantom entries (see below).
+                if item_key not in attend_items:
+                    add_items[item_key] = item
+                    continue_items.pop(item_key, None)
+
             elif classification == Classification.PERIODIC or is_core:
-                # Continue bucket — only if not already in Attend To.
+                # Continue — on-track / due-soon items with history.
                 if item_key not in attend_items:
                     continue_items[item_key] = item
                     add_items.pop(item_key, None)
 
             else:
-                # Suggested bucket — only if not already in a higher bucket.
+                # Suggested — non-core items with insufficient history.
                 if item_key not in attend_items and item_key not in continue_items:
                     add_items[item_key] = item
 

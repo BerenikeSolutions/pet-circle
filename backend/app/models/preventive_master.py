@@ -76,6 +76,11 @@ class PreventiveMaster(Base):
     # Dogs: 6 core items, Cats: 4 core items.
     is_core = Column(Boolean, default=False, server_default="false")
 
+    # Whether this item is mandatory (always shown on dashboard even without a record).
+    # Mandatory items: Rabies Vaccine, DHPPi, Feline Core, Deworming, Tick/Flea.
+    # Optional items (Kennel Cough, Corona): only shown if a last_done_date record exists.
+    is_mandatory = Column(Boolean, default=False, server_default="false")
+
     # --- Unique Constraint ---
     # Prevents duplicate preventive items for the same species.
     # e.g., only one "Rabies Vaccine" entry for "dog".

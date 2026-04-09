@@ -58,6 +58,7 @@ SEED_DATA: list[dict] = [
         "reminder_before_days": 30,
         "overdue_after_days": 7,
         "is_core": True,
+        "is_mandatory": True,
     },
     {
         "item_name": "Rabies Vaccine",
@@ -69,6 +70,7 @@ SEED_DATA: list[dict] = [
         "reminder_before_days": 30,
         "overdue_after_days": 7,
         "is_core": True,
+        "is_mandatory": True,
     },
     # --- DHPPi (Dogs only) ---
     # Essential. Covers Distemper, Hepatitis, Parvovirus, Parainfluenza.
@@ -84,6 +86,7 @@ SEED_DATA: list[dict] = [
         "reminder_before_days": 30,
         "overdue_after_days": 7,
         "is_core": True,
+        "is_mandatory": True,
     },
     # --- Feline Core (Cats only) ---
     # Essential. Covers FVRCP (Feline Viral Rhinotracheitis, Calicivirus, Panleukopenia).
@@ -98,6 +101,7 @@ SEED_DATA: list[dict] = [
         "reminder_before_days": 30,
         "overdue_after_days": 7,
         "is_core": True,
+        "is_mandatory": True,
     },
     # --- Deworming ---
     # Essential for both dogs and cats. Quarterly (90 days).
@@ -113,6 +117,7 @@ SEED_DATA: list[dict] = [
         "reminder_before_days": 7,
         "overdue_after_days": 7,
         "is_core": True,
+        "is_mandatory": True,
     },
     {
         "item_name": "Deworming",
@@ -124,6 +129,7 @@ SEED_DATA: list[dict] = [
         "reminder_before_days": 7,
         "overdue_after_days": 7,
         "is_core": True,
+        "is_mandatory": True,
     },
     # --- Annual Checkup ---
     # Complementary for both dogs and cats. Yearly (365 days).
@@ -313,6 +319,7 @@ SEED_DATA: list[dict] = [
         "reminder_before_days": 5,
         "overdue_after_days": 3,
         "is_core": True,
+        "is_mandatory": True,
     },
     {
         "item_name": "Tick/Flea",
@@ -324,6 +331,7 @@ SEED_DATA: list[dict] = [
         "reminder_before_days": 5,
         "overdue_after_days": 3,
         "is_core": True,
+        "is_mandatory": True,
     },
     # --- Nail Trimming ---
     # Complementary for both dogs and cats. Every 3 weeks (21 days).
@@ -621,6 +629,7 @@ def seed_preventive_master(db: Session) -> int:
                 reminder_before_days=item_data["reminder_before_days"],
                 overdue_after_days=item_data["overdue_after_days"],
                 is_core=item_data.get("is_core", False),
+                is_mandatory=item_data.get("is_mandatory", False),
             )
             db.add(row)
             db.flush()
