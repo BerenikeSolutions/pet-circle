@@ -1,8 +1,8 @@
 ## Active Feature
-Feature: returning-dashboard
-Spec: .spec/returning-dashboard/requirements.md, design.md
-Tasks: .spec/returning-dashboard/tasks/
-Current task: ALL TASKS COMPLETE
+Feature: cart-rules-engine
+Spec: .spec/cart-rules-engine/requirements.md, design.md
+Tasks: .spec/cart-rules-engine/tasks/
+Current task: .spec/cart-rules-engine/tasks/task-002.md
 Branch: main (no feature branch)
 
 ---

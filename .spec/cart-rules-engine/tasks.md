@@ -1,0 +1,130 @@
+# Implementation Plan: Cart Rules Engine
+
+- [ ] 1. Migration: Drop old product_catalog, create product_food and product_supplement tables
+  - Write migration SQL to drop `product_catalog` table, clear `cart_items` and `order_recommendations`
+  - Create `product_food` table with all columns matching design spec (sku_id PK, brand_id, brand_name, product_line, life_stage, breed_size, pack_size_kg, mrp, discounted_price, condition_tags, breed_tags, vet_diet_flag, active, popularity_rank, monthly_units_sold, price_per_kg, in_stock, notes, created_at)
+  - Create `product_supplement` table with all columns matching design spec
+  - Add indexes: `product_food(brand_id)`, `product_food(condition_tags)`, `product_food(life_stage, breed_size)`, `product_supplement(brand_id)`, `product_supplement(type)`
+  - _Requirements: 1.1, 1.2, 1.3, 1.6, 8.1, 8.2, 8.4_
+  - _Skills: /database-migrations, /postgres-patterns_
+  - **AC:** Migration runs without error. Old `product_catalog` table is gone. Two new tables exist with correct schemas. `cart_items` and `order_recommendations` are cleared. Existing `orders` and `pet_preferences` rows are untouched.
+
+- [ ] 2. Product models and seed script
+  - Create `backend/app/models/product_food.py` with `ProductFood` SQLAlchemy model
+  - Create `backend/app/models/product_supplement.py` with `ProductSupplement` SQLAlchemy model
+  - Remove old `ProductCatalog` model from `backend/app/models/product_catalog.py`
+  - Update `backend/app/models/__init__.py` to export new models, remove old
+  - Write new `backend/scripts/seed_product_catalog.py` that inserts 25 food rows (F001-F025) and 16 supplement rows (S001-S016) from Excel data verbatim
+  - Update all 12 files that import `ProductCatalog` to use new models (`cart_service.py`, `nutrition_service.py`, `onboarding.py`, `medicine_recurrence_service.py`, `dashboard.py`, `food_nutrition_cache.py`, `seed_product_catalog.py`, etc.)
+  - _Requirements: 1.2, 1.3, 1.4, 1.5, 8.5_
+  - _Skills: /python-patterns, /code-writing-software-development_
+  - **AC:** `ProductFood` and `ProductSupplement` models match design spec. Seed script inserts all 41 rows. No file imports `ProductCatalog`. All existing imports compile without error.
+
+- [ ] 3. Signal resolver service -- food rules (A1-A6)
+  - Create `backend/app/services/signal_resolver.py`
+  - Implement `SignalLevel` enum (L5, L4, L3, L2, L2b, L2c, L1) and `SignalResult` dataclass
+  - Implement `resolve_food_signal(db, diet_item, pet, conditions)` with:
+    - Brand extraction from `diet_item.label` + `diet_item.brand` (case-insensitive substring match against `product_food.brand_name`)
+    - Product line detection (match against `product_food.product_line`)
+    - Pack size detection (parse `diet_item.detail` / `diet_item.pack_size_g`)
+    - L5: exact match -> return SKU + 2 alt sizes (rule A1)
+    - L4: brand + line, no size -> pack sizes sorted by popularity, max 3 (rule A2)
+    - L3: brand only -> pet-profile-ranked lines, max 3 (rule A3)
+    - L2c: health condition known -> condition-matched products, top 3 brands (rule A4 variant)
+    - L2b: breed known -> breed-tagged products first, fallback to breed_size (rule A5)
+    - L2: life_stage/breed_size known -> top 3 brands by profile match (rule A4)
+    - L1: nothing -> no products, info prompt message (rule A6)
+  - Implement ranking: condition_match > life_stage > breed_size > popularity_rank
+  - Implement OOS filtering (C2): skip `in_stock=False` as primary, show in-stock alternatives
+  - Implement max 3 trim (C8)
+  - _Requirements: 2.1, 2.3, 2.4, 2.5, 3.1-3.14, 5.2, 5.3, 5.11_
+  - _Skills: /python-patterns, /code-writing-software-development_
+  - **AC:** `resolve_food_signal()` returns correct `SignalResult` for each of the 6 signal levels. Ranking order is correct. OOS products are excluded from primary position. Max 3 products returned.
+
+- [ ] 4. Signal resolver service -- supplement rules (B1-B4)
+  - Add `resolve_supplement_signal(db, diet_item, pet)` to `signal_resolver.py`
+  - Implement supplement signal detection:
+    - Brand extraction from `diet_item.label` / `diet_item.brand` (match against `product_supplement.brand_name`)
+    - Type detection (match label keywords against `product_supplement.type` values: fish_oil, joint_supplement, multivitamin, etc.)
+    - Form/variant detection for L5
+    - Pack size detection for L5
+  - B1: exact match -> direct add, qty=1
+  - B2: brand + type, no size -> pack size options sorted by popularity, max 3
+  - B3: type only -> top 3 brands (2 bestsellers + 1 budget), ranked by popularity + price
+  - B4: generic mention -> no products, info prompt
+  - Apply OOS filtering (C2) and max 3 trim (C8)
+  - _Requirements: 2.2, 2.3, 2.4, 4.1-4.9, 5.2, 5.11_
+  - _Skills: /python-patterns, /code-writing-software-development_
+  - **AC:** `resolve_supplement_signal()` returns correct `SignalResult` for each of the 4 supplement signal levels. B3 returns 2 bestsellers + 1 budget option. OOS excluded. Max 3 products.
+
+- [ ] 5. Unit tests for signal resolver
+  - Create `backend/tests/test_signal_resolver.py`
+  - Write test fixtures: seed `product_food` and `product_supplement` with representative data
+  - Test each food rule: A1 (L5 exact match), A1 fallback (nearest size), A2 (pack selector), A3 (brand lines), A4 (category+profile), A5 (breed-specific), A5 fallback (breed size), A6 (no data)
+  - Test each supplement rule: B1 (exact), B1 fallback (closest variant), B2 (size selector), B3 (type, 2+1 ranking), B4 (generic)
+  - Test cross-cutting: OOS filtering, max 3 trim, ranking order, signal priority (L5 > L4 > L3 > L2)
+  - Test edge cases: empty brand field, multiple condition matches, all products OOS
+  - _Requirements: 2.1-2.5, 3.1-3.14, 4.1-4.9_
+  - _Skills: /tdd-workflow, /python-patterns_
+  - **AC:** All tests pass. Coverage of `signal_resolver.py` >= 90%. Every rule (A1-A6, B1-B4) has at least one test. Edge cases covered.
+
+- [ ] 6. Dashboard API endpoints for product resolution
+  - Add `GET /dashboard/{token}/products/resolve?diet_item_id={uuid}` endpoint
+    - Validate token, look up pet
+    - Fetch diet_item, pet profile, active conditions
+    - Call `resolve_food_signal()` or `resolve_supplement_signal()` based on `diet_item.type`
+    - Apply C5 (vet diet warning flag in response)
+    - Apply C7 (pack size suggestion based on pet weight when L4)
+    - Return `SignalResult` as JSON per design spec
+  - Add `GET /dashboard/{token}/products/search?q={query}` endpoint
+    - Search both `product_food` and `product_supplement` by brand_name, product_line/product_name (ILIKE)
+    - Return max 10 results, in-stock first
+  - Add `POST /dashboard/{token}/cart/add` endpoint
+    - Accept `{sku_id, quantity}`, look up product in food or supplement table (F prefix -> food, S prefix -> supplement)
+    - Create/update `CartItem` with price from DB (never trust client price)
+    - Apply C1 (qty default 1, never auto > 1)
+  - _Requirements: 5.4, 5.6, 5.7, 5.10, 6.9_
+  - _Skills: /api-design, /python-patterns_
+  - **AC:** All three endpoints return correct JSON responses. Token validation works. C5/C7 applied. Price comes from DB. Search returns relevant results.
+
+- [ ] 7. Update care plan engine for signal-level integration
+  - Replace `_resolve_diet_item_order_signals()` in `care_plan_engine.py` with call to `signal_resolver`
+  - For each diet item in the care plan response, include `signal_level` and `has_cta` (boolean)
+  - L2+ items get `cta_label: "Order Now ->"`, L1 items get `cta_label: null` with `info_prompt` text
+  - Preserve existing reorder/due-soon logic for items that have prior orders
+  - _Requirements: 7.1, 7.2, 7.3, 7.4_
+  - _Skills: /python-patterns, /code-writing-software-development_
+  - **AC:** Care plan API response includes `signal_level` per diet item. L1 items have no CTA. L2+ items have "Order Now ->". Existing reorder logic still works.
+
+- [ ] 8. Frontend: ProductSelectorCard component
+  - Create `frontend/src/components/dashboard/ProductSelectorCard.tsx`
+  - Render as bottom sheet overlay (reuse `BottomSheet` from existing UI primitives)
+  - Display product options as radio-selectable cards with: brand, product line, pack size, MRP (strikethrough if discount), discounted price, price per unit
+  - Pre-select top product with qty=1 (C1)
+  - Quantity selector (+/- buttons)
+  - Vet diet disclaimer when `vet_diet_flag` (C5)
+  - Pack size highlight with consumption suggestion when available (C7)
+  - "Add to cart" button (right), "Search more" button (left, hidden for focus group via prop)
+  - Cancel (x) top right
+  - Price display per C3: unit price, pack size, MRP vs discounted
+  - Call `POST /dashboard/{token}/cart/add` on "Add to cart"
+  - _Requirements: 5.1, 5.3, 5.6, 5.7, 5.10, 6.1-6.8_
+  - _Skills: /code-writing-software-development_
+  - **AC:** Card renders at all signal levels (L5 single product, L4 size selector, L3/L2 comparison). Qty defaults to 1. Vet diet shows disclaimer. Add to cart calls API. Card closes after add.
+
+- [ ] 9. Frontend: Wire ProductSelectorCard into care plan tabs + cart search
+  - In `NutritionTab` (or whichever tab renders diet items): when "Order Now" CTA is tapped, call `/products/resolve` endpoint and open `ProductSelectorCard` with results
+  - Hide CTA for L1 items; show info text prompt instead
+  - Add search bar to `CartView.tsx` header -- call `/products/search` on input, render results as addable items
+  - Update `CartView.tsx` to show MRP vs discounted price per C3
+  - Wire cart floater count update after add-to-cart
+  - _Requirements: 6.1, 6.7, 6.9, 7.1, 7.2, 7.3_
+  - _Skills: /code-writing-software-development_
+  - **AC:** Tapping "Order Now" on a diet item opens product selector with resolved products. L1 items show text prompt, no CTA. Cart search works. Cart count updates after add.
+
+- [ ] 10. Cart persistence and WhatsApp confirmation
+  - Implement C6: Add `cart_expires_at` column to `cart_items` (set to `created_at + 72 hours`). Filter out expired items in `get_cart()`. On return visit within 72h, include `resume_prompt: "Resume your order for [Pet Name]?"` in cart response.
+  - Implement C4: After `place_order()` succeeds, call `whatsapp_sender.send_template()` with order confirmation message: "Your [Product Name] for [Pet Name] has been ordered! Expected delivery: [date]."
+  - _Requirements: 5.5, 5.8, 5.9_
+  - _Skills: /python-patterns, /code-writing-software-development_
+  - **AC:** Cart items older than 72h are excluded from `get_cart()`. Resume prompt appears when items exist. WhatsApp confirmation sent after order placement.
