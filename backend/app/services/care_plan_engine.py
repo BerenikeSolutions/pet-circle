@@ -1089,14 +1089,19 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
         # Optional vaccines (Kennel Cough, Canine Coronavirus — is_mandatory=FALSE)
         # are NOT injected here: they only appear when an actual record exists
         # (i.e., the user said their pet receives those vaccines).
-        mandatory_masters = (
-            db.query(PreventiveMaster)
-            .filter(
-                PreventiveMaster.is_mandatory == True,
-                PreventiveMaster.species.in_([pet.species, "both"]),
+        try:
+            _mandatory_masters_raw = (
+                db.query(PreventiveMaster)
+                .filter(
+                    PreventiveMaster.is_mandatory == True,
+                    PreventiveMaster.species.in_([pet.species, "both"]),
+                )
+                .all()
             )
-            .all()
-        )
+            mandatory_masters = _mandatory_masters_raw if isinstance(_mandatory_masters_raw, list) else []
+        except Exception:
+            logger.warning("Failed to load mandatory preventive masters; skipping phantom entries")
+            mandatory_masters = []
         _mandatory_phantom_types: set[str] = {"vaccine", "deworming", "tick_flea"}
         for master in mandatory_masters:
             if _skip_puppy_series and master.recurrence_days and master.recurrence_days >= 36500:
@@ -1191,17 +1196,24 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
 
             is_overdue = status_tag == "Overdue"
             is_no_history = classification == Classification.NO_HISTORY
+            has_history = bool(records_by_key.get(item_key))
 
-            if classification == Classification.PRESCRIPTION_ACTIVE or is_overdue:
-                # Attend To — overdue or active prescription (tag: Urgent).
+            if classification == Classification.PRESCRIPTION_ACTIVE:
+                # Attend To — active prescription with no post-Rx report.
                 attend_items[item_key] = item
                 continue_items.pop(item_key, None)
                 add_items.pop(item_key, None)
 
+            elif is_overdue and has_history:
+                # Overdue but has a last_done_date → Continue bucket (tag: Overdue).
+                # Pet is on this routine but missed the next dose — keep in Continue.
+                if item_key not in attend_items:
+                    continue_items[item_key] = item
+                    add_items.pop(item_key, None)
+
             elif is_no_history:
                 # No history → Quick Fixes to Add (tag: Recommended).
-                # Applies to all types including core preventives.
-                # Mandatory items reach here via phantom entries (see below).
+                # Mandatory items reach here via phantom entries.
                 if item_key not in attend_items:
                     add_items[item_key] = item
                     continue_items.pop(item_key, None)
