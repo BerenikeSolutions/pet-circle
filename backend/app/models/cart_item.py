@@ -2,8 +2,9 @@
 PetCircle Phase 1 — Cart Item Model
 
 Represents an item in a pet's shopping cart. Cart items are
-pre-populated from nudges and product catalog, and users can
-toggle items in/out and adjust quantities.
+pre-populated from nudges and the product catalog (product_food /
+product_supplement), and users can toggle items in/out and adjust
+quantities.
 
 Constraints:
     - pet_id: FK to pets(id), ON DELETE CASCADE
@@ -25,7 +26,9 @@ class CartItem(Base):
     """
     A product in a pet's shopping cart.
 
-    product_id maps to cart_item_id in product_catalog (e.g., 'c2', 'c3').
+    product_id stores the sku_id of a ProductFood (F###) or
+    ProductSupplement (S###) row. The prefix determines which
+    table to look up.
     in_cart indicates whether the item is currently selected for purchase.
     tag/tag_color provide visual urgency indicators (OVERDUE, CRITICAL REFILL, etc.).
     """
@@ -38,7 +41,7 @@ class CartItem(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     pet_id = Column(UUID(as_uuid=True), ForeignKey("pets.id", ondelete="CASCADE"), index=True, nullable=False)
-    product_id = Column(String(100), nullable=False)  # UUID from product_catalog
+    product_id = Column(String(100), nullable=False)  # sku_id from product_food/product_supplement
     icon = Column(String(50), nullable=True)
     name = Column(String(200), nullable=False)
     sub = Column(String(200), nullable=True)
@@ -48,6 +51,8 @@ class CartItem(Base):
     in_cart = Column(Boolean, nullable=False, default=False)
     quantity = Column(Integer, nullable=False, default=1)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # C6: Cart persists for 72 hours. NULL means no expiry (legacy rows).
+    cart_expires_at = Column(DateTime, nullable=True)
 
     # Relationships
     pet = relationship("Pet")

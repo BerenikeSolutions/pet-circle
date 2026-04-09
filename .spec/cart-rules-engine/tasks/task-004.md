@@ -1,7 +1,7 @@
 ---
 task: 004
 feature: cart-rules-engine
-status: pending
+status: completed
 depends_on: [002, 003]
 ---
 
@@ -126,13 +126,13 @@ _Skills: /python-patterns, /code-writing-software-development_
 ---
 
 ## Acceptance Criteria
-- [ ] `resolve_supplement_signal()` exists in `signal_resolver.py`
-- [ ] B1: L5 returns exact SKU with qty=1; fallback shows closest variant
-- [ ] B2: L4 returns pack size options sorted by popularity, max 3
-- [ ] B3: L3 returns 2 bestsellers + 1 budget option for the supplement type
-- [ ] B4: L1 returns empty products with info-capture prompt message
-- [ ] OOS products excluded from primary position (C2)
-- [ ] Max 3 products at every level (C8)
+- [x] `resolve_supplement_signal()` exists in `signal_resolver.py`
+- [x] B1: L5 returns exact SKU with qty=1; fallback shows closest variant
+- [x] B2: L4 returns pack size options sorted by popularity, max 3
+- [x] B3: L3 returns 2 bestsellers + 1 budget option for the supplement type
+- [x] B4: L1 returns empty products with info-capture prompt message
+- [x] OOS products excluded from primary position (C2)
+- [x] Max 3 products at every level (C8)
 - [ ] `/verify` passes
 
 ---
@@ -140,7 +140,11 @@ _Skills: /python-patterns, /code-writing-software-development_
 ## Handoff to Next Task
 > Fill via `/task-handoff` after completing this task.
 
-**Files changed:** _(fill via /task-handoff)_
-**Decisions made:** _(fill via /task-handoff)_
-**Context for next task:** _(fill via /task-handoff)_
-**Open questions:** _(fill via /task-handoff)_
+**Files changed:** `backend/app/services/signal_resolver.py` (added ~280 lines: supplement type keyword map, extraction helpers, B1-B4 resolvers, serializer, `resolve_supplement_signal()` entry point)
+**Decisions made:**
+- Supplement L5 uses form as a soft hint (tighten query if matches exist, ignore otherwise) rather than a hard filter, so users aren't penalised for omitting form info.
+- B3 (L3) selects 2 bestsellers by `popularity_rank` + 1 budget by `discounted_price`, each from a distinct brand where possible.
+- `pet` and `conditions` args accepted for API parity with `resolve_food_signal` but unused by current B1-B4 rules.
+- Pack size comparison is normalized-string equality (not numeric) since supplement pack_size is free-text ("300 ml", "90 chews").
+**Context for next task:** Both `resolve_food_signal()` and `resolve_supplement_signal()` are now complete in `signal_resolver.py`. The next task can wire these into the cart service / dashboard API endpoint.
+**Open questions:** None

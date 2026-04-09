@@ -154,6 +154,12 @@ export default function CarePlanCard({
                                 : `${ctaText} →`}
                           </button>
                         )}
+
+                        {!canOrder && item.signal_level === "L1" && item.info_prompt && (
+                          <div style={{ fontSize: 11, color: "var(--t3)", fontStyle: "italic", textAlign: "right", maxWidth: 160, lineHeight: 1.4 }}>
+                            {item.info_prompt}
+                          </div>
+                        )}
                       </div>
                     </div>
                   );

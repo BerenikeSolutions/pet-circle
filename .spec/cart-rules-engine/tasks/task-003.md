@@ -1,7 +1,7 @@
 ---
 task: 003
 feature: cart-rules-engine
-status: pending
+status: completed
 depends_on: [002]
 ---
 

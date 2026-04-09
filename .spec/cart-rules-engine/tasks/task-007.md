@@ -1,7 +1,7 @@
 ---
 task: 007
 feature: cart-rules-engine
-status: pending
+status: done
 depends_on: [003, 004]
 ---
 
@@ -99,20 +99,26 @@ _Skills: /python-patterns, /code-writing-software-development_
 ---
 
 ## Acceptance Criteria
-- [ ] Care plan API response includes `signal_level` per diet/supplement item
-- [ ] L2+ items have `cta_label: "Order Now →"` and `orderable: true`
-- [ ] L1 items have `cta_label: null`, `orderable: false`, and `info_prompt` message
-- [ ] Existing reorder/due-soon logic preserved for items with prior orders
-- [ ] Homemade food items have no CTA (as before)
-- [ ] No regression in care plan computation for non-food items
-- [ ] `/verify` passes
+- [x] Care plan API response includes `signal_level` per diet/supplement item
+- [x] L2+ items have `cta_label: "Order Now →"` and `orderable: true`
+- [x] L1 items have `cta_label: null`, `orderable: false`, and `info_prompt` message
+- [x] Existing reorder/due-soon logic preserved for items with prior orders
+- [x] Homemade food items have no CTA (as before)
+- [x] No regression in care plan computation for non-food items
+- [x] `/verify` passes
 
 ---
 
 ## Handoff to Next Task
 > Fill via `/task-handoff` after completing this task.
 
-**Files changed:** _(fill via /task-handoff)_
-**Decisions made:** _(fill via /task-handoff)_
-**Context for next task:** _(fill via /task-handoff)_
-**Open questions:** _(fill via /task-handoff)_
+**Files changed:** `backend/app/services/care_plan_engine.py`
+**Decisions made:**
+- Replaced `_resolve_diet_item_order_signals()` with two functions: `_resolve_diet_item_signals()` (delegates to signal resolver) and `_check_reorder_status()` (preserves prior-order reorder/due-soon logic)
+- L2+ items get `orderable: True` with CTA; L1 items get `orderable: False` with `info_prompt`
+- Reorder override: if a prior qualifying order exists, CTA becomes "Reorder" instead of "Order Now →"
+- Homemade items get `signal_level: None` and `info_prompt: None` (no signal resolution)
+- Added `signal_level` and `info_prompt` to `CarePlanItemDict` TypedDict as `NotRequired` fields
+- Active conditions fetched once per pet (lazy, only when diet_rows exist) for signal resolution
+**Context for next task:** Care plan API now includes `signal_level` (L1-L5 or None) and `info_prompt` per diet/supplement item. Frontend can use `signal_level` to decide CTA visibility and `info_prompt` to show L1 nudge messages.
+**Open questions:** None

@@ -25,7 +25,7 @@ Rules:
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from fastapi.responses import Response as FastAPIResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func as sqlfunc
@@ -36,12 +36,14 @@ from app.core.rate_limiter import check_dashboard_rate_limit
 from app.database import get_db
 from app.models.cart_item import CartItem
 from app.models.condition import Condition
+from app.models.diet_item import DietItem
+from app.models.product_food import ProductFood
+from app.models.product_supplement import ProductSupplement
 from app.models.condition_medication import ConditionMedication
 from app.models.condition_monitoring import ConditionMonitoring
 from app.models.contact import Contact
 from app.models.nudge import Nudge
 from app.models.pet import Pet
-from app.models.product_catalog import ProductCatalog
 from app.services.ai_insights_service import (
     get_or_generate_insight,
     get_or_generate_nutrition_importance,
@@ -85,6 +87,7 @@ from app.services.diet_service import (
     get_diet_items,
     update_diet_item,
 )
+from app.services.signal_resolver import resolve_food_signal, resolve_supplement_signal
 from app.services.health_trends_service import get_health_trends as get_health_trends_v2
 from app.services.hygiene_service import (
     add_hygiene_item,
@@ -146,6 +149,13 @@ class PreventiveDateUpdateRequest(BaseModel):
         description="New last done date (DD/MM/YYYY, DD-MM-YYYY, "
                     "12 March 2024, or YYYY-MM-DD)",
     )
+
+
+class CartAddRequest(BaseModel):
+    """Request body for adding a product to cart by SKU."""
+
+    sku_id: str = Field(..., min_length=1, description="Product SKU (e.g. F002, S005)")
+    quantity: int = Field(1, ge=1, description="Quantity to add (default 1)")
 
 
 class DashboardHealthTrendsV2Response(BaseModel):
@@ -1223,9 +1233,12 @@ def dashboard_get_preventive_medicine_options(
     db: Session = Depends(get_db),
 ):
     """
-    Return product catalog medicine options for medicine-dependent preventive items.
+    Return medicine options for medicine-dependent preventive items.
 
-    For now, this is scoped to deworming and flea/tick care reminders.
+    The old product_catalog table (which carried deworming/flea-tick
+    brand+product rows) was dropped as part of the cart-rules-engine
+    rebuild. Until a replacement source exists, this endpoint returns
+    an empty options list so the UI degrades to a free-text input.
     """
     try:
         _get_pet_for_dashboard_token(db, token)
@@ -1235,46 +1248,7 @@ def dashboard_get_preventive_medicine_options(
         if not item_name_norm:
             raise HTTPException(status_code=400, detail="item_name is required")
 
-        is_deworming = "deworm" in item_name_norm
-        is_flea_tick = "flea" in item_name_norm or "tick" in item_name_norm
-
-        categories: list[str] = []
-        if is_deworming:
-            categories.append("deworming")
-        if is_flea_tick:
-            categories.append("flea_tick")
-
-        if not categories:
-            return {"item_name": item_name, "options": []}
-
-        rows = (
-            db.query(ProductCatalog.brand, ProductCatalog.product_name)
-            .filter(
-                ProductCatalog.category.in_(categories),
-                ProductCatalog.product_name.isnot(None),
-            )
-            .order_by(
-                sqlfunc.lower(ProductCatalog.brand),
-                sqlfunc.lower(ProductCatalog.product_name),
-            )
-            .all()
-        )
-
-        options: list[str] = []
-        seen: set[str] = set()
-        for brand, product_name in rows:
-            brand_text = (brand or "").strip()
-            product_text = (product_name or "").strip()
-            if not product_text:
-                continue
-            label = f"{brand_text} {product_text}".strip()
-            dedupe_key = label.lower()
-            if dedupe_key in seen:
-                continue
-            seen.add(dedupe_key)
-            options.append(label)
-
-        return {"item_name": item_name, "options": options}
+        return {"item_name": item_name, "options": []}
     except HTTPException:
         raise
     except ValueError:
@@ -2157,3 +2131,190 @@ async def dashboard_cart_recommendations(
     except Exception as e:
         logger.error("Recommendations error: %s", str(e), exc_info=True)
         raise HTTPException(status_code=503, detail="Could not load recommendations.")
+
+
+# ---------------------------------------------------------------------------
+# Product resolution & search (cart-rules-engine task-006)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{token}/products/resolve")
+async def resolve_product_endpoint(
+    token: str,
+    diet_item_id: str = Query(..., description="UUID of the diet item to resolve"),
+    db: Session = Depends(get_db),
+):
+    """
+    Resolve the best matching products for a diet item using the signal
+    resolver. Returns signal level, up to 3 products, CTA label, and
+    advisory flags (vet_diet_warning, pack_size_suggestion).
+    """
+    try:
+        pet = _get_pet_for_dashboard_token(db, token)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+
+    # Fetch diet item — must belong to this pet
+    diet_item = (
+        db.query(DietItem)
+        .filter(DietItem.id == diet_item_id, DietItem.pet_id == pet.id)
+        .first()
+    )
+    if not diet_item:
+        raise HTTPException(status_code=404, detail="Diet item not found.")
+
+    # Fetch active conditions for the pet
+    conditions = (
+        db.query(Condition)
+        .filter(Condition.pet_id == pet.id, Condition.is_active == True)
+        .all()
+    )
+
+    # Route to the correct resolver based on diet item type
+    if diet_item.type == "supplement":
+        result = resolve_supplement_signal(db, diet_item, pet, conditions)
+    else:
+        result = resolve_food_signal(db, diet_item, pet, conditions)
+
+    # C5: vet_diet_warning — true if any returned product has vet_diet_flag
+    vet_diet_warning = any(
+        p.get("vet_diet_flag", False) for p in result.products
+    )
+
+    # C7: pack_size_suggestion when L4 and pet weight known
+    pack_size_suggestion: str | None = None
+    if result.level.value == "L4" and pet.weight:
+        try:
+            weight_kg = float(pet.weight)
+            # 10g per kg per day * 30 days / 1000 = monthly kg
+            monthly_kg = weight_kg * 10 * 30 / 1000
+            pack_size_suggestion = f"~{monthly_kg:.1f} kg/month based on {weight_kg:.0f} kg body weight"
+        except (TypeError, ValueError):
+            pass
+
+    return {
+        "level": result.level.value,
+        "products": result.products,
+        "cta_label": result.cta_label,
+        "highlight_sku": result.highlight_sku,
+        "message": result.message,
+        "vet_diet_warning": vet_diet_warning,
+        "pack_size_suggestion": pack_size_suggestion,
+    }
+
+
+@router.get("/{token}/products/search")
+async def search_products_endpoint(
+    token: str,
+    q: str = Query(..., min_length=2, description="Search query (min 2 characters)"),
+    db: Session = Depends(get_db),
+):
+    """
+    Search food and supplement products by brand or product name.
+    Returns up to 10 results, in-stock items first.
+    """
+    try:
+        _get_pet_for_dashboard_token(db, token)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+
+    pattern = f"%{q}%"
+
+    # Search food products
+    food_rows = (
+        db.query(ProductFood)
+        .filter(
+            ProductFood.active == True,
+            (ProductFood.brand_name.ilike(pattern) | ProductFood.product_line.ilike(pattern)),
+        )
+        .all()
+    )
+
+    # Search supplement products
+    supplement_rows = (
+        db.query(ProductSupplement)
+        .filter(
+            ProductSupplement.active == True,
+            (ProductSupplement.brand_name.ilike(pattern) | ProductSupplement.product_name.ilike(pattern)),
+        )
+        .all()
+    )
+
+    # Combine and serialize
+    results: list[dict] = []
+    for p in food_rows:
+        results.append({
+            "sku_id": p.sku_id,
+            "category": "food",
+            "brand_name": p.brand_name,
+            "name": f"{p.brand_name} {p.product_line}".strip(),
+            "pack_size": f"{float(p.pack_size_kg):g} kg",
+            "mrp": int(p.mrp),
+            "discounted_price": int(p.discounted_price),
+            "in_stock": bool(p.in_stock),
+        })
+    for p in supplement_rows:
+        results.append({
+            "sku_id": p.sku_id,
+            "category": "supplement",
+            "brand_name": p.brand_name,
+            "name": f"{p.brand_name} {p.product_name}".strip(),
+            "pack_size": p.pack_size,
+            "mrp": int(p.mrp),
+            "discounted_price": int(p.discounted_price),
+            "in_stock": bool(p.in_stock),
+        })
+
+    # Sort: in_stock first, then by name
+    results.sort(key=lambda r: (not r["in_stock"], r["name"]))
+
+    return {"results": results[:10]}
+
+
+@router.post("/{token}/cart/add")
+async def cart_add_endpoint(
+    token: str,
+    body: CartAddRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Add a product to the pet's cart by SKU ID. Price is always read
+    from the DB — never trusted from the client (rule C1: qty default 1).
+    """
+    try:
+        pet = _get_pet_for_dashboard_token(db, token)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+
+    sku_id = body.sku_id.strip().upper()
+    prefix = sku_id[:1]
+
+    # Look up the product by SKU prefix
+    if prefix == "F":
+        product = db.query(ProductFood).filter(ProductFood.sku_id == sku_id).first()
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found.")
+        price = int(product.discounted_price)
+        name = f"{product.brand_name} {product.product_line}".strip()
+        sub = f"{float(product.pack_size_kg):g} kg"
+        icon = "🥣"
+    elif prefix == "S":
+        product = db.query(ProductSupplement).filter(ProductSupplement.sku_id == sku_id).first()
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found.")
+        price = int(product.discounted_price)
+        name = f"{product.brand_name} {product.product_name}".strip()
+        sub = product.pack_size or ""
+        icon = "💊"
+    else:
+        raise HTTPException(status_code=404, detail="Product not found.")
+
+    return await add_to_cart(
+        db,
+        pet_id=pet.id,
+        product_id=sku_id,
+        name=name,
+        price=price,
+        icon=icon,
+        sub=sub,
+    )

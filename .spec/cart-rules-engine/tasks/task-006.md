@@ -1,7 +1,7 @@
 ---
 task: 006
 feature: cart-rules-engine
-status: pending
+status: done
 depends_on: [003, 004]
 ---
 
@@ -125,22 +125,22 @@ _Skills: /api-design, /python-patterns_
 ---
 
 ## Acceptance Criteria
-- [ ] `GET /products/resolve` returns correct signal level and products for a diet item
-- [ ] `GET /products/search` returns matching products from both tables, in_stock first
-- [ ] `POST /cart/add` creates CartItem with DB price, not client price
-- [ ] Token validation on all three endpoints
-- [ ] C5: vet_diet_warning included in resolve response
-- [ ] C7: pack_size_suggestion included when applicable
-- [ ] C1: quantity defaults to 1
-- [ ] 404 returned for invalid diet_item_id or sku_id
-- [ ] `/verify` passes
+- [x] `GET /products/resolve` returns correct signal level and products for a diet item
+- [x] `GET /products/search` returns matching products from both tables, in_stock first
+- [x] `POST /cart/add` creates CartItem with DB price, not client price
+- [x] Token validation on all three endpoints
+- [x] C5: vet_diet_warning included in resolve response
+- [x] C7: pack_size_suggestion included when applicable
+- [x] C1: quantity defaults to 1
+- [x] 404 returned for invalid diet_item_id or sku_id
+- [x] `/verify` passes
 
 ---
 
 ## Handoff to Next Task
 > Fill via `/task-handoff` after completing this task.
 
-**Files changed:** _(fill via /task-handoff)_
-**Decisions made:** _(fill via /task-handoff)_
-**Context for next task:** _(fill via /task-handoff)_
-**Open questions:** _(fill via /task-handoff)_
+**Files changed:** `backend/app/routers/dashboard.py` (added CartAddRequest model, 3 new endpoints, imports for DietItem/ProductFood/ProductSupplement/signal_resolver/Query)
+**Decisions made:** Resolve endpoint routes supplement vs food by `diet_item.type == "supplement"`. Search uses ILIKE with `%q%` pattern across both tables. Cart add normalizes sku_id to uppercase before lookup.
+**Context for next task:** The three endpoints are in place: `/products/resolve`, `/products/search`, `/cart/add`. Frontend can now wire up product resolution from diet items, search, and add-to-cart by SKU.
+**Open questions:** None

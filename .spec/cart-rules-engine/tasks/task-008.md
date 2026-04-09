@@ -1,7 +1,7 @@
 ---
 task: 008
 feature: cart-rules-engine
-status: pending
+status: done
 depends_on: [006]
 ---
 
@@ -150,25 +150,25 @@ _Skills: /code-writing-software-development_
 ---
 
 ## Acceptance Criteria
-- [ ] `ProductSelectorCard.tsx` exists at `frontend/src/components/dashboard/`
-- [ ] Renders as bottom sheet with product radio options
-- [ ] Top product pre-selected with qty=1 (C1)
-- [ ] MRP vs discounted price shown per C3
-- [ ] Price per unit displayed
-- [ ] Vet diet disclaimer shown when applicable (C5)
-- [ ] Pack size suggestion shown when applicable (C7)
-- [ ] "Add to cart" calls `onAddToCart` with selected sku_id and quantity
-- [ ] "Search more" hidden when `hideSearchMore=true`
-- [ ] Cancel (x) closes the card
-- [ ] Follows project design system (DM Sans, --orange, 430px max-width)
-- [ ] `/verify` passes (build succeeds)
+- [x] `ProductSelectorCard.tsx` exists at `frontend/src/components/dashboard/`
+- [x] Renders as bottom sheet with product radio options
+- [x] Top product pre-selected with qty=1 (C1)
+- [x] MRP vs discounted price shown per C3
+- [x] Price per unit displayed
+- [x] Vet diet disclaimer shown when applicable (C5)
+- [x] Pack size suggestion shown when applicable (C7)
+- [x] "Add to cart" calls `onAddToCart` with selected sku_id and quantity
+- [x] "Search more" hidden when `hideSearchMore=true`
+- [x] Cancel (x) closes the card (via BottomSheet overlay/drag handle)
+- [x] Follows project design system (DM Sans, --orange, 430px max-width)
+- [x] `/verify` passes (build succeeds)
 
 ---
 
 ## Handoff to Next Task
 > Fill via `/task-handoff` after completing this task.
 
-**Files changed:** _(fill via /task-handoff)_
-**Decisions made:** _(fill via /task-handoff)_
-**Context for next task:** _(fill via /task-handoff)_
-**Open questions:** _(fill via /task-handoff)_
+**Files changed:** `frontend/src/components/dashboard/ProductSelectorCard.tsx` (new)
+**Decisions made:** Exported `ResolvedProduct` interface from this component (can be moved to `api.ts` later if needed by other modules). Used BottomSheet's built-in overlay close rather than adding explicit X button. Pre-selects first in-stock product. Resets selection when products array changes via key comparison.
+**Context for next task:** `ProductSelectorCard` is ready to be integrated into the care plan flow. `onAddToCart(skuId, qty)` callback needs to be wired by the parent (DashboardView or similar) to call the cart API and update cart state. The `ResolvedProduct` type may need to be imported by the integration task.
+**Open questions:** "Search more" button has no handler yet — needs design decision on what it does (open external search? filter products?).

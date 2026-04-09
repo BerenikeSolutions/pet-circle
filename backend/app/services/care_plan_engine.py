@@ -33,6 +33,12 @@ from app.models.order import Order
 from app.models.pet import Pet
 from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
+from app.services.signal_resolver import (
+    SignalLevel,
+    SignalResult,
+    resolve_food_signal,
+    resolve_supplement_signal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -339,7 +345,9 @@ class CarePlanItemDict(TypedDict):
     classification: str   # Classification enum value
     reason: str | None    # Contextual reason (for orderable items)
     orderable: bool       # Whether an Order Now button should be shown
-    cta_label: NotRequired[str]  # Optional CTA text for orderable diet rows
+    cta_label: NotRequired[str]           # Optional CTA text for orderable diet rows
+    signal_level: NotRequired[str | None]  # Signal level (L1-L5) for diet/supplement items
+    info_prompt: NotRequired[str | None]   # Info prompt message for L1 items
 
 
 class CarePlanSectionDict(TypedDict):
@@ -751,69 +759,126 @@ def _to_sections(
     return result
 
 
-def _resolve_diet_item_order_signals(
+def _check_reorder_status(
     db: Session,
     pet_id: UUID,
     diet_label: str,
-) -> tuple[str, str]:
+) -> tuple[str | None, str]:
     """
-    Resolve CTA label and status tag for an orderable diet item.
+    Check for a prior order matching *diet_label* and return a reorder
+    override tuple ``(cta_label_override, status_tag)``.
 
-    Returns defaults ("Order Now", "Active") when no prior order exists
-    or when order lookup/supply estimation fails.
+    Returns ``(None, "Active")`` when no prior qualifying order is found
+    (i.e. no override). When a qualifying order exists, returns
+    ``("Reorder", status_tag)`` — with *status_tag* set to "Due Soon" if
+    the pack supply is running low.
     """
-    cta_label = _CTA_ORDER_NOW
-    status_tag = _STATUS_ACTIVE
-
     try:
         label = (diet_label or "").strip()
         if not label:
-            return cta_label, status_tag
+            return None, _STATUS_ACTIVE
 
         order_query = db.query(Order).filter(Order.pet_id == pet_id)
 
-        # Prefer explicit product_name when available, else fall back to
-        # free-text items_description in the current Order model.
         if hasattr(Order, "product_name"):
             order_query = order_query.filter(Order.product_name.ilike(f"%{label}%"))
         else:
             order_query = order_query.filter(Order.items_description.ilike(f"%{label}%"))
 
         order_query = order_query.filter(Order.status.in_(_QUALIFYING_ORDER_STATUSES))
-
         latest_order = order_query.order_by(Order.created_at.desc()).first()
         if latest_order is None:
-            return cta_label, status_tag
+            return None, _STATUS_ACTIVE
 
-        latest_status = (getattr(latest_order, "status", "") or "").lower()
-        if latest_status and latest_status not in _QUALIFYING_ORDER_STATUSES:
-            return cta_label, status_tag
-
-        cta_label = _CTA_REORDER
-
+        status_tag = _STATUS_ACTIVE
         pack_days = getattr(latest_order, "pack_days", None)
         created_at = getattr(latest_order, "created_at", None)
-        if pack_days is None or created_at is None:
-            return cta_label, status_tag
+        if pack_days is not None and created_at is not None:
+            order_date = created_at.date() if hasattr(created_at, "date") else created_at
+            if isinstance(order_date, date):
+                remaining_days = int(pack_days) - (date.today() - order_date).days
+                if remaining_days <= _DUE_SOON_SUPPLY_DAYS:
+                    status_tag = _STATUS_DUE_SOON
 
-        order_date = created_at.date() if hasattr(created_at, "date") else created_at
-        if not isinstance(order_date, date):
-            return cta_label, status_tag
-
-        remaining_days = int(pack_days) - (date.today() - order_date).days
-        if remaining_days <= _DUE_SOON_SUPPLY_DAYS:
-            status_tag = _STATUS_DUE_SOON
+        return _CTA_REORDER, status_tag
 
     except Exception:
         logger.warning(
-            "Failed to resolve order signals for diet item '%s' of pet %s",
+            "Failed to check reorder status for diet item '%s' of pet %s",
             diet_label,
             pet_id,
             exc_info=True,
         )
-        return _CTA_ORDER_NOW, _STATUS_ACTIVE
+        return None, _STATUS_ACTIVE
 
-    return cta_label, status_tag
+
+# Signal-level constants used to decide CTA visibility.
+_L2_AND_ABOVE: frozenset[str] = frozenset({
+    SignalLevel.L2.value,
+    SignalLevel.L2B.value,
+    SignalLevel.L2C.value,
+    SignalLevel.L3.value,
+    SignalLevel.L4.value,
+    SignalLevel.L5.value,
+})
+
+
+def _resolve_diet_item_signals(
+    db: Session,
+    diet_item: DietItem,
+    pet: Pet,
+    conditions: list[Condition],
+) -> dict:
+    """
+    Resolve signal level, CTA label, orderability, and info prompt for a
+    diet item by delegating to the signal resolver.
+
+    Returns a dict with keys: ``signal_level``, ``cta_label``,
+    ``orderable``, ``status_tag``, ``info_prompt``.
+    """
+    try:
+        if diet_item.type == "supplement":
+            signal: SignalResult = resolve_supplement_signal(db, diet_item, pet, conditions)
+        else:
+            signal = resolve_food_signal(db, diet_item, pet, conditions)
+    except Exception:
+        logger.warning(
+            "Signal resolver failed for diet item '%s' (pet %s); defaulting to L1",
+            diet_item.label,
+            pet.id,
+            exc_info=True,
+        )
+        return {
+            "signal_level": SignalLevel.L1.value,
+            "cta_label": None,
+            "orderable": False,
+            "status_tag": _STATUS_ACTIVE,
+            "info_prompt": None,
+        }
+
+    level_value = signal.level.value
+
+    if level_value in _L2_AND_ABOVE:
+        # Check for reorder override (prior order → "Reorder" / "Due Soon").
+        reorder_cta, status_tag = _check_reorder_status(
+            db, pet.id, diet_item.label
+        )
+        return {
+            "signal_level": level_value,
+            "cta_label": reorder_cta or signal.cta_label or _CTA_ORDER_NOW,
+            "orderable": True,
+            "status_tag": status_tag,
+            "info_prompt": None,
+        }
+
+    # L1 — not enough data to recommend a product.
+    return {
+        "signal_level": level_value,
+        "cta_label": None,
+        "orderable": False,
+        "status_tag": _STATUS_ACTIVE,
+        "info_prompt": signal.message,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1136,30 +1201,57 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
                 .filter(DietItem.pet_id == pet.id)
                 .all()
             )
+
+            # Fetch active conditions once for signal resolution.
+            pet_conditions: list[Condition] = []
+            if diet_rows:
+                pet_conditions = (
+                    db.query(Condition)
+                    .filter(Condition.pet_id == pet.id, Condition.is_active.is_(True))
+                    .all()
+                )
+
             for diet_item in diet_rows:
                 if not diet_item.label:
                     continue
-                # Map diet type to care plan test_type.
                 tt = "supplement" if diet_item.type == "supplement" else "food"
                 item_key = f"diet_{diet_item.id}"
-                # Only packaged food and supplements are orderable.
-                # Homemade food is not orderable (no Order Now CTA).
-                is_orderable = diet_item.type != "homemade"
-                cta_label, status_tag = _resolve_diet_item_order_signals(
-                    db=db,
-                    pet_id=pet.id,
-                    diet_label=diet_item.label,
-                ) if is_orderable else (_CTA_ORDER_NOW, _STATUS_ACTIVE)
+
+                # Homemade food: skip signal resolution, no CTA.
+                if diet_item.type == "homemade":
+                    continue_items[item_key] = {
+                        "name": diet_item.label,
+                        "test_type": tt,
+                        "freq": "Daily",
+                        "next_due": None,
+                        "status_tag": _STATUS_ACTIVE,
+                        "classification": Classification.PERIODIC.value,
+                        "reason": None,
+                        "orderable": False,
+                        "cta_label": None,
+                        "signal_level": None,
+                        "info_prompt": None,
+                        "diet_item_id": None,
+                    }
+                    continue
+
+                # Packaged food / supplements — resolve via signal resolver.
+                signals = _resolve_diet_item_signals(
+                    db, diet_item, pet, pet_conditions
+                )
                 continue_items[item_key] = {
                     "name": diet_item.label,
                     "test_type": tt,
                     "freq": "Daily",
                     "next_due": None,
-                    "status_tag": status_tag,
+                    "status_tag": signals["status_tag"],
                     "classification": Classification.PERIODIC.value,
                     "reason": None,
-                    "orderable": is_orderable,
-                    "cta_label": cta_label if is_orderable else None,
+                    "orderable": signals["orderable"],
+                    "cta_label": signals["cta_label"],
+                    "signal_level": signals["signal_level"],
+                    "info_prompt": signals["info_prompt"],
+                    "diet_item_id": str(diet_item.id),
                 }
         except Exception:
             logger.warning(

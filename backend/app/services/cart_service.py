@@ -2,19 +2,23 @@
 PetCircle Phase 8 — Cart & Orders Service
 
 Manages the pet's shopping cart. Cart items are added by users or
-generated as recommendations based on species, breed, and nutritional
-deficiencies from the nutrition analysis pipeline.
+generated as recommendations based on species, breed, life stage and
+any diagnosed health conditions.
 
 Key design:
     - No hardcoded cart items — everything from DB
-    - Recommendations pulled from product_catalog based on pet profile
-    - Nutritional gap analysis drives supplement recommendations
+    - Recommendations pulled from product_food + product_supplement
+      (signal-level catalog tables, see .spec/cart-rules-engine/design.md)
     - Orders stored in the orders table for admin processing
+    - cart_items.product_id stores the sku_id of a ProductFood (F###)
+      or ProductSupplement (S###) row — the prefix disambiguates which
+      table to query.
 """
 
+import asyncio
 import logging
 import uuid
-from datetime import date
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
@@ -24,30 +28,87 @@ from app.models.condition import Condition
 from app.models.order import Order
 from app.models.pet import Pet
 from app.models.pet_preference import PetPreference
-from app.models.product_catalog import ProductCatalog
+from app.models.product_food import ProductFood
+from app.models.product_supplement import ProductSupplement
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
 # --- Constants ---
-FREE_DELIVERY_THRESHOLD = 500  # Free delivery for orders >= ₹500
+FREE_DELIVERY_THRESHOLD = 500  # Free delivery for orders >= Rs.500
 DELIVERY_FEE = 49
+
+
+# --- Catalog lookup helpers ---
+
+def _lookup_sku(db: Session, sku_id: str):
+    """
+    Return the catalog row for a sku_id from product_food or product_supplement.
+
+    The sku_id prefix determines the table (F### = food, S### = supplement).
+    Returns a tuple (row, category) or (None, None) when not found.
+    """
+    if not sku_id:
+        return None, None
+    prefix = sku_id[:1].upper()
+    if prefix == "F":
+        row = db.query(ProductFood).filter(ProductFood.sku_id == sku_id).first()
+        return row, "food"
+    if prefix == "S":
+        row = db.query(ProductSupplement).filter(ProductSupplement.sku_id == sku_id).first()
+        return row, "supplement"
+    return None, None
+
+
+def _food_display_name(product: ProductFood) -> str:
+    return f"{product.brand_name} {product.product_line}".strip()
+
+
+def _supplement_display_name(product: ProductSupplement) -> str:
+    return f"{product.brand_name} {product.product_name}".strip()
+
+
+def _food_sub(product: ProductFood) -> str:
+    return f"{product.pack_size_kg} kg • {product.life_stage} / {product.breed_size}"
+
+
+def _supplement_sub(product: ProductSupplement) -> str:
+    return f"{product.pack_size} • {product.type.replace('_', ' ')}"
+
+
+def _category_icon(category: str) -> str:
+    """Return an icon for a product category."""
+    icons = {
+        "food": "🥣",
+        "supplement": "💊",
+    }
+    return icons.get(category, "📦")
 
 
 # --- Cart CRUD ---
 
 async def get_cart(db: Session, pet_id) -> dict:
     """
-    Get all cart items for a pet, separated into user-added and in-cart items.
+    Get all non-expired cart items for a pet.
+
+    C6: Items with cart_expires_at < now() are excluded.
+    If non-expired items exist, a resume_prompt is included in the response.
 
     Returns:
         {
             "items": [...],
-            "summary": { "count": int, "subtotal": int }
+            "summary": { "count": int, "subtotal": int },
+            "resume_prompt": str | None
         }
     """
+    now = datetime.utcnow()
     items = (
         db.query(CartItem)
-        .filter(CartItem.pet_id == pet_id)
+        .filter(
+            CartItem.pet_id == pet_id,
+            # Include rows with NULL cart_expires_at (legacy) and non-expired rows
+            (CartItem.cart_expires_at.is_(None)) | (CartItem.cart_expires_at > now),
+        )
         .order_by(CartItem.created_at.asc())
         .all()
     )
@@ -55,12 +116,20 @@ async def get_cart(db: Session, pet_id) -> dict:
     cart_items = [_serialize_cart_item(item) for item in items]
     in_cart = [i for i in cart_items if i["in_cart"]]
 
+    # C6: Surface resume prompt when items are waiting in cart
+    resume_prompt: str | None = None
+    if cart_items:
+        pet = db.query(Pet).filter(Pet.id == pet_id).first()
+        pet_name = pet.name if pet else "your pet"
+        resume_prompt = f"Resume your order for {pet_name}?"
+
     return {
         "items": cart_items,
         "summary": {
             "count": len(in_cart),
             "subtotal": sum(i["price"] * i["quantity"] for i in in_cart),
         },
+        "resume_prompt": resume_prompt,
     }
 
 
@@ -98,6 +167,7 @@ async def add_to_cart(
         tag_color=tag_color,
         in_cart=True,
         quantity=1,
+        cart_expires_at=datetime.utcnow() + timedelta(hours=72),
     )
     db.add(item)
     db.commit()
@@ -119,34 +189,30 @@ async def toggle_cart_item(db: Session, pet_id, product_id: str) -> dict:
         db.refresh(item)
         return _serialize_cart_item(item)
 
-    # Item not in cart_items yet — look up in product_catalog and add it
-    product = (
-        db.query(ProductCatalog)
-        .filter(ProductCatalog.cart_item_id == product_id)
-        .first()
-    )
-    if not product:
-        # Try by UUID
-        try:
-            product = db.query(ProductCatalog).filter(ProductCatalog.id == product_id).first()
-        except Exception:
-            pass
-
+    # Item not in cart_items yet — look up in the SKU tables by product_id.
+    product, category = _lookup_sku(db, product_id)
     if not product:
         raise ValueError(f"Product {product_id} not found")
 
-    price = _parse_price(product.mrp)
+    if category == "food":
+        name = _food_display_name(product)
+        sub = _food_sub(product)
+    else:
+        name = _supplement_display_name(product)
+        sub = _supplement_sub(product)
+
     new_item = CartItem(
         pet_id=pet_id,
         product_id=product_id,
-        icon=_category_icon(product.category),
-        name=f"{product.brand} {product.product_name}".strip(),
-        sub=product.description or product.indication or "",
-        price=price,
+        icon=_category_icon(category),
+        name=name,
+        sub=sub,
+        price=int(product.discounted_price),
         tag=None,
         tag_color=None,
         in_cart=True,
         quantity=1,
+        cart_expires_at=datetime.utcnow() + timedelta(hours=72),
     )
     db.add(new_item)
     db.commit()
@@ -198,14 +264,15 @@ async def get_recommendations(
     nutrition_gaps: dict | None = None,
 ) -> list[dict]:
     """
-    Get recommended products based on pet's species, breed, and nutritional gaps.
+    Get recommended products based on pet's species, breed, life stage,
+    diagnosed conditions and (optionally) detected nutritional gaps.
 
-    Pulls from product_catalog and filters by:
-    1. Species/breed size compatibility (life_stage, breed_size)
-    2. Nutritional deficiencies (supplements for gaps)
-    3. Preventive needs (deworming, flea/tick based on conditions)
+    Pulls from product_food and product_supplement, filtered by:
+    1. Life stage / breed size (food)
+    2. Condition tags from diagnosed conditions (food + supplements)
+    3. Nutrient gaps mapped to supplement condition_tags
 
-    Returns products NOT already in the pet's cart.
+    Returns products NOT already in the pet's cart. Capped at 15.
     """
     pet = db.query(Pet).filter(Pet.id == pet_id).first()
     if not pet:
@@ -227,51 +294,41 @@ async def get_recommendations(
     )
     condition_names = [c.name.lower() for c in conditions]
 
-    recommendations = []
+    recommendations: list[dict] = []
 
-    # 1. Supplement recommendations based on nutrition gaps
+    # 1. Supplements for nutrition gaps
     if nutrition_gaps:
         recommendations.extend(
-            _recommend_supplements(db, pet, nutrition_gaps, existing_ids)
+            _recommend_supplements_for_gaps(db, nutrition_gaps, existing_ids)
         )
 
-    # 2. Deworming products
-    recommendations.extend(
-        _recommend_by_category(db, pet, "deworming", existing_ids)
-    )
-
-    # 3. Flea & tick products
-    recommendations.extend(
-        _recommend_by_category(db, pet, "flea_tick", existing_ids)
-    )
-
-    # 4. Condition-specific medicines
-    if conditions:
+    # 2. Condition-specific supplements (e.g. joint for arthritis)
+    if condition_names:
         recommendations.extend(
-            _recommend_condition_products(db, pet, condition_names, existing_ids)
+            _recommend_supplements_for_conditions(db, condition_names, existing_ids)
         )
 
-    # 5. Food recommendations based on breed size and life stage
+    # 3. Food — life stage + breed size aware, condition-tag aware
     recommendations.extend(
-        _recommend_food(db, pet, existing_ids)
+        _recommend_food(db, pet, condition_names, existing_ids)
     )
 
-    # Exclude previously bought items
+    # Exclude previously bought items by name similarity
     bought_names = _get_bought_names(db, pet_id)
     recommendations = [
         r for r in recommendations
         if not _is_previously_bought(r["name"], bought_names)
     ]
 
-    # Deduplicate by product ID
-    seen = set()
-    unique = []
+    # Deduplicate by product_id
+    seen: set[str] = set()
+    unique: list[dict] = []
     for rec in recommendations:
         if rec["product_id"] not in seen:
             seen.add(rec["product_id"])
             unique.append(rec)
 
-    return unique[:15]  # Cap at 15 recommendations
+    return unique[:15]
 
 
 def _get_bought_names(db: Session, pet_id) -> set:
@@ -310,7 +367,7 @@ def get_last_bought(
 
     Returns:
         List of {name, used_count, last_bought_at, category}
-        Empty list if no history or all history is excluded (caller should hide the section).
+        Empty list if no history or all history is excluded.
     """
     rows = (
         db.query(PetPreference)
@@ -356,164 +413,163 @@ def _format_last_bought_label(last_bought_at) -> str:
         return ""
 
 
-def _recommend_supplements(
+# --- Internal recommendation builders ---
+
+# Nutrient gap -> supplement condition_tags / type hints
+_GAP_TO_TAGS = {
+    "omega_3": ["omega3", "coat", "skin"],
+    "omega_6": ["omega6", "skin", "coat"],
+    "glucosamine": ["joint", "hip", "arthritis"],
+    "vitamin_e": ["immunity", "general_health"],
+    "vitamin_d3": ["bone", "general_health"],
+    "probiotics": ["digestive", "gut_health"],
+    "calcium": ["bone", "growth"],
+}
+
+
+def _supplement_matches_any_tag(product: ProductSupplement, tags: list[str]) -> bool:
+    haystack = " ".join(
+        (t or "").lower()
+        for t in (product.condition_tags, product.type, product.key_ingredients)
+    )
+    return any(tag in haystack for tag in tags)
+
+
+def _recommend_supplements_for_gaps(
     db: Session,
-    pet: Pet,
     nutrition_gaps: dict,
     existing_ids: set,
 ) -> list[dict]:
-    """Recommend supplements based on nutritional deficiencies."""
-    recs = []
-
-    # Map nutrient gaps to product categories/keywords
-    gap_to_keywords = {
-        "omega_3": ["omega", "salmon", "fish oil"],
-        "omega_6": ["omega", "fatty acid"],
-        "glucosamine": ["glucosamine", "joint", "cosequin"],
-        "vitamin_e": ["vitamin e", "vit e"],
-        "vitamin_d3": ["vitamin d", "calcitriol", "vit d"],
-        "probiotics": ["probiotic", "fortiflora", "digestive"],
-        "calcium": ["calcium", "bone"],
-    }
+    """Recommend supplements whose condition_tags cover nutrient gaps."""
+    recs: list[dict] = []
+    # Load the active supplement set once — the catalog is small (<20 rows)
+    supplements = (
+        db.query(ProductSupplement)
+        .filter(ProductSupplement.active.is_(True), ProductSupplement.in_stock.is_(True))
+        .order_by(ProductSupplement.popularity_rank.asc())
+        .all()
+    )
 
     for nutrient, info in nutrition_gaps.items():
         if not isinstance(info, dict):
             continue
-        status = info.get("status", "").lower()
-        if status in ("low", "missing"):
-            keywords = gap_to_keywords.get(nutrient, [])
-            for kw in keywords:
-                products = (
-                    db.query(ProductCatalog)
-                    .filter(
-                        sqlfunc.lower(ProductCatalog.product_name).contains(kw)
-                        | sqlfunc.lower(ProductCatalog.active_ingredient).contains(kw)
-                        | sqlfunc.lower(ProductCatalog.description).contains(kw)
-                    )
-                    .limit(2)
-                    .all()
-                )
-                for p in products:
-                    pid = p.cart_item_id or str(p.id)
-                    if pid not in existing_ids:
-                        priority = "urgent" if status == "missing" else "high"
-                        recs.append(_product_to_recommendation(
-                            p, pid,
-                            reason=f"{nutrient.replace('_', ' ').title()} {status} in diet",
-                            priority=priority,
-                            tag=status.upper(),
-                            tag_color="#FF3B30" if status == "missing" else "#FF9500",
-                        ))
-                        existing_ids.add(pid)
-                if recs:
-                    break  # Found a match for this nutrient
+        status = (info.get("status") or "").lower()
+        if status not in ("low", "missing"):
+            continue
 
-    return recs
+        tags = _GAP_TO_TAGS.get(nutrient, [])
+        if not tags:
+            continue
 
-
-def _recommend_by_category(
-    db: Session,
-    pet: Pet,
-    category: str,
-    existing_ids: set,
-) -> list[dict]:
-    """Recommend top products from a category filtered by breed size."""
-    breed_size = _infer_breed_size(pet.breed)
-
-    query = db.query(ProductCatalog).filter(ProductCatalog.category == category)
-
-    # Filter by breed size if available
-    if breed_size:
-        query = query.filter(
-            (sqlfunc.lower(ProductCatalog.breed_size).contains(breed_size))
-            | (ProductCatalog.breed_size == None)
-            | (sqlfunc.lower(ProductCatalog.breed_size).contains("all"))
-        )
-
-    products = query.limit(3).all()
-    recs = []
-    for p in products:
-        pid = p.cart_item_id or str(p.id)
-        if pid not in existing_ids:
-            recs.append(_product_to_recommendation(
-                p, pid,
-                reason=f"Recommended {category.replace('_', ' ')} for {pet.breed or pet.species or 'your pet'}",
-                priority="medium",
+        for p in supplements:
+            if p.sku_id in existing_ids:
+                continue
+            if not _supplement_matches_any_tag(p, tags):
+                continue
+            priority = "urgent" if status == "missing" else "high"
+            recs.append(_supplement_to_recommendation(
+                p,
+                reason=f"{nutrient.replace('_', ' ').title()} {status} in diet",
+                priority=priority,
+                tag=status.upper(),
+                tag_color="#FF3B30" if status == "missing" else "#FF9500",
             ))
-            existing_ids.add(pid)
-
+            existing_ids.add(p.sku_id)
+            break  # one supplement per nutrient gap
     return recs
 
 
-def _recommend_condition_products(
+def _recommend_supplements_for_conditions(
     db: Session,
-    pet: Pet,
     condition_names: list[str],
     existing_ids: set,
 ) -> list[dict]:
-    """Recommend medicines relevant to pet's conditions."""
-    recs = []
-    for cond in condition_names:
-        products = (
-            db.query(ProductCatalog)
-            .filter(
-                ProductCatalog.category == "medicine",
-                sqlfunc.lower(ProductCatalog.indication).contains(cond)
-            )
-            .limit(2)
-            .all()
-        )
-        for p in products:
-            pid = p.cart_item_id or str(p.id)
-            if pid not in existing_ids:
-                recs.append(_product_to_recommendation(
-                    p, pid,
-                    reason=f"For {cond.title()} management",
-                    priority="high",
-                    tag="CONDITION",
-                    tag_color="#FF9500",
-                ))
-                existing_ids.add(pid)
+    """Recommend supplements whose condition_tags match diagnosed conditions."""
+    recs: list[dict] = []
+    supplements = (
+        db.query(ProductSupplement)
+        .filter(ProductSupplement.active.is_(True), ProductSupplement.in_stock.is_(True))
+        .order_by(ProductSupplement.popularity_rank.asc())
+        .all()
+    )
 
+    for cond in condition_names:
+        cond_key = cond.strip().lower()
+        if not cond_key:
+            continue
+        for p in supplements:
+            if p.sku_id in existing_ids:
+                continue
+            tag_hay = (p.condition_tags or "").lower()
+            if cond_key not in tag_hay:
+                continue
+            recs.append(_supplement_to_recommendation(
+                p,
+                reason=f"For {cond.title()} management",
+                priority="high",
+                tag="CONDITION",
+                tag_color="#FF9500",
+            ))
+            existing_ids.add(p.sku_id)
+            break  # one supplement per condition
     return recs
 
 
 def _recommend_food(
     db: Session,
     pet: Pet,
+    condition_names: list[str],
     existing_ids: set,
 ) -> list[dict]:
-    """Recommend food products based on breed size and life stage."""
+    """Recommend food products based on life stage, breed size and conditions."""
     breed_size = _infer_breed_size(pet.breed)
     life_stage = _infer_life_stage(pet)
 
-    query = db.query(ProductCatalog).filter(ProductCatalog.category == "food")
+    query = (
+        db.query(ProductFood)
+        .filter(ProductFood.active.is_(True), ProductFood.in_stock.is_(True))
+    )
 
     if breed_size:
         query = query.filter(
-            (sqlfunc.lower(ProductCatalog.breed_size).contains(breed_size))
-            | (ProductCatalog.breed_size == None)
-            | (sqlfunc.lower(ProductCatalog.breed_size).contains("all"))
+            (sqlfunc.lower(ProductFood.breed_size) == breed_size)
+            | (sqlfunc.lower(ProductFood.breed_size) == "all")
         )
 
     if life_stage:
-        query = query.filter(
-            (sqlfunc.lower(ProductCatalog.life_stage).contains(life_stage))
-            | (ProductCatalog.life_stage == None)
-            | (sqlfunc.lower(ProductCatalog.life_stage).contains("all"))
-        )
+        # Food life_stage uses "Puppy" / "Adult" / "Senior" / "All".
+        # Map our inferred stage (including "kitten") to these buckets.
+        mapped = {"puppy": "puppy", "kitten": "puppy", "adult": "adult", "senior": "senior"}.get(life_stage)
+        if mapped:
+            query = query.filter(
+                (sqlfunc.lower(ProductFood.life_stage) == mapped)
+                | (sqlfunc.lower(ProductFood.life_stage) == "all")
+            )
 
-    products = query.limit(3).all()
-    recs = []
-    for p in products:
-        pid = p.cart_item_id or str(p.id)
-        if pid not in existing_ids:
-            recs.append(_product_to_recommendation(
-                p, pid,
-                reason=f"Suited for {breed_size or ''} breed {life_stage or ''} stage".strip(),
-                priority="low",
-            ))
-            existing_ids.add(pid)
+    products = (
+        query.order_by(ProductFood.popularity_rank.asc()).limit(6).all()
+    )
+
+    # Prefer rows whose condition_tags overlap diagnosed conditions
+    if condition_names:
+        def _cond_score(p: ProductFood) -> int:
+            tags = (p.condition_tags or "").lower()
+            return sum(1 for c in condition_names if c and c in tags)
+        products.sort(key=lambda p: (-_cond_score(p), p.popularity_rank))
+
+    recs: list[dict] = []
+    for p in products[:3]:
+        if p.sku_id in existing_ids:
+            continue
+        recs.append(_food_to_recommendation(
+            p,
+            reason=(
+                f"Suited for {breed_size or 'your pet'} "
+                f"{life_stage or ''}".strip()
+            ),
+            priority="low",
+        ))
+        existing_ids.add(p.sku_id)
 
     return recs
 
@@ -541,9 +597,8 @@ async def place_order(
     if not in_cart:
         raise ValueError("No items in cart")
 
-    # Build items description
     items_desc = "; ".join(
-        f"{item.name} x{item.quantity} (₹{item.price * item.quantity})"
+        f"{item.name} x{item.quantity} (Rs.{item.price * item.quantity})"
         for item in in_cart
     )
 
@@ -585,18 +640,11 @@ async def place_order(
     ]
 
     # Record each ordered item into pet_preferences so purchase history is tracked.
-    # Look up product category from catalog; fall back to "dashboard_order".
+    # Look up the SKU to tag the preference category; fall back to "dashboard_order".
     from app.services.recommendation_service import record_preference
     for item in in_cart:
-        product = (
-            db.query(ProductCatalog)
-            .filter(
-                (ProductCatalog.cart_item_id == item.product_id)
-                | (ProductCatalog.id == item.product_id)
-            )
-            .first()
-        )
-        item_category = (product.category if product else None) or "dashboard_order"
+        _product, sku_category = _lookup_sku(db, item.product_id)
+        item_category = sku_category or "dashboard_order"
         record_preference(db, pet_id, item_category, item.name, "custom")
 
     # Clear cart
@@ -604,6 +652,9 @@ async def place_order(
         db.delete(item)
 
     db.commit()
+
+    # C4: Send WhatsApp confirmation — non-blocking, failure must not rollback order
+    asyncio.create_task(_send_order_confirmation(db, user_id, pet_id, order_items, total))
 
     return {
         "order_id": order_id,
@@ -615,6 +666,49 @@ async def place_order(
         "payment_method": payment_method,
         "status": "confirmed",
     }
+
+
+async def _send_order_confirmation(
+    db: Session,
+    user_id,
+    pet_id,
+    order_items: list[dict],
+    total: int,
+) -> None:
+    """
+    Send a WhatsApp order confirmation message to the user.
+
+    C4: "Your [Product Name] for [Pet Name] has been ordered! Expected delivery: [date]."
+    Runs as a background task — any failure is logged but never raises.
+    """
+    from app.services.whatsapp_sender import send_text_message
+
+    try:
+        user = db.query(User).filter(User.id == user_id).first()
+        pet = db.query(Pet).filter(Pet.id == pet_id).first()
+        if not user or not user.mobile_display:
+            logger.warning("Order confirmation skipped — no phone for user %s", user_id)
+            return
+
+        pet_name = pet.name if pet else "your pet"
+        product_names = ", ".join(i["name"] for i in order_items[:3])
+        if len(order_items) > 3:
+            product_names += f" and {len(order_items) - 3} more"
+
+        # Expected delivery: 3–5 business days
+        delivery_date = (datetime.utcnow() + timedelta(days=5)).strftime("%d %b %Y")
+
+        message = (
+            f"Your {product_names} for {pet_name} has been ordered! "
+            f"Expected delivery: {delivery_date}. "
+            f"Total paid: Rs.{total}. Thank you for ordering with PetCircle! \U0001f43e"
+        )
+
+        await send_text_message(db, user.mobile_display, message)
+        logger.info("Order confirmation sent to %s for pet %s", user.mobile_display, pet_id)
+    except Exception as exc:
+        # Never raise — order is already committed
+        logger.error("Failed to send order confirmation: %s", exc)
 
 
 # --- Helpers ---
@@ -635,53 +729,48 @@ def _serialize_cart_item(item: CartItem) -> dict:
     }
 
 
-def _product_to_recommendation(
-    product: ProductCatalog,
-    product_id: str,
+def _food_to_recommendation(
+    product: ProductFood,
     reason: str,
     priority: str = "medium",
     tag: str | None = None,
     tag_color: str | None = None,
 ) -> dict:
-    """Convert a ProductCatalog entry to a recommendation dict."""
-    price = _parse_price(product.mrp)
+    """Convert a ProductFood row to a recommendation dict."""
     return {
-        "product_id": product_id,
-        "icon": _category_icon(product.category),
-        "name": f"{product.brand} {product.product_name}".strip(),
-        "sub": product.description or product.indication or product.formulation or "",
-        "price": price,
+        "product_id": product.sku_id,
+        "icon": _category_icon("food"),
+        "name": _food_display_name(product),
+        "sub": _food_sub(product),
+        "price": int(product.discounted_price),
         "tag": tag,
         "tag_color": tag_color,
         "reason": reason,
         "priority": priority,
-        "category": product.category,
+        "category": "food",
     }
 
 
-def _parse_price(mrp_str: str | None) -> int:
-    """Extract first price from MRP string like 'Rs.1,499 / Rs.4,599'."""
-    if not mrp_str:
-        return 0
-    import re
-    match = re.search(r'[\d,]+', mrp_str.replace(' ', ''))
-    if match:
-        try:
-            return int(match.group().replace(',', ''))
-        except ValueError:
-            return 0
-    return 0
-
-
-def _category_icon(category: str) -> str:
-    """Return an icon for a product category."""
-    icons = {
-        "food": "🥣",
-        "deworming": "🪱",
-        "flea_tick": "🐛",
-        "medicine": "💊",
+def _supplement_to_recommendation(
+    product: ProductSupplement,
+    reason: str,
+    priority: str = "medium",
+    tag: str | None = None,
+    tag_color: str | None = None,
+) -> dict:
+    """Convert a ProductSupplement row to a recommendation dict."""
+    return {
+        "product_id": product.sku_id,
+        "icon": _category_icon("supplement"),
+        "name": _supplement_display_name(product),
+        "sub": _supplement_sub(product),
+        "price": int(product.discounted_price),
+        "tag": tag,
+        "tag_color": tag_color,
+        "reason": reason,
+        "priority": priority,
+        "category": "supplement",
     }
-    return icons.get(category, "📦")
 
 
 # Known large breed names

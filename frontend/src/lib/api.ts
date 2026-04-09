@@ -280,6 +280,9 @@ export interface CarePlanItem {
   reason: string | null;
   orderable: boolean;
   cta_label?: string;
+  signal_level?: string | null;
+  info_prompt?: string | null;
+  diet_item_id?: string | null;
 }
 
 export interface CarePlanSection {

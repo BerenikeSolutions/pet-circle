@@ -1,14 +1,15 @@
 """
 PetCircle Phase 1 — Medicine Recurrence Service
 
-Determines the recommended recurrence interval for a medicine/product.
+Determines the recommended recurrence interval for a medicine/product
+via OpenAI GPT.
 
-Strategy:
-  1. Look up the product in product_catalog by matching the medicine name
-     against "brand product_name". If found and the catalog has a parseable
-     frequency value, use it directly — no AI call needed.
-  2. Fall back to OpenAI GPT only when the product is not in the catalog
-     or the catalog frequency cannot be parsed into days.
+Note: The legacy product_catalog table (which included a frequency
+column for deworming/flea-tick medicines) has been replaced by the
+signal-level cart tables (product_food + product_supplement). Neither
+carries dosing frequency, so the fast-path catalog lookup has been
+removed and this service now always calls GPT. See
+.spec/cart-rules-engine/design.md.
 """
 
 import json
@@ -115,81 +116,13 @@ def _is_dual_use_medicine(medicine_name: str | None) -> bool:
 
 def _lookup_catalog_frequency(db: Session, medicine_name: str, item_type: str) -> int | None:
     """
-    Search product_catalog for a matching product and return parsed frequency in days.
-
-    Rule:
-      - Dual-use medicines (e.g. Simparica): one medicine = one dosing interval.
-        Search across both deworming and flea_tick categories and return a single
-        consistent frequency regardless of which item_type is being updated.
-        When catalog entries disagree, use the shortest interval (most frequent
-        dosing) since that is the actual administration schedule.
-      - Non-dual medicines: category-specific lookup as before.
+    Legacy fast-path: the product_catalog table used to carry a parsed
+    `frequency` column for deworming/flea-tick medicines. With the
+    cart-rules-engine rebuild, deworming and flea-tick products are no
+    longer stored in a structured catalog, so this lookup is a no-op and
+    callers fall through to GPT.
     """
-    from app.models.product_catalog import ProductCatalog
-
-    is_dual = _is_dual_use_medicine(medicine_name)
-    categories = _infer_catalog_categories(item_type)
-    if is_dual:
-        # Always search both categories so the result is identical
-        # regardless of whether item_type is "Deworming" or "Tick/Flea".
-        allowed_categories = ["deworming", "flea_tick"]
-    else:
-        allowed_categories = categories
-
-    if not allowed_categories:
-        return None
-
-    # Match "Brand ProductName" against catalog rows.
-    medicine_lower = medicine_name.strip().lower()
-
-    rows = (
-        db.query(
-            ProductCatalog.category,
-            ProductCatalog.brand,
-            ProductCatalog.product_name,
-            ProductCatalog.frequency,
-        )
-        .filter(
-            ProductCatalog.category.in_(allowed_categories),
-            ProductCatalog.product_name.isnot(None),
-        )
-        .all()
-    )
-
-    matched_days: set[int] = set()
-    for category, brand, product_name, frequency in rows:
-        brand_text = (brand or "").strip()
-        product_text = (product_name or "").strip()
-        label = f"{brand_text} {product_text}".strip().lower()
-        if label == medicine_lower:
-            days = _parse_frequency_to_days(frequency)
-            if days and days > 0:
-                matched_days.add(days)
-            else:
-                logger.warning(
-                    "Catalog match for %s but unparseable frequency: '%s'",
-                    medicine_name, frequency,
-                )
-
-    if not matched_days:
-        return None
-
-    if len(matched_days) > 1:
-        logger.warning(
-            "Catalog contains multiple recurrence values for %s (%s); "
-            "using shortest interval (actual dosing schedule).",
-            medicine_name,
-            sorted(matched_days),
-        )
-
-    result_days = min(matched_days)
-    logger.info(
-        "Catalog recurrence for %s (%s): %d days",
-        medicine_name,
-        item_type,
-        result_days,
-    )
-    return result_days
+    return None
 
 
 # ---------------------------------------------------------------------------

@@ -57,7 +57,6 @@ from app.models.pet import Pet
 from app.models.custom_preventive_item import CustomPreventiveItem
 from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
-from app.models.product_catalog import ProductCatalog
 from app.models.reminder import Reminder
 from app.models.user import User
 from app.services.diet_service import HOMEMADE_KW, add_diet_item, split_diet_items_by_type
@@ -105,6 +104,9 @@ def is_doc_upload_deadline_expired(deadline: datetime | None) -> bool:
     return datetime.now(UTC) > deadline
 
 
+_CARE_PLAN_VACCINE_TERMS = ["vaccine", "rabies", "dhpp", "bordetella", "feline core"]
+
+
 def _count_tracked_preventive_items(db: Session, pet_id) -> int:
     """Return tracked preventive items count used across care-plan surfaces."""
     return (
@@ -121,6 +123,34 @@ def _count_tracked_preventive_items(db: Session, pet_id) -> int:
         )
         .count()
     )
+
+
+def _count_tracked_preventive_items_split(db: Session, pet_id) -> tuple[int, int]:
+    """Return (vaccine_count, other_count) for tracked core/custom preventive items.
+
+    Splits the total tracked count into vaccines (matched by keyword) and all
+    other preventive items so care-plan messages can reference each separately.
+    """
+    from sqlalchemy import or_ as _or
+    base_q = (
+        db.query(PreventiveRecord)
+        .outerjoin(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
+        .outerjoin(CustomPreventiveItem, PreventiveRecord.custom_preventive_item_id == CustomPreventiveItem.id)
+        .filter(
+            PreventiveRecord.pet_id == pet_id,
+            PreventiveRecord.last_done_date.isnot(None),
+            _or(
+                PreventiveMaster.is_core.is_(True),
+                CustomPreventiveItem.id.isnot(None),
+            ),
+        )
+    )
+    vaccine_filter = _or(
+        *[PreventiveMaster.item_name.ilike(f"%{kw}%") for kw in _CARE_PLAN_VACCINE_TERMS]
+    )
+    vaccine_count = base_q.filter(vaccine_filter).count()
+    total = base_q.count()
+    return vaccine_count, total - vaccine_count
 
 # --- Colloquial input sets ---
 # Accepted variations for yes/no across all onboarding steps.
@@ -2065,36 +2095,14 @@ def _match_specific_vaccine_master(
 
 
 def _infer_preventive_categories_from_catalog(db: Session, medicine_name: str | None) -> set[str]:
-    """Infer preventive categories using product catalog records.
+    """Legacy catalog-backed category inference.
 
-    This avoids hardcoded medicine names and relies on existing catalog labels.
+    The product_catalog table (which held deworming/flea_tick medicine
+    rows) was dropped as part of the cart-rules-engine rebuild. This
+    helper now always returns an empty set so callers fall back to
+    their existing heuristics / GPT-driven inference.
     """
-    if not isinstance(medicine_name, str):
-        return set()
-
-    normalized = re.sub(r"\s+", " ", medicine_name.strip().lower())
-    if not normalized:
-        return set()
-
-    tokens = [tok for tok in re.findall(r"[a-z0-9]+", normalized) if len(tok) >= 4]
-    if not tokens:
-        return set()
-
-    rows = (
-        db.query(ProductCatalog.category, ProductCatalog.brand, ProductCatalog.product_name)
-        .filter(ProductCatalog.category.in_(["deworming", "flea_tick"]))
-        .all()
-    )
-
-    categories: set[str] = set()
-    for category, brand, product_name in rows:
-        haystack = f"{(brand or '').strip().lower()} {(product_name or '').strip().lower()}"
-        if not haystack.strip():
-            continue
-        if normalized in haystack or any(token in haystack for token in tokens):
-            categories.add(category)
-
-    return categories
+    return set()
 
 
 def _enrich_preventive_categories_from_catalog(db: Session, parsed: dict) -> dict:
@@ -3500,6 +3508,7 @@ async def _finalize_onboarding(db, user, send_fn):
     # Keep onboarding care-plan messaging aligned with the dashboard
     # "What's Found" summary to avoid cross-surface count drift.
     record_count = _count_tracked_preventive_items(db, pet.id)
+    vaccine_count, other_preventive_count = _count_tracked_preventive_items_split(db, pet.id)
     conditions = (
         db.query(Condition)
         .filter(Condition.pet_id == pet.id, Condition.is_active == True)
@@ -3557,6 +3566,8 @@ async def _finalize_onboarding(db, user, send_fn):
         diet_count=diet_count,
         supplement_count=supplement_count,
         record_count=record_count,
+        vaccine_count=vaccine_count,
+        other_preventive_count=other_preventive_count,
         docs_uploaded=docs_uploaded,
         conditions=conditions,
         diet_items=diet_items,
@@ -3680,6 +3691,8 @@ async def _ai_supplement_recommendation(
 async def _generate_care_plan_message(
     pet, diet_count: int, supplement_count: int,
     record_count: int, docs_uploaded: int,
+    vaccine_count: int = 0,
+    other_preventive_count: int = 0,
     conditions: list[Condition] | None = None,
     diet_items: list | None = None,
     db: Session | None = None,
@@ -3705,6 +3718,20 @@ async def _generate_care_plan_message(
     has_preventive = record_count > 0
     has_breed = bool(pet.breed)
     has_age = bool(pet.age_text or pet.dob)
+
+    # Build "x vaccines and y preventive care items" label for care plan message.
+    if vaccine_count > 0 and other_preventive_count > 0:
+        _preventive_label = (
+            f"{vaccine_count} vaccine{'s' if vaccine_count != 1 else ''} and "
+            f"{other_preventive_count} preventive care item"
+            f"{'s' if other_preventive_count != 1 else ''}"
+        )
+    elif vaccine_count > 0:
+        _preventive_label = f"{vaccine_count} vaccine{'s' if vaccine_count != 1 else ''}"
+    else:
+        _preventive_label = (
+            f"{record_count} preventive care item{'s' if record_count != 1 else ''}"
+        )
     active_conditions = [c for c in (conditions or []) if getattr(c, "name", None)]
     has_conditions = len(active_conditions) > 0
     condition_names = ", ".join(c.name for c in active_conditions[:3])
@@ -3828,7 +3855,7 @@ async def _generate_care_plan_message(
         return (
             f"{name}'s care plan is ready! 🐾 Based on {name}'s health analysis, life stage and current diet.\n\n"
             f"{condition_line}\n\n"
-            f"We've logged {record_count} preventive care item{'s' if record_count != 1 else ''} for {name}.\n\n"
+            f"We've logged {_preventive_label} for {name}.\n\n"
             f"{supplement_rec}"
         )
     elif has_food and has_preventive:
@@ -3837,7 +3864,7 @@ async def _generate_care_plan_message(
             f"{name}'s care plan is ready! 🐾 Based on {name}'s health analysis, "
             f"life stage and current diet.\n\n"
             f"{condition_line}\n\n"
-            f"We've logged {record_count} preventive care item{'s' if record_count != 1 else ''} for {name}.\n\n"
+            f"We've logged {_preventive_label} for {name}.\n\n"
             f"{supplement_rec}"
         )
     elif has_food and not has_preventive:

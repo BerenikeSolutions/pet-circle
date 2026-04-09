@@ -1,9 +1,9 @@
 """
 PetCircle Phase 1 — Food Nutrition Cache Model
 
-Caches AI-estimated nutritional content for homemade or unknown foods
-not found in the product_catalog table. Keyed by (food_label_normalized,
-food_type) to avoid redundant GPT calls for the same food item.
+Caches AI-estimated nutritional content for homemade or unknown foods.
+Keyed by (food_label_normalized, food_type) to avoid redundant GPT
+calls for the same food item.
 
 Cache staleness: 365 days.
 """

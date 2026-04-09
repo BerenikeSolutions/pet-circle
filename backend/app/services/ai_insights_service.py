@@ -703,9 +703,9 @@ async def generate_recognition_bullets(db: Session, pet: Pet) -> list[Bullet]:
         or 0
     )
 
-    # Count core preventive items and custom items that have last_done_date filled.
-    on_schedule_preventive_count = (
-        db.query(func.count(PreventiveRecord.id))
+    # Base filter for tracked preventive items (core master + custom).
+    _base_preventive_q = (
+        db.query(PreventiveRecord)
         .outerjoin(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
         .outerjoin(CustomPreventiveItem, PreventiveRecord.custom_preventive_item_id == CustomPreventiveItem.id)
         .filter(
@@ -716,9 +716,16 @@ async def generate_recognition_bullets(db: Session, pet: Pet) -> list[Bullet]:
                 CustomPreventiveItem.id.isnot(None),
             ),
         )
-        .scalar()
-        or 0
     )
+    _VACCINE_TERMS = ["vaccine", "rabies", "dhpp", "bordetella", "feline core"]
+    _vaccine_filter = or_(
+        *[PreventiveMaster.item_name.ilike(f"%{kw}%") for kw in _VACCINE_TERMS]
+    )
+    vaccine_count = (
+        _base_preventive_q.filter(_vaccine_filter).count()
+    )
+    on_schedule_preventive_count = _base_preventive_q.count()
+    other_preventive_count = on_schedule_preventive_count - vaccine_count
 
     diet_items: list[DietItem] = (
         db.query(DietItem)
@@ -745,17 +752,22 @@ async def generate_recognition_bullets(db: Session, pet: Pet) -> list[Bullet]:
             {"icon": "🩺", "label": "No health conditions found"}
         )
 
-    # 2. Preventive care — count core items with last_done_date filled
+    # 2. Preventive care — split into vaccines vs other preventive items
     if on_schedule_preventive_count > 0:
-        bullets.append(
-            {
-                "icon": "💉",
-                "label": (
-                    f"{on_schedule_preventive_count} preventive care item"
-                    f"{'s' if on_schedule_preventive_count != 1 else ''} tracked"
-                ),
-            }
-        )
+        if vaccine_count > 0 and other_preventive_count > 0:
+            label = (
+                f"{vaccine_count} vaccine{'s' if vaccine_count != 1 else ''} and "
+                f"{other_preventive_count} preventive care item"
+                f"{'s' if other_preventive_count != 1 else ''} tracked"
+            )
+        elif vaccine_count > 0:
+            label = f"{vaccine_count} vaccine{'s' if vaccine_count != 1 else ''} tracked"
+        else:
+            label = (
+                f"{other_preventive_count} preventive care item"
+                f"{'s' if other_preventive_count != 1 else ''} tracked"
+            )
+        bullets.append({"icon": "💉", "label": label})
     else:
         bullets.append(
             {"icon": "💉", "label": "0 preventive care items tracked"}

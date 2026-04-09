@@ -36,7 +36,6 @@ from app.models.diet_item import DietItem
 from app.models.food_nutrition_cache import FoodNutritionCache
 from app.models.nutrition_target_cache import NutritionTargetCache
 from app.models.pet import Pet
-from app.models.product_catalog import ProductCatalog
 from app.services.diet_service import split_diet_items_by_type
 from app.services.weight_service import DEFAULT_RANGE as DEFAULT_IDEAL_WEIGHT_RANGE
 from app.services.weight_service import get_ideal_range
@@ -430,56 +429,7 @@ async def _call_openai_nutrition_targets(
         return None
 
 
-# ─── Step 3b: Product Catalog Matching ──────────────────────────────
-
-def _match_product_from_catalog(catalog: list, label: str, item_type: str) -> "ProductCatalog | None":
-    """
-    In-memory multi-strategy matching against a pre-loaded product catalog slice.
-    The caller loads the catalog once; this function never issues DB queries.
-
-    Strategies (in order):
-    1. Exact product_name match (label ⊆ product_name or product_name ⊆ label)
-    2. Keyword match — any significant word in label appears in product_name
-    3. Brand-only match — first word of label matches brand
-    4. Reverse match — brand or product_name contained in label
-    """
-    label_lower = label.lower().strip()
-    words = [w for w in label_lower.split() if len(w) > 2]
-
-    for p in catalog:
-        name_l = (p.product_name or "").lower()
-        brand_l = (p.brand or "").lower()
-        # Strategy 1: exact substring match
-        if label_lower[:50] in name_l or name_l[:50] in label_lower:
-            return p
-
-    for p in catalog:
-        name_l = (p.product_name or "").lower()
-        # Strategy 2: any significant keyword
-        for word in words:
-            if word in name_l:
-                return p
-
-    first_word = label_lower.split()[0] if label_lower.split() else ""
-    for p in catalog:
-        brand_l = (p.brand or "").lower()
-        # Strategy 3: brand match on first word
-        if first_word and first_word in brand_l:
-            return p
-
-    for p in catalog:
-        brand_l = (p.brand or "").lower()
-        name_l = (p.product_name or "").lower()
-        # Strategy 4: reverse — brand/name contained in label
-        if brand_l and brand_l in label_lower:
-            return p
-        if name_l and name_l[:30] in label_lower:
-            return p
-
-    return None
-
-
-# ─── Step 3c: AI Food Estimation ────────────────────────────────────
+# ─── Step 3b: AI Food Estimation ────────────────────────────────────
 
 def _weight_bucket(weight_kg: float | None) -> str:
     """Bucket weight so similar-sized pets can share cache entries."""
@@ -743,18 +693,10 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
         .all()
     )
 
-    # Load the food product catalog once — avoids N+1 queries in per-item matching
-    food_catalog = db.query(ProductCatalog).filter(ProductCatalog.category == "food").all()
-
-    # Separate items needing AI estimation from those matched in the product catalog
-    catalog_items: list[tuple] = []   # (item, product)
-    unmatched_items: list = []        # items needing AI estimation
-    for item in diet_items:
-        product = _match_product_from_catalog(food_catalog, item.label, item.type)
-        if product:
-            catalog_items.append((item, product))
-        else:
-            unmatched_items.append(item)
+    # The new cart-rules product tables (product_food / product_supplement)
+    # no longer carry per-SKU nutrition. All diet items go through AI
+    # estimation (cached in food_nutrition_cache).
+    unmatched_items: list = list(diet_items)
 
     # Fire breed-targets lookup and all per-item AI estimations in parallel.
     # Pass the full pet context (species, breed, weight, age, gender, and any
@@ -804,9 +746,6 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
         "calcium": 0.0, "phosphorus": 0.0, "omega_3": 0, "omega_6": 0,
         "vitamin_e": 0, "vitamin_d3": 0, "glucosamine": 0, "probiotics": False,
     }
-
-    for _, product in catalog_items:
-        _accumulate_from_product(actual, product)
 
     for estimated in estimations:
         if estimated:
@@ -910,36 +849,6 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
 
 
 # ─── Accumulation Helpers ────────────────────────────────────────────
-
-def _accumulate_from_product(actual: dict, product: ProductCatalog) -> None:
-    """Accumulate nutritional values from a matched product catalog entry."""
-    if product.crude_protein:
-        actual["protein"] = max(actual["protein"], float(product.crude_protein))
-    if product.crude_fat:
-        actual["fat"] = max(actual["fat"], float(product.crude_fat))
-    if product.crude_fibre:
-        actual["fibre"] = max(actual["fibre"], float(product.crude_fibre))
-    if product.moisture:
-        actual["moisture"] = max(actual["moisture"], float(product.moisture))
-    if product.energy_kcal:
-        actual["calories"] += int(product.energy_kcal * 0.28)  # Rough portion estimate
-    if product.calcium:
-        actual["calcium"] = max(actual["calcium"], float(product.calcium))
-    if product.phosphorus:
-        actual["phosphorus"] = max(actual["phosphorus"], float(product.phosphorus))
-    if product.omega_3:
-        actual["omega_3"] += product.omega_3
-    if product.omega_6:
-        actual["omega_6"] += product.omega_6
-    if product.vitamin_e:
-        actual["vitamin_e"] += product.vitamin_e
-    if product.vitamin_d3:
-        actual["vitamin_d3"] += product.vitamin_d3
-    if product.glucosamine:
-        actual["glucosamine"] += product.glucosamine
-    if product.probiotics and product.probiotics != "-":
-        actual["probiotics"] = True
-
 
 def _accumulate_from_estimation(actual: dict, est: dict) -> None:
     """Accumulate nutritional values from AI-estimated food nutrition."""

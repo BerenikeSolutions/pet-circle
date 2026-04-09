@@ -39,7 +39,8 @@ from app.models.pet_life_stage_trait import PetLifeStageTrait
 from app.models.pet_preference import PetPreference
 from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
-from app.models.product_catalog import ProductCatalog
+from app.models.product_food import ProductFood
+from app.models.product_supplement import ProductSupplement
 from app.models.reminder import Reminder
 from app.models.shown_fun_fact import ShownFunFact
 from app.models.user import User
@@ -69,7 +70,8 @@ __all__ = [
     "WeightHistory",
     "DietItem",
     "HygienePreference",
-    "ProductCatalog",
+    "ProductFood",
+    "ProductSupplement",
     "Nudge",
     "NudgeConfig",
     "NudgeDeliveryLog",

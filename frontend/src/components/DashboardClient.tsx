@@ -134,6 +134,28 @@ function DashboardInner({ token }: { token: string }) {
     });
   }, []);
 
+  const addCartItemBySku = useCallback((
+    skuId: string,
+    name: string,
+    price: number,
+    mrp: number,
+    icon: string,
+    section: string,
+  ) => {
+    setCart((prev) => {
+      const existing = prev.find((entry) => entry.id === skuId);
+      if (existing) {
+        return prev.map((entry) =>
+          entry.id === skuId ? { ...entry, quantity: entry.quantity + 1 } : entry
+        );
+      }
+      return [
+        ...prev,
+        { id: skuId, name, quantity: 1, price, mrp: mrp > price ? mrp : undefined, icon, section },
+      ];
+    });
+  }, []);
+
   const updateCartQuantity = useCallback((id: string, quantity: number) => {
     setCart((prev) =>
       prev.map((item) =>
@@ -259,6 +281,7 @@ function DashboardInner({ token }: { token: string }) {
             onGoToRecords={() => setView("records")}
             onGoToCart={() => setView("cart")}
             onAddToCart={addToCart}
+            onAddBySku={addCartItemBySku}
           />
         );
       }
@@ -288,10 +311,12 @@ function DashboardInner({ token }: { token: string }) {
         return (
           <CartView
             items={cart}
+            token={token}
             onBack={() => setView("dashboard")}
             onUpdateQuantity={updateCartQuantity}
             onRemoveItem={removeCartItem}
             onProceedToCheckout={() => setView("checkout")}
+            onAddBySku={addCartItemBySku}
           />
         );
       case "checkout":
