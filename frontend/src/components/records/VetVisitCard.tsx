@@ -2,12 +2,11 @@
 
 import { useEffect, useState } from "react";
 import type { VetVisit } from "@/lib/api";
-import { getDashboardDocumentUrl } from "@/lib/api";
 
 interface VetVisitCardProps {
   visit: VetVisit;
   defaultOpen: boolean;
-  token: string;
+  onView: (id: string, title: string) => void;
 }
 
 function formatDate(value: string | null): string {
@@ -21,11 +20,10 @@ function formatDate(value: string | null): string {
   }).format(date);
 }
 
-export default function VetVisitCard({ visit, defaultOpen, token }: VetVisitCardProps) {
+export default function VetVisitCard({ visit, defaultOpen, onView }: VetVisitCardProps) {
   const [open, setOpen] = useState(defaultOpen);
   const buttonId = `visit-toggle-${visit.id}`;
   const panelId = `visit-panel-${visit.id}`;
-  const documentUrl = getDashboardDocumentUrl(token, visit.id);
   const keyFindingLabel = visit.key_finding || visit.tag;
 
   useEffect(() => {
@@ -98,23 +96,25 @@ export default function VetVisitCard({ visit, defaultOpen, token }: VetVisitCard
           </div>
 
           <div style={{ marginTop: 8 }}>
-            <a
-              href={documentUrl}
-              target="_blank"
-              rel="noopener noreferrer"
+            <button
+              type="button"
+              onClick={() => onView(visit.id, visit.title)}
               style={{
                 display: "inline-flex",
                 alignItems: "center",
-                justifyContent: "center",
+                gap: 4,
                 fontSize: 12,
                 color: "var(--orange)",
                 fontWeight: 700,
-                textDecoration: "none",
+                background: "none",
+                border: "none",
+                padding: 0,
+                cursor: "pointer",
               }}
               aria-label={`View prescription for ${visit.title}`}
             >
-              View
-            </a>
+              View →
+            </button>
           </div>
 
           {open && (
@@ -134,7 +134,7 @@ export default function VetVisitCard({ visit, defaultOpen, token }: VetVisitCard
                 }}
               >
                 <div style={{ fontSize: 11, fontWeight: 700, color: "#B45309", marginBottom: 3 }}>
-                  RX SUMMARY
+                  RX / PRESCRIPTION
                 </div>
                 <div style={{ fontSize: 13, color: "var(--t1)", lineHeight: 1.35 }}>{visit.rx || "Not available"}</div>
               </div>

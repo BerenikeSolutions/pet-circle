@@ -113,6 +113,13 @@ _batch_document_ids: dict[str, list] = {}
 # Key: str(pet_id), Value: True if batch started during awaiting_documents.
 _batch_is_onboarding: dict[str, bool] = {}
 
+# Tracks how many documents in the current batch were rejected due to an
+# unsupported MIME type (e.g. .docx, .xlsx). These are not sent as per-file
+# error messages; instead they are surfaced in the single acknowledgment
+# message when extraction starts.
+# Key: str(pet_id), Value: count of unsupported-format files in this batch.
+_unsupported_format_count: dict[str, int] = {}
+
 # Tracks whether a user has explicitly asked to keep uploading more documents
 # during the awaiting_documents window. When True, batch extraction will NOT
 # auto-finalize onboarding — the user stays in the upload window until they
@@ -1324,7 +1331,25 @@ async def _handle_media(db: Session, user, message_data: dict) -> None:
     except ValueError as e:
         # Remove the tracked upload since storage failed.
         _recent_uploads[pet_key].pop()
-        await send_text_message(db, from_number, str(e))
+        error_str = str(e)
+        if "not allowed" in error_str or "File type" in error_str:
+            # Unsupported MIME type (e.g. .docx): suppress per-file message.
+            # Track the count so it appears in the batch acknowledgment instead.
+            _unsupported_format_count[pet_key] = (
+                _unsupported_format_count.get(pet_key, 0) + 1
+            )
+            # Schedule a timer so the acknowledgment fires even if no valid
+            # documents are added to the batch.
+            _schedule_batch_extraction(
+                pet_id=pet.id,
+                pet_name=pet.name,
+                user_id=user.id,
+                from_number=from_number,
+            )
+        else:
+            # File-size or daily-limit errors: send immediately — these are
+            # batch-level constraints the user needs to know about right away.
+            await send_text_message(db, from_number, error_str)
     except RuntimeError:
         _recent_uploads[pet_key].pop()
         await send_text_message(db, from_number, "Upload failed. Please try again later.")
@@ -1380,6 +1405,17 @@ async def _delayed_batch_extraction(
         # from being included in the current extraction summary.
         batched_doc_ids = list(_batch_document_ids.get(pet_key, []))
         if not batched_doc_ids:
+            # All files in this batch were rejected before reaching the DB
+            # (e.g. unsupported MIME type). Send a single message if any
+            # unsupported-format files were tracked.
+            unsupported_count = _unsupported_format_count.pop(pet_key, 0)
+            if unsupported_count > 0:
+                await send_text_message(
+                    bg_db, from_number,
+                    f"Those {unsupported_count} file(s) couldn't be read as they're "
+                    f"in an unsupported format (like .docx). You can share these as "
+                    f"an image or PDF and I'll pick them up right away.",
+                )
             _batch_is_onboarding.pop(pet_key, None)
             return
 
@@ -1395,6 +1431,15 @@ async def _delayed_batch_extraction(
         )
 
         if not pending_docs:
+            # DB has no pending docs in this batch (already extracted or failed).
+            unsupported_count = _unsupported_format_count.pop(pet_key, 0)
+            if unsupported_count > 0:
+                await send_text_message(
+                    bg_db, from_number,
+                    f"Those {unsupported_count} file(s) couldn't be read as they're "
+                    f"in an unsupported format (like .docx). You can share these as "
+                    f"an image or PDF and I'll pick them up right away.",
+                )
             _batch_document_ids.pop(pet_key, None)
             _batch_is_onboarding.pop(pet_key, None)
             return
@@ -1446,16 +1491,41 @@ async def _delayed_batch_extraction(
                     pass
                 should_finalize_onboarding = False
 
-        # Per user request, the "Got it — I received N documents", "The below
-        # files are saved", and "I will now start extracting health data"
-        # acknowledgement messages have been removed from the flow entirely.
-        # Extraction proceeds silently and the user sees only the finalization
-        # / care plan message at the end.
+        # --- Send acknowledgment before extraction starts (post-onboarding only) ---
+        # Onboarding batches already have the "That's everything, building care
+        # plan..." transition message, so we skip the ack there.
+        if not should_finalize_onboarding and pet and user:
+            unsupported_count = _unsupported_format_count.get(pet_key, 0)
+            doc_count = len(pending_docs)
+            ack = (
+                f"Got it — we've received {doc_count} "
+                f"document{'s' if doc_count != 1 else ''} 🐾\n\n"
+                f"I'm starting to process them now to update {pet.name}'s records."
+            )
+            if unsupported_count > 0:
+                ack += (
+                    f"\n\nJust a heads up: {unsupported_count} "
+                    f"document{'s' if unsupported_count != 1 else ''} couldn't be "
+                    f"read as {'they\'re' if unsupported_count != 1 else 'it\'s'} in "
+                    f"an unsupported format (like .docx). You can share "
+                    f"{'these' if unsupported_count != 1 else 'this'} as an image or "
+                    f"PDF and I'll pick {'them' if unsupported_count != 1 else 'it'} "
+                    f"up right away.\n\nGive me a few seconds while I go through the rest."
+                )
+            else:
+                ack += "\n\nGive me a few seconds while I go through the rest."
+            await send_text_message(bg_db, from_number, ack)
 
         success_count = 0
         fail_count = 0
-        failed_doc_names = []
+        failed_docs: list[dict] = []  # {"name": str, "reason": str, "extra": str}
         all_results = []
+
+        # Build a name lookup so error messages can reference files by name.
+        doc_id_to_name: dict[str, str] = {
+            str(doc.id): (doc.document_name or doc.file_path.split("/")[-1])
+            for doc in pending_docs
+        }
 
         # Extract each document sequentially under the semaphore.
         # Each extraction is given a 120s timeout to prevent one stuck GPT
@@ -1472,8 +1542,8 @@ async def _delayed_batch_extraction(
 
                     if not file_bytes:
                         fail_count += 1
-                        doc_label = doc.document_name or doc.file_path.split("/")[-1]
-                        failed_doc_names.append(doc_label)
+                        doc_label = doc_id_to_name.get(str(doc.id), doc.file_path.split("/")[-1])
+                        failed_docs.append({"name": doc_label, "reason": "unclear", "extra": ""})
                         doc.extraction_status = "failed"
                         bg_db.commit()
                         continue
@@ -1488,16 +1558,31 @@ async def _delayed_batch_extraction(
                     )
                     all_results.append(result)
 
+                    doc_label = doc_id_to_name.get(str(doc.id), doc.file_path.split("/")[-1])
                     if result.get("status") == "failed":
                         fail_count += 1
-                        doc_label = doc.document_name or doc.file_path.split("/")[-1]
-                        # Only show document name — no error details to the user.
-                        failed_doc_names.append(doc_label)
+                        failed_docs.append({"name": doc_label, "reason": "unclear", "extra": ""})
                     elif result.get("status") == "rejected":
-                        # Rejected docs (not pet-related or wrong pet name) are
-                        # shown on dashboard with reason; counted separately so they
-                        # don't inflate fail_count or trigger the failure-only message.
-                        pass
+                        # Rejected docs surface in the confirmation message with
+                        # a friendly reason; they don't inflate fail_count.
+                        doc_type = result.get("document_type", "")
+                        if doc_type == "not_pet_related":
+                            failed_docs.append({"name": doc_label, "reason": "not_health", "extra": ""})
+                        elif doc_type == "pet_name_mismatch":
+                            # Extract the other pet's name from the error string.
+                            errors = result.get("errors") or []
+                            other_pet = ""
+                            for err in errors:
+                                if "appears to be for" in err:
+                                    # e.g. "This document appears to be for 'Bruno', not for Zayn."
+                                    import re
+                                    m = re.search(r"appears to be for ['\"]?([^'\",.]+)['\"]?", err)
+                                    if m:
+                                        other_pet = m.group(1).strip()
+                                    break
+                            failed_docs.append({"name": doc_label, "reason": "wrong_pet", "extra": other_pet})
+                        else:
+                            failed_docs.append({"name": doc_label, "reason": "unclear", "extra": ""})
                     else:
                         success_count += 1
 
@@ -1508,8 +1593,8 @@ async def _delayed_batch_extraction(
                     )
                 except TimeoutError:
                     fail_count += 1
-                    doc_label = doc.document_name or doc.file_path.split("/")[-1]
-                    failed_doc_names.append(doc_label)
+                    doc_label = doc_id_to_name.get(str(doc.id), doc.file_path.split("/")[-1])
+                    failed_docs.append({"name": doc_label, "reason": "unclear", "extra": ""})
                     logger.error(
                         "Extraction timed out for doc %s (%d/%d) pet %s",
                         str(doc.id), idx, total, str(pet_id),
@@ -1524,8 +1609,8 @@ async def _delayed_batch_extraction(
                             pass
                 except Exception as e:
                     fail_count += 1
-                    doc_label = doc.document_name or doc.file_path.split("/")[-1]
-                    failed_doc_names.append(doc_label)
+                    doc_label = doc_id_to_name.get(str(doc.id), doc.file_path.split("/")[-1])
+                    failed_docs.append({"name": doc_label, "reason": "unclear", "extra": ""})
                     logger.error(
                         "Extraction failed for doc %s (%d/%d): %s",
                         str(doc.id), idx, total, str(e),
@@ -1557,12 +1642,13 @@ async def _delayed_batch_extraction(
                     all_results=all_results,
                     success_count=success_count,
                     fail_count=fail_count,
-                    failed_doc_names=failed_doc_names,
+                    failed_docs=failed_docs,
+                    doc_id_to_name=doc_id_to_name,
                 )
             else:
                 await _send_batch_summary(
                     bg_db, user, pet, from_number,
-                    all_results, success_count, fail_count, failed_doc_names,
+                    all_results, success_count, fail_count, failed_docs,
                 )
 
         # Clear the batch counter and rejection flag so user can upload again.
@@ -1570,6 +1656,7 @@ async def _delayed_batch_extraction(
         _rejection_sent.pop(pet_key, None)
         _batch_document_ids.pop(pet_key, None)
         _batch_is_onboarding.pop(pet_key, None)
+        _unsupported_format_count.pop(pet_key, None)
 
     except Exception as e:
         logger.error(
@@ -1758,146 +1845,143 @@ def _get_dashboard_link(db: Session, pet) -> str | None:
         return None
 
 
+# Maps GPT-extracted document_category values to the user-facing display label
+# used in the "Here's what I read:" section of the confirmation message.
+_CATEGORY_DISPLAY: dict[str, str] = {
+    "Prescription": "Vet prescription",
+    "Blood Report": "Lab report",
+    "Urine Report": "Lab report",
+    "Imaging": "Lab report",
+    "PCR & Parasite Panel": "Lab report",
+    "Vaccination": "Vaccination record",
+}
+
+
+def _build_doc_type_counts(all_results: list[dict]) -> dict[str, int]:
+    """
+    Count successfully extracted documents by user-facing display category.
+
+    Only results that are not failed/rejected are counted. Categories map to
+    "Vet prescription", "Lab report", "Vaccination record", or "document"
+    for unmapped types.
+    """
+    counts: dict[str, int] = {}
+    for r in all_results:
+        if r.get("status") in ("failed", "rejected"):
+            continue
+        raw_cat = r.get("document_category") or ""
+        label = _CATEGORY_DISPLAY.get(raw_cat, "document")
+        counts[label] = counts.get(label, 0) + 1
+    return counts
+
+
+def _format_error_lines(failed_docs: list[dict], pet_name: str) -> list[str]:
+    """
+    Format error bullet lines for the confirmation message.
+
+    Groups documents by reason and produces friendly, WhatsApp-ready lines.
+    Each reason type gets one line (using plural/singular based on count).
+
+    Reasons:
+        "unclear"   — extraction failed (image unreadable)
+        "wrong_pet" — document belongs to a different pet
+        "not_health"— document is not a health record
+    """
+    lines: list[str] = []
+
+    # Group by reason
+    unclear = [d for d in failed_docs if d.get("reason") == "unclear"]
+    wrong_pet = [d for d in failed_docs if d.get("reason") == "wrong_pet"]
+    not_health = [d for d in failed_docs if d.get("reason") == "not_health"]
+
+    for doc in unclear:
+        lines.append(
+            f"• '{doc['name']}' couldn't be processed as the image was unclear. "
+            f"You can share a clearer picture and I'll update it right away."
+        )
+
+    for doc in wrong_pet:
+        other = doc.get("extra") or "another pet"
+        lines.append(
+            f"• '{doc['name']}' seems to belong to {other}. "
+            f"Do you want me to still add it to {pet_name}'s records, "
+            f"or should I skip it?"
+        )
+
+    for doc in not_health:
+        lines.append(
+            f"• '{doc['name']}' doesn't seem to be a health-related record. "
+            f"It might have been uploaded by mistake — you can check and share "
+            f"the right document and I'll update it for you."
+        )
+
+    return lines
+
+
 async def _send_batch_summary(
     db: Session, user, pet, from_number: str,
     all_results: list[dict], success_count: int, fail_count: int,
-    failed_doc_names: list[str],
+    failed_docs: list[dict],
 ) -> None:
     """
-    Send ONE consolidated message summarizing the entire batch extraction.
+    Send ONE consolidated confirmation message after all batch extractions complete.
 
-    Rules:
-        - If entire batch failed: one error message with dashboard link.
-        - If partial failure: list which docs failed by name.
-        - If all succeeded: show extraction summary with items found.
+    Format:
+        Thanks for waiting — I've gone through the documents 🐾
+
+        Here's what I read:
+        • {#} Vet prescription(s)
+        • {#} Lab report(s)
+        • {#} Vaccination record(s)
+
+        [error lines, only if any failures]
+
+        Everything [else] has been added to your pet's records.
+
+        You can view the updated Care Plan and all Health Records here: {link}
     """
-    success_count + fail_count
+    dashboard_link = _get_dashboard_link(db, pet)
 
-    # --- Check for rejected documents (not pet-related or wrong pet name) ---
-    # Send one WhatsApp message per rejection type if any were found.
-    not_pet_results = [r for r in all_results if r.get("document_type") == "not_pet_related"]
-    mismatch_results = [r for r in all_results if r.get("document_type") == "pet_name_mismatch"]
+    # --- Build "Here's what I read:" section ---
+    type_counts = _build_doc_type_counts(all_results)
+    read_lines: list[str] = []
+    # Preferred display order
+    for label in ("Vet prescription", "Lab report", "Vaccination record", "document"):
+        count = type_counts.get(label, 0)
+        if count > 0:
+            if label == "document":
+                read_lines.append(f"• {count} other document{'s' if count != 1 else ''}")
+            else:
+                read_lines.append(f"• {count} {label}{'s' if count != 1 else ''}")
 
-    if not_pet_results:
-        await send_text_message(
-            db, from_number,
-            "⚠️ One or more documents you sent don't appear to be pet or veterinary records "
-            "(e.g. a human medical report, invoice, or unrelated photo). "
-            "Please only upload vet records, vaccination certificates, lab reports, or prescriptions. "
-            "These documents have been removed from the dashboard."
-        )
+    # --- Build error section ---
+    error_lines = _format_error_lines(failed_docs, pet.name)
 
-    if mismatch_results:
-        # Use the reason from the first mismatch result for a specific message.
-        reason = (mismatch_results[0].get("errors") or [""])[0]
-        msg = (
-            f"⚠️ A document you uploaded could not be added to *{mismatch_results[0].get('pet_name', 'your pet')}*'s records "
-            f"because it appears to belong to a different pet."
-        )
-        if reason:
-            msg += f"\n\n_{reason}_"
-        msg += "\n\nPlease upload documents that belong to this pet only."
-        await send_text_message(db, from_number, msg)
+    # --- Compose message ---
+    msg = "Thanks for waiting — I've gone through the documents 🐾"
 
-    if success_count == 0 and fail_count > 0:
-        # Entire batch failed — one error message.
-        dashboard_link = _get_dashboard_link(db, pet)
-        msg = (
-            f"Extraction could not process the below documents for *{pet.name}*.\n\n"
-        )
-        if failed_doc_names:
-            for name in failed_doc_names:
-                msg += f"  - {name}\n"
-            msg += "\n"
-        msg += "You can update records manually via the dashboard."
-        if dashboard_link:
-            msg += f"\n{dashboard_link}"
-        msg += (
-            "\n\nNeed medicines, food, or supplements? "
-            "Type *order* to place an order with us."
-        )
-        msg += "\n\nType *add pet* to register another pet."
-        await send_text_message(db, from_number, msg)
-        return
+    if read_lines:
+        msg += "\n\nHere's what I read:\n" + "\n".join(read_lines)
 
-    # Aggregate results from all successful extractions.
-    total_extracted = sum(r.get("items_extracted", 0) for r in all_results)
-    total_processed = sum(r.get("items_processed", 0) for r in all_results)
-    total_extra_vaccines = sum(len(r.get("extra_vaccines", []) or []) for r in all_results)
-    total_extra_vaccines_saved = sum(int(r.get("extra_vaccines_saved", 0) or 0) for r in all_results)
+    if error_lines:
+        msg += "\n\n" + "\n".join(error_lines)
 
-    if (
-        total_extracted == 0
-        and total_extra_vaccines == 0
-        and total_extra_vaccines_saved == 0
-        and success_count > 0
-    ):
-        # All docs processed successfully but no preventive items found.
-        dashboard_link = _get_dashboard_link(db, pet)
-        msg = (
-            f"Processed {success_count} document(s) for *{pet.name}*, "
-            f"but no preventive health items were found.\n\n"
-            f"These may be lab reports or prescriptions without preventive items. "
-            f"You can update records manually from the dashboard."
-        )
-        if fail_count > 0 and failed_doc_names:
-            msg += f"\n\n{fail_count} document(s) failed:\n"
-            for name in failed_doc_names:
-                msg += f"  - {name}\n"
-        if dashboard_link:
-            msg += f"\n{dashboard_link}"
-        msg += (
-            "\n\nNeed medicines, food, or supplements? "
-            "Type *order* to place an order with us."
-        )
-        msg += "\n\nType *add pet* to register another pet."
-        await send_text_message(db, from_number, msg)
-        return
-
-    # At least some items were found — show detailed summary.
-    # Pick the last successful result with items for the detailed view.
-    best_result = None
-    for r in reversed(all_results):
-        if (
-            r.get("items_processed", 0) > 0
-            or (r.get("extra_vaccines") or [])
-            or int(r.get("extra_vaccines_saved", 0) or 0) > 0
-        ):
-            best_result = r
-            break
-
-    if best_result:
-        merged_extra_vaccines: list[dict] = []
-        for r in all_results:
-            for detail in (r.get("extra_vaccines") or []):
-                if isinstance(detail, dict):
-                    merged_extra_vaccines.append(detail)
-
-        summary_result = dict(best_result)
-        if merged_extra_vaccines:
-            summary_result["extra_vaccines"] = merged_extra_vaccines
-        summary_result["extra_vaccines_saved"] = total_extra_vaccines_saved
-
-        await _send_extraction_summary(
-            db,
-            user,
-            pet,
-            summary_result,
-            total_processed,
-            fail_count,
-            failed_doc_names,
-        )
+    # Closing line
+    if read_lines and error_lines:
+        msg += "\n\nEverything else has been added to your pet's records."
+    elif read_lines:
+        msg += "\n\nEverything has been added to your pet's records."
     else:
-        dashboard_link = _get_dashboard_link(db, pet)
-        msg = f"Extraction complete for *{pet.name}*: {success_count} processed, {fail_count} failed."
-        if dashboard_link:
-            msg += f"\n\n{dashboard_link}"
+        # Only failures — no successful reads
+        msg += "\n\nUnfortunately, none of the documents could be added to your pet's records."
+
+    if dashboard_link:
         msg += (
-            "\n\nNeed medicines, food, or supplements? "
-            "Type *order* to place an order with us."
+            f"\n\nYou can view the updated Care Plan and all Health Records here:\n"
+            f"{dashboard_link}"
         )
-        msg += "\n\nType *add pet* to register another pet."
-        await send_text_message(db, from_number, msg)
+
+    await send_text_message(db, from_number, msg)
 
 
 async def _send_deferred_care_plan(
@@ -1908,7 +1992,8 @@ async def _send_deferred_care_plan(
     all_results: list[dict],
     success_count: int,
     fail_count: int,
-    failed_doc_names: list[str],
+    failed_docs: list[dict],
+    doc_id_to_name: dict[str, str] | None = None,
 ) -> None:
     """
     Send the deterministic care-plan finalization message after document
@@ -1956,33 +2041,43 @@ async def _send_deferred_care_plan(
                 all_results=all_results,
                 success_count=success_count,
                 fail_count=fail_count,
-                failed_doc_names=failed_doc_names,
+                failed_docs=failed_docs,
             )
             return
 
-        # Always surface incorrect-document rejections before care-plan finalization.
-        not_pet_results = [r for r in all_results if r.get("document_type") == "not_pet_related"]
-        mismatch_results = [r for r in all_results if r.get("document_type") == "pet_name_mismatch"]
+        # Surface any document errors before the care-plan finalization message,
+        # using the same friendly tone as post-onboarding batches.
+        _name_map = doc_id_to_name or {}
+        import re as _re
 
-        if not_pet_results:
-            await send_text_message(
-                db, from_number,
-                "⚠️ One or more documents you sent don't appear to be pet or veterinary records "
-                "(e.g. a human medical report, invoice, or unrelated photo). "
-                "Please only upload vet records, vaccination certificates, lab reports, or prescriptions. "
-                "These documents have been removed from the dashboard."
-            )
-
-        if mismatch_results:
-            reason = (mismatch_results[0].get("errors") or [""])[0]
-            msg = (
-                f"⚠️ A document you uploaded could not be added to *{mismatch_results[0].get('pet_name', 'your pet')}*'s records "
-                f"because it appears to belong to a different pet."
-            )
-            if reason:
-                msg += f"\n\n_{reason}_"
-            msg += "\n\nPlease upload documents that belong to this pet only."
-            await send_text_message(db, from_number, msg)
+        for r in all_results:
+            if r.get("status") != "rejected":
+                continue
+            doc_type = r.get("document_type", "")
+            doc_name = _name_map.get(str(r.get("document_id", "")), "A document")
+            if doc_type == "not_pet_related":
+                await send_text_message(
+                    db, from_number,
+                    f"• '{doc_name}' doesn't seem to be a health-related record. "
+                    f"It might have been uploaded by mistake — you can check and share "
+                    f"the right document and I'll update it for you.",
+                )
+            elif doc_type == "pet_name_mismatch":
+                errors = r.get("errors") or []
+                other_pet = ""
+                for err in errors:
+                    if "appears to be for" in err:
+                        m = _re.search(r"appears to be for ['\"]?([^'\",.]+)['\"]?", err)
+                        if m:
+                            other_pet = m.group(1).strip()
+                        break
+                other_pet = other_pet or "another pet"
+                await send_text_message(
+                    db, from_number,
+                    f"• '{doc_name}' seems to belong to {other_pet}. "
+                    f"Do you want me to still add it to {pet.name}'s records, "
+                    f"or should I skip it?",
+                )
 
         from app.models.condition import Condition
         from app.models.diet_item import DietItem
@@ -2018,10 +2113,13 @@ async def _send_deferred_care_plan(
 
         dashboard_link = _get_dashboard_link(db, pet)
         if fail_count > 0:
-            care_plan_msg += (
-                f"\n\nWe couldn't fully read {fail_count} uploaded document"
-                f"{'s' if fail_count != 1 else ''}. You can still update those details in the dashboard."
-            )
+            # Surface failed-doc names in the care plan message using friendly tone.
+            unclear_docs = [d for d in failed_docs if d.get("reason") == "unclear"]
+            for doc in unclear_docs:
+                care_plan_msg += (
+                    f"\n\n• '{doc['name']}' couldn't be processed as the image was unclear. "
+                    f"You can share a clearer picture and I'll update it right away."
+                )
         if dashboard_link:
             care_plan_msg += f"\n\nView {pet.name}'s full care plan here 👇\n{dashboard_link}"
         else:
@@ -2042,7 +2140,7 @@ async def _send_deferred_care_plan(
             all_results=all_results,
             success_count=success_count,
             fail_count=fail_count,
-            failed_doc_names=failed_doc_names,
+            failed_docs=failed_docs,
         )
 
 

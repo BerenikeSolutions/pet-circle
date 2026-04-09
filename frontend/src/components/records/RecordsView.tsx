@@ -4,12 +4,13 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { RecordItem, RecordsV2 } from "@/lib/api";
 import { fetchRecords, getDashboardDocumentUrl } from "@/lib/api";
 import VetVisitCard from "./VetVisitCard";
+import DocumentViewer from "./DocumentViewer";
 
 type RecordsTabId = "vet_visits" | "lab_reports" | "imaging";
 
 const RECORDS_TABS: Array<{ id: RecordsTabId; label: string }> = [
-  { id: "vet_visits", label: "Vet Visits" },
-  { id: "lab_reports", label: "Lab Reports" },
+  { id: "vet_visits", label: "Vet Visit" },
+  { id: "lab_reports", label: "Lab Report" },
   { id: "imaging", label: "Imaging" },
 ];
 
@@ -38,8 +39,13 @@ function EmptyState({ text }: { text: string }) {
   );
 }
 
-function RecordCard({ record, token }: { record: RecordItem; token: string }) {
-  const documentUrl = getDashboardDocumentUrl(token, record.id);
+function RecordCard({
+  record,
+  onView,
+}: {
+  record: RecordItem;
+  onView: (id: string, title: string) => void;
+}) {
   const keyFindingLabel = record.key_finding || record.tag;
 
   return (
@@ -80,23 +86,25 @@ function RecordCard({ record, token }: { record: RecordItem; token: string }) {
         </span>
       </div>
       <div style={{ marginTop: 10 }}>
-        <a
-          href={documentUrl}
-          target="_blank"
-          rel="noopener noreferrer"
+        <button
+          type="button"
+          onClick={() => onView(record.id, record.title)}
           style={{
             display: "inline-flex",
             alignItems: "center",
-            justifyContent: "center",
+            gap: 4,
             fontSize: 12,
             color: "var(--orange)",
             fontWeight: 700,
-            textDecoration: "none",
+            background: "none",
+            border: "none",
+            padding: 0,
+            cursor: "pointer",
           }}
           aria-label={`View ${record.title}`}
         >
-          View
-        </a>
+          View →
+        </button>
       </div>
     </article>
   );
@@ -107,6 +115,7 @@ export default function RecordsView({ token, petName, onBack }: RecordsViewProps
   const [data, setData] = useState<RecordsV2 | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [viewerDoc, setViewerDoc] = useState<{ id: string; title: string } | null>(null);
   const activePanelId = `records-panel-${activeTab}`;
 
   const load = useCallback(async () => {
@@ -130,7 +139,6 @@ export default function RecordsView({ token, petName, onBack }: RecordsViewProps
     if (!data?.records || activeTab === "vet_visits") return [];
 
     const getDisplayTab = (recordType: string): RecordsTabId | null => {
-      // WhatsApp channel records are intentionally hidden in this view.
       if (recordType === "whatsapp") return null;
       if (recordType === "lab_reports" || recordType === "imaging") return recordType;
       return null;
@@ -138,6 +146,24 @@ export default function RecordsView({ token, petName, onBack }: RecordsViewProps
 
     return data.records.filter((record) => getDisplayTab(record.type) === activeTab);
   }, [activeTab, data]);
+
+  const countLine = useMemo(() => {
+    if (!data) return null;
+    if (activeTab === "vet_visits") {
+      const n = data.vet_visits?.length ?? 0;
+      return `${n} ${n === 1 ? "visit" : "visits"}`;
+    }
+    const n = filteredRecords.length;
+    return `${n} ${n === 1 ? "document" : "documents"}`;
+  }, [activeTab, data, filteredRecords]);
+
+  const handleView = useCallback((id: string, title: string) => {
+    setViewerDoc({ id, title });
+  }, []);
+
+  const handleCloseViewer = useCallback(() => {
+    setViewerDoc(null);
+  }, []);
 
   const renderContent = () => {
     if (loading) {
@@ -179,7 +205,12 @@ export default function RecordsView({ token, petName, onBack }: RecordsViewProps
       return (
         <div>
           {visits.map((visit, index) => (
-            <VetVisitCard key={visit.id} visit={visit} defaultOpen={index === 0} token={token} />
+            <VetVisitCard
+              key={visit.id}
+              visit={visit}
+              defaultOpen={index === 0}
+              onView={handleView}
+            />
           ))}
         </div>
       );
@@ -192,7 +223,7 @@ export default function RecordsView({ token, petName, onBack }: RecordsViewProps
     return (
       <div>
         {filteredRecords.map((record) => (
-          <RecordCard key={record.id} record={record} token={token} />
+          <RecordCard key={record.id} record={record} onView={handleView} />
         ))}
       </div>
     );
@@ -200,6 +231,14 @@ export default function RecordsView({ token, petName, onBack }: RecordsViewProps
 
   return (
     <div className="min-h-screen" style={{ background: "var(--bg-app)" }}>
+      {viewerDoc && (
+        <DocumentViewer
+          url={getDashboardDocumentUrl(token, viewerDoc.id)}
+          title={viewerDoc.title}
+          onClose={handleCloseViewer}
+        />
+      )}
+
       <div className="app">
         <div className="vh">
           <button className="back-btn" onClick={onBack} type="button" aria-label="Back to dashboard" title="Back to dashboard">
@@ -229,6 +268,12 @@ export default function RecordsView({ token, petName, onBack }: RecordsViewProps
             })}
           </div>
         </div>
+
+        {!loading && !error && countLine && (
+          <div style={{ fontSize: 13, color: "var(--t3)", marginBottom: 10, paddingLeft: 2 }}>
+            {countLine}
+          </div>
+        )}
 
         <div id={activePanelId} role="tabpanel" aria-labelledby={`records-tab-${activeTab}`}>
           {renderContent()}

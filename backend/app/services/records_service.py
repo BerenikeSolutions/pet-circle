@@ -73,7 +73,20 @@ def _record_type_for_document(document: Document) -> tuple[str, str]:
 
 
 def _extract_rx_summary(document: Document, conditions: list[Condition]) -> str:
-    """Build a concise Rx summary from linked condition extraction data."""
+    """Build a concise Rx summary from linked condition extraction data.
+
+    Prefers active medication names joined by ' · ' (compact pill display),
+    falls back to diagnoses, then document name.
+    """
+    med_names = [
+        med.name.strip()
+        for condition in conditions
+        for med in condition.medications
+        if med.name and med.name.strip() and (med.status or "active") == "active"
+    ]
+    if med_names:
+        return " · ".join(dict.fromkeys(med_names))
+
     diagnoses = [
         condition.diagnosis.strip()
         for condition in conditions
