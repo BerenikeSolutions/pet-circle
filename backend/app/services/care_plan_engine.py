@@ -887,7 +887,7 @@ def _resolve_diet_item_signals(
         "cta_label": None,
         "orderable": False,
         "status_tag": _STATUS_ACTIVE,
-        "info_prompt": signal.message,
+        "info_prompt": None,
     }
 
 

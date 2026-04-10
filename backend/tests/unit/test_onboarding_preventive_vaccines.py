@@ -251,3 +251,110 @@ def test_all_of_the_above_not_blood_test_does_not_fill_blood_test() -> None:
 
     assert normalized["blood_test"] is None
     assert "blood_test" in normalized["missing"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bug 1: Pending vaccine intent ("mandatory vaccines should be given")
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_is_pending_vaccine_intent_detects_common_phrases() -> None:
+    assert onboarding._is_pending_vaccine_intent("mandatory vaccines should be given")
+    assert onboarding._is_pending_vaccine_intent("should be given")
+    assert onboarding._is_pending_vaccine_intent("not yet given")
+    assert onboarding._is_pending_vaccine_intent("pending")
+    assert onboarding._is_pending_vaccine_intent("yet to give")
+    assert not onboarding._is_pending_vaccine_intent("March 2026")
+    assert not onboarding._is_pending_vaccine_intent("")
+    assert not onboarding._is_pending_vaccine_intent(None)
+
+
+def test_resolve_vaccine_type_selection_maps_pending_to_mandatory() -> None:
+    assert onboarding._resolve_vaccine_type_selection("mandatory vaccines should be given") == [
+        "Rabies Vaccine",
+        "DHPPi",
+    ]
+    assert onboarding._resolve_vaccine_type_selection("not yet given") == [
+        "Rabies Vaccine",
+        "DHPPi",
+    ]
+
+
+def test_upsert_pending_preventive_record_creates_not_yet_done_row() -> None:
+    from datetime import date as _date
+
+    class _FakeQuery:
+        def __init__(self) -> None:
+            self._first = None
+
+        def filter(self, *_args):
+            return self
+
+        def first(self):
+            return self._first
+
+    class _FakeDB:
+        def __init__(self) -> None:
+            self.added: list = []
+            self._query = _FakeQuery()
+
+        def query(self, _model):
+            return self._query
+
+        def add(self, obj) -> None:
+            self.added.append(obj)
+
+    db = _FakeDB()
+    pet = SimpleNamespace(id="pet-uuid")
+    master = SimpleNamespace(
+        id="master-uuid",
+        recurrence_days=365,
+        reminder_before_days=30,
+    )
+
+    onboarding._upsert_pending_preventive_record(db, pet, master)
+
+    assert len(db.added) == 1
+    record = db.added[0]
+    assert record.last_done_date is None
+    assert record.next_due_date == _date.today()
+    assert record.status  # compute_status returns a non-empty string
+    assert record.preventive_master_id == "master-uuid"
+    assert record.pet_id == "pet-uuid"
+
+
+def test_upsert_pending_preventive_record_preserves_existing_real_record() -> None:
+    from datetime import date as _date
+
+    existing = SimpleNamespace(
+        last_done_date=_date(2025, 1, 1),
+        next_due_date=_date(2026, 1, 1),
+        status="up_to_date",
+    )
+
+    class _FakeQuery:
+        def filter(self, *_args):
+            return self
+
+        def first(self):
+            return existing
+
+    class _FakeDB:
+        def __init__(self) -> None:
+            self.added: list = []
+
+        def query(self, _model):
+            return _FakeQuery()
+
+        def add(self, obj) -> None:
+            self.added.append(obj)
+
+    db = _FakeDB()
+    pet = SimpleNamespace(id="pet-uuid")
+    master = SimpleNamespace(id="master-uuid", recurrence_days=365, reminder_before_days=30)
+
+    onboarding._upsert_pending_preventive_record(db, pet, master)
+
+    assert db.added == []
+    assert existing.last_done_date == _date(2025, 1, 1)  # untouched
+    assert existing.next_due_date == _date(2026, 1, 1)

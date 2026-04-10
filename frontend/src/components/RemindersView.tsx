@@ -297,14 +297,21 @@ export default function RemindersView({ data, token, onBack, onDashboardDataUpda
     let medicineChoice = item.medicineName || '';
     let customMedicine = '';
 
+    setEditVals((prev) => ({
+      ...prev,
+      medicineOptions: [],
+      loadingMedicineOptions: item.isMedicineEligible,
+    }));
+
     if (item.isMedicineEligible) {
-      setEditVals((prev) => ({ ...prev, loadingMedicineOptions: true }));
       try {
         const res = await getPreventiveMedicineOptions(token, item.backendItemName);
         if (editRequestIdRef.current !== reqId) return;
         options = res.options || [];
-      } catch {
+        console.debug('[RemindersView] medicine options:', { item: item.backendItemName, options });
+      } catch (e) {
         if (editRequestIdRef.current !== reqId) return;
+        console.warn('[RemindersView] medicine options fetch failed', e);
         options = [];
       }
 

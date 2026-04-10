@@ -130,7 +130,7 @@ export default function CarePlanCard({
                       </div>
 
                       <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5, flexShrink: 0 }}>
-                        {item.test_type !== "food" && (
+                        {item.test_type !== "food" && item.test_type !== "supplement" && (
                           bucketKey === "add"
                             ? <span className="s-tag s-tag-rec">Recommended</span>
                             : <span className={`s-tag ${itemStatusClass(item)}`}>{normalizeStatusTag(item.status_tag)}</span>
@@ -155,7 +155,7 @@ export default function CarePlanCard({
                           </button>
                         )}
 
-                        {!canOrder && item.signal_level === "L1" && item.info_prompt && (
+                        {!canOrder && item.signal_level === "L1" && item.info_prompt && item.test_type !== "food" && item.test_type !== "supplement" && (
                           <div style={{ fontSize: 11, color: "var(--t3)", fontStyle: "italic", textAlign: "right", maxWidth: 160, lineHeight: 1.4 }}>
                             {item.info_prompt}
                           </div>

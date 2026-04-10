@@ -80,8 +80,7 @@ class User(Base):
     # Flag set when _finalize_onboarding() fires while document extractions are
     # still in-flight (extraction_status='pending'). When True, the dashboard
     # link is held back from the finalization message and instead appended to
-    # the extraction summary once all docs finish processing.
-    # Cleared to False by _send_extraction_summary() after the link is sent.
+    # the deferred care-plan message once all docs finish processing.
     dashboard_link_pending = Column(Boolean, default=False, nullable=False)
 
     # Timestamp when the user completed onboarding (state reached 'complete').

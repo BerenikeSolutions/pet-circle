@@ -1584,7 +1584,9 @@ async def _step_supplements_v2(db, user, text, send_fn):
         and normalized not in _NO_INPUTS
     ):
         items = await _parse_diet_input(text)
-        for label, detail in items:
+        for entry in items:
+            label = entry[0]
+            detail = entry[1] if len(entry) > 1 else ""
             try:
                 await add_diet_item(db, pet.id, "supplement", label, detail or None)
             except Exception as e:
@@ -1954,6 +1956,23 @@ def _flea_brand_question(pet_name: str) -> str:
     )
 
 
+_PENDING_VACCINE_PHRASES = (
+    "should be given", "need to give", "needs to give", "not yet given",
+    "not yet", "pending", "to be given", "yet to give", "yet to be given",
+    "supposed to", "have to give", "has to be given", "will give", "will be given",
+)
+
+
+def _is_pending_vaccine_intent(raw: str | None) -> bool:
+    """True if the user expressed a 'vaccines not yet given' intent rather than a date."""
+    if not raw:
+        return False
+    n = str(raw).strip().lower()
+    if not n:
+        return False
+    return any(phrase in n for phrase in _PENDING_VACCINE_PHRASES)
+
+
 def _resolve_vaccine_type_selection(text: str) -> list[str]:
     """
     Map the user's reply to a list of vaccine master item_names to update.
@@ -1971,6 +1990,12 @@ def _resolve_vaccine_type_selection(text: str) -> list[str]:
     }
     if t in never_keywords:
         return []
+
+    # Pending intent ("mandatory vaccines should be given", "not yet", etc.)
+    # always maps to Option 1 — the mandatory pair. Must come BEFORE the
+    # other option checks since "should be given" contains no digit/keyword.
+    if _is_pending_vaccine_intent(t):
+        return ["Rabies Vaccine", "DHPPi"]
 
     # Option 4 — All four.
     if t in {"4", "all", "all four", "all 4", "all vaccines", "all four vaccines"}:
@@ -2196,6 +2221,48 @@ def _upsert_preventive_record(db, pet, master, parsed_date, medicine_name: str |
             medicine_name=medicine_name,
         )
         db.add(record)
+
+
+def _upsert_pending_preventive_record(db, pet, master) -> None:
+    """
+    Create a PreventiveRecord representing 'not yet done' — due today.
+
+    Used when the user expresses pending-vaccine intent (e.g. "mandatory
+    vaccines should be given") without providing a date. Idempotent: if a
+    record already exists and has a real last_done_date, leave it alone.
+    Caller is responsible for committing.
+    """
+    from datetime import date as _date
+    from app.services.preventive_calculator import compute_status
+
+    reminder_before_days = master.reminder_before_days or 30
+    today = _date.today()
+
+    existing = (
+        db.query(PreventiveRecord)
+        .filter(
+            PreventiveRecord.pet_id == pet.id,
+            PreventiveRecord.preventive_master_id == master.id,
+        )
+        .first()
+    )
+    if existing:
+        if existing.last_done_date:
+            # Real record already exists — do not downgrade it.
+            return
+        existing.next_due_date = today
+        existing.status = compute_status(today, reminder_before_days)
+        return
+
+    db.add(
+        PreventiveRecord(
+            pet_id=pet.id,
+            preventive_master_id=master.id,
+            last_done_date=None,
+            next_due_date=today,
+            status=compute_status(today, reminder_before_days),
+        )
+    )
 
 
 def _normalize_custom_vaccine_name(name: str | None) -> str:
@@ -2522,6 +2589,23 @@ async def _store_preventive_data(db, pet, parsed: dict):
                     )
                 for master in masters:
                     _upsert_preventive_record(db, pet, master, gen_date)
+        elif _is_pending_vaccine_intent(generic) and vaccine_names_to_update:
+            # User expressed "not yet given" intent without a date → create
+            # pending records (last_done_date=NULL, next_due=today) for the
+            # selected vaccines so they surface as overdue on the dashboard.
+            logger.info(
+                "Pending vaccine intent detected for pet_id=%s; creating pending records for %s",
+                str(pet.id), vaccine_names_to_update,
+            )
+            for vname in vaccine_names_to_update:
+                master = _match_specific_vaccine_master(db, pet.species, vname)
+                if master:
+                    _upsert_pending_preventive_record(db, pet, master)
+                else:
+                    logger.warning(
+                        "No master for selected vaccine '%s' species=%s",
+                        vname, pet.species,
+                    )
 
     # --- Specific vaccines → update only the named master(s) ---
     for spec in parsed.get("vaccine_specifics") or []:
@@ -2793,8 +2877,29 @@ async def _ai_resolve_example_confirmation(
 
 
 async def _store_meal_items(db, pet, items: list, food_type: str):
-    """Store parsed diet items for a pet."""
-    for label, detail in items:
+    """
+    Store parsed diet items for a pet.
+
+    Strict mode: only items classified as kind="brand" are persisted.
+    Ingredients (chicken, rice, carrots) and generic treats are dropped —
+    per product requirement, the diet list must only contain identifiable
+    commercial brands/products.
+    """
+    for entry in items:
+        # Support both new (label, detail, kind) triples and legacy (label, detail) tuples.
+        if len(entry) == 3:
+            label, detail, kind = entry
+        else:
+            label, detail = entry
+            kind = "brand"  # Legacy callers — assume brand.
+
+        if kind != "brand":
+            logger.debug(
+                "Dropping non-brand diet item for pet_id=%s: label=%r kind=%r",
+                str(pet.id), label, kind,
+            )
+            continue
+
         item_type = food_type if food_type != "mix" else "packaged"
         label_lower = label.lower()
         if any(kw in label_lower for kw in HOMEMADE_KW):
@@ -2881,19 +2986,47 @@ async def _ai_parse_food_type(text: str, pet_name: str) -> str | None:
         return None
 
 
-async def _parse_diet_input(text: str) -> list[tuple[str, str]]:
+async def _parse_diet_input(text: str) -> list[tuple[str, str, str]]:
     """
     Use GPT to extract structured diet items from free-text input.
 
-    Returns list of (label, detail) tuples.
+    Returns a list of (label, detail, kind) triples where kind is one of:
+      - "brand" — a recognizable commercial brand or product name
+      - "ingredient" — raw/homemade ingredient or generic food name
+      - "generic_treat" — a treat with no brand identifier
+
+    Callers that want brand-only storage (diet flow) must filter kind == "brand".
     """
     client = _get_openai_onboarding_client()
     prompt = (
-        "Extract food/supplement items from the user's message. "
-        "Return a JSON object with an 'items' array. Each item has 'label' (short name, e.g. brand or food name) "
-        "and 'detail' (quantity, frequency, or other details). "
-        "If the message is vague, use the whole text as a single item label with empty detail. "
-        "Return ONLY valid JSON, no markdown.\n\n"
+        "Extract pet food/supplement items from the user's message. "
+        "For EACH item, classify it with a 'kind' field:\n"
+        "- \"brand\": a recognizable commercial brand or product name "
+        "(e.g. Royal Canin, Pedigree, Pedigree Dentastix, Whiskas, Drools, "
+        "Drools Calcium Bone, Farmina, Orijen, Hill's Science Diet, Acana, "
+        "Nutro, Purina Pro Plan, IAMS, Taste of the Wild)\n"
+        "- \"ingredient\": any raw ingredient, homemade food, or generic food name "
+        "(chicken, rice, egg, fish, carrots, dal, curd rice, boiled chicken, "
+        "home food, paneer, roti, milk, yogurt, bread)\n"
+        "- \"generic_treat\": a treat with no brand identifier "
+        "(e.g. \"small treat\", \"biscuit\", \"snack\", \"chew\")\n\n"
+        "Be STRICT. If you cannot clearly identify a commercial brand or product "
+        "name, classify as \"ingredient\" or \"generic_treat\". Do not guess.\n\n"
+        "Examples:\n"
+        "  Input: \"chicken, royal canin, small treat\"\n"
+        "  Output: [{\"label\":\"chicken\",\"detail\":\"\",\"kind\":\"ingredient\"}, "
+        "{\"label\":\"Royal Canin\",\"detail\":\"\",\"kind\":\"brand\"}, "
+        "{\"label\":\"small treat\",\"detail\":\"\",\"kind\":\"generic_treat\"}]\n"
+        "  Input: \"Pedigree Dentastix and rice\"\n"
+        "  Output: [{\"label\":\"Pedigree Dentastix\",\"detail\":\"\",\"kind\":\"brand\"}, "
+        "{\"label\":\"rice\",\"detail\":\"\",\"kind\":\"ingredient\"}]\n"
+        "  Input: \"boiled chicken and carrots\"\n"
+        "  Output: [{\"label\":\"boiled chicken\",\"detail\":\"\",\"kind\":\"ingredient\"}, "
+        "{\"label\":\"carrots\",\"detail\":\"\",\"kind\":\"ingredient\"}]\n"
+        "  Input: \"Drools Calcium Bone\"\n"
+        "  Output: [{\"label\":\"Drools Calcium Bone\",\"detail\":\"\",\"kind\":\"brand\"}]\n\n"
+        "Return ONLY valid JSON in this exact shape (no markdown):\n"
+        "{\"items\":[{\"label\":\"...\",\"detail\":\"...\",\"kind\":\"brand|ingredient|generic_treat\"}]}\n\n"
         f"User message: {text}"
     )
 
@@ -2905,19 +3038,26 @@ async def _parse_diet_input(text: str) -> list[tuple[str, str]]:
             temperature=0,
             max_tokens=500,
         )
-        raw = response.choices[0].message.content.strip()
-        # Strip markdown code fences if present
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-            if raw.endswith("```"):
-                raw = raw[:-3]
-            raw = raw.strip()
+        raw = _strip_json_fences(response.choices[0].message.content.strip())
         data = json.loads(raw)
         items = data.get("items", [])
-        return [(item.get("label", text), item.get("detail", "")) for item in items if item.get("label")]
+        result: list[tuple[str, str, str]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()
+            if not label:
+                continue
+            detail = str(item.get("detail") or "").strip()
+            kind = str(item.get("kind") or "").strip().lower()
+            if kind not in ("brand", "ingredient", "generic_treat"):
+                kind = "ingredient"  # Strict fallback: unknown → dropped downstream.
+            result.append((label, detail, kind))
+        return result
     except Exception as e:
         logger.warning("Diet GPT parse failed, using raw text: %s", str(e))
-        return [(text.strip(), "")]
+        # On parse failure, mark as ingredient so diet flow drops it (strict mode).
+        return [(text.strip(), "", "ingredient")]
 
 
 def _strip_json_fences(raw: str) -> str:

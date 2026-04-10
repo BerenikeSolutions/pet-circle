@@ -139,11 +139,11 @@ export default function VetVisitCard({ visit, defaultOpen, onView }: VetVisitCar
                 <div style={{ fontSize: 13, color: "var(--t1)", lineHeight: 1.35 }}>{visit.rx || "Not available"}</div>
               </div>
 
-              <div style={{ marginBottom: 12 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--t3)", marginBottom: 8 }}>
-                  MEDICATIONS
-                </div>
-                {visit.medications.length > 0 ? (
+              {visit.medications.length > 0 && (
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "var(--t3)", marginBottom: 8 }}>
+                    MEDICATIONS
+                  </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                     {visit.medications.map((medication, index) => {
                       const subtitle = [medication.dose, medication.duration].filter(Boolean).join(" · ");
@@ -157,25 +157,46 @@ export default function VetVisitCard({ visit, defaultOpen, onView }: VetVisitCar
                       );
                     })}
                   </div>
-                ) : (
-                  <div
-                    style={{
-                      border: "1px solid var(--border)",
-                      borderRadius: 10,
-                      padding: "8px 10px",
-                      fontSize: 12,
-                      color: "var(--t3)",
-                    }}
-                  >
-                    No medications listed for this visit.
+                </div>
+              )}
+
+              {visit.tests.length > 0 && (
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "var(--t3)", marginBottom: 8 }}>
+                    TESTS PRESCRIBED
                   </div>
-                )}
-              </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    {visit.tests.map((test, index) => (
+                      <div key={`${visit.id}-test-${index}`}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: "var(--t1)" }}>{test.name}</div>
+                        {test.frequency && (
+                          <div style={{ fontSize: 12, color: "var(--t3)", marginTop: 2 }}>{test.frequency}</div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {visit.medications.length === 0 && visit.tests.length === 0 && (
+                <div
+                  style={{
+                    border: "1px solid var(--border)",
+                    borderRadius: 10,
+                    padding: "8px 10px",
+                    fontSize: 12,
+                    color: "var(--t3)",
+                    marginBottom: 12,
+                  }}
+                >
+                  No medications or tests prescribed at this visit.
+                </div>
+              )}
 
               <div>
                 <div style={{ fontSize: 11, fontWeight: 700, color: "var(--t3)", marginBottom: 6 }}>NOTES</div>
-                <div style={{ fontSize: 12, color: "var(--t2)", lineHeight: 1.4 }}>
-                  {visit.notes || "No additional notes recorded."}
+                <div style={{ fontSize: 12, color: "var(--t2)", lineHeight: 1.4, whiteSpace: "pre-line" }}>
+                  {visit.notes ? visit.notes.split(" | ").join("\n") : "No additional notes recorded."}
                 </div>
               </div>
             </div>

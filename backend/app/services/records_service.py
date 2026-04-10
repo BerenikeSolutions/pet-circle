@@ -122,20 +122,28 @@ def _is_vaccine_visit(conditions: list[Condition]) -> bool:
     return False
 
 
-def _extract_rx_summary(document: Document, conditions: list[Condition]) -> str:
-    """Build a concise Rx summary from linked condition extraction data.
+def _extract_rx_summary(conditions: list[Condition]) -> str:
+    """Build a compact Rx chip summary combining prescribed tests and medications.
 
-    Prefers active medication names joined by ' · ' (compact pill display),
-    falls back to diagnoses, then document name.
+    Tests come first (from condition.monitoring), then active medications.
+    Returns a ' · '-joined chip string. No filename fallback — the section
+    now represents only what the doctor actually prescribed.
     """
+    test_names = [
+        monitoring.name.strip()
+        for condition in conditions
+        for monitoring in condition.monitoring
+        if monitoring.name and monitoring.name.strip()
+    ]
     med_names = [
         med.name.strip()
         for condition in conditions
         for med in condition.medications
         if med.name and med.name.strip() and (med.status or "active") == "active"
     ]
-    if med_names:
-        return " · ".join(dict.fromkeys(med_names))
+    combined = list(dict.fromkeys(test_names + med_names))
+    if combined:
+        return " · ".join(combined)
 
     diagnoses = [
         condition.diagnosis.strip()
@@ -145,10 +153,7 @@ def _extract_rx_summary(document: Document, conditions: list[Condition]) -> str:
     if diagnoses:
         return "; ".join(dict.fromkeys(diagnoses))
 
-    if document.document_name:
-        return document.document_name
-
-    return "Prescription reviewed"
+    return "No items prescribed"
 
 
 def _extract_medications(conditions: list[Condition]) -> list[dict[str, str | None]]:
@@ -168,12 +173,57 @@ def _extract_medications(conditions: list[Condition]) -> list[dict[str, str | No
     return medications
 
 
-def _extract_notes(conditions: list[Condition]) -> str | None:
-    """Combine non-empty condition notes into a single display string."""
-    notes = [condition.notes.strip() for condition in conditions if condition.notes and condition.notes.strip()]
-    if not notes:
+def _extract_tests_prescribed(conditions: list[Condition]) -> list[dict[str, str | None]]:
+    """Flatten monitoring/follow-up tests linked to conditions from the visit.
+
+    These are tests the doctor recommended (e.g., "CBC every 6 months",
+    "Follow-up vet visit") — captured by GPT extraction into condition_monitoring.
+    """
+    tests: list[dict[str, str | None]] = []
+    seen: set[str] = set()
+    for condition in conditions:
+        for monitoring in condition.monitoring:
+            name = (monitoring.name or "").strip()
+            if not name:
+                continue
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            tests.append(
+                {
+                    "name": name,
+                    "frequency": monitoring.frequency,
+                }
+            )
+    return tests
+
+
+def _extract_notes(
+    conditions: list[Condition],
+    diagnostic_results: list[DiagnosticTestResult] | None = None,
+) -> str | None:
+    """Combine condition notes and doctor's clinical findings into one display string.
+
+    Clinical findings are persisted as diagnostic_test_results rows with
+    parameter_name='Clinical Findings' (see gpt_extraction._add_vital).
+    """
+    parts: list[str] = []
+    for condition in conditions:
+        note = (condition.notes or "").strip()
+        if note:
+            parts.append(note)
+
+    for result in diagnostic_results or []:
+        if (result.parameter_name or "").strip().lower() != "clinical findings":
+            continue
+        text = (result.value_text or "").strip()
+        if text:
+            parts.append(text)
+
+    if not parts:
         return None
-    return " | ".join(dict.fromkeys(notes))
+    return " | ".join(dict.fromkeys(parts))
 
 
 def _extract_visit_key_finding(document: Document, conditions: list[Condition]) -> tuple[str, str, str]:
@@ -316,7 +366,10 @@ def _fetch_conditions_for_documents(
 
     rows = (
         db.query(Condition)
-        .options(selectinload(Condition.medications))
+        .options(
+            selectinload(Condition.medications),
+            selectinload(Condition.monitoring),
+        )
         .filter(
             Condition.pet_id == pet_id,
             Condition.is_active.is_(True),
@@ -361,6 +414,13 @@ async def get_records(db: Session, pet: Pet) -> dict[str, Any]:
         pet.id,
         [document.id for document in non_prescription_docs],
     )
+    # Clinical findings for vet visits are stored as diagnostic_test_results
+    # rows (parameter_name='Clinical Findings') linked to the prescription doc.
+    prescription_diagnostic_map = _fetch_diagnostic_results_for_documents(
+        db,
+        pet.id,
+        [document.id for document in prescription_docs],
+    )
     # Load conditions for non-prescription docs to surface notes in record cards
     non_prescription_condition_map = _fetch_conditions_for_documents(
         db,
@@ -387,9 +447,13 @@ async def get_records(db: Session, pet: Pet) -> dict[str, Any]:
                 "tag_color": tag_color,
                 "tag_bg": tag_bg,
                 "key_finding": key_finding,
-                "rx": _extract_rx_summary(document, linked_conditions),
+                "rx": _extract_rx_summary(linked_conditions),
                 "medications": _extract_medications(linked_conditions),
-                "notes": _extract_notes(linked_conditions),
+                "tests": _extract_tests_prescribed(linked_conditions),
+                "notes": _extract_notes(
+                    linked_conditions,
+                    prescription_diagnostic_map.get(document.id, []),
+                ),
             }
         )
 

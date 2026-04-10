@@ -1246,6 +1246,15 @@ def dashboard_get_preventive_medicine_options(
         "Bravecto", "Simparica", "Simparica Trio", "NexGard", "NexGard Spectra",
         "Revolution", "Frontline Plus", "Advocate", "Stronghold", "Comfortis",
     ]
+    _MEDICINE_OPTIONS_BY_ITEM = {
+        "deworming": _DEWORMING_MEDICINES,
+        "tick/flea": _FLEA_TICK_MEDICINES,
+        "tick-flea": _FLEA_TICK_MEDICINES,
+        "flea/tick": _FLEA_TICK_MEDICINES,
+        "flea-tick": _FLEA_TICK_MEDICINES,
+        "flea & tick": _FLEA_TICK_MEDICINES,
+        "tick & flea": _FLEA_TICK_MEDICINES,
+    }
 
     try:
         _get_pet_for_dashboard_token(db, token)
@@ -1255,13 +1264,20 @@ def dashboard_get_preventive_medicine_options(
         if not item_name_norm:
             raise HTTPException(status_code=400, detail="item_name is required")
 
-        if "deworm" in item_name_norm:
-            options = _DEWORMING_MEDICINES
-        elif "flea" in item_name_norm or "tick" in item_name_norm:
-            options = _FLEA_TICK_MEDICINES
-        else:
-            options = []
+        options = _MEDICINE_OPTIONS_BY_ITEM.get(item_name_norm)
+        if options is None:
+            # Fallback: substring match (handles puppy variants, etc.)
+            if "deworm" in item_name_norm:
+                options = _DEWORMING_MEDICINES
+            elif "flea" in item_name_norm or "tick" in item_name_norm:
+                options = _FLEA_TICK_MEDICINES
+            else:
+                options = []
 
+        logger.info(
+            "medicine_options request item_name=%r -> %d options",
+            item_name, len(options),
+        )
         return {"item_name": item_name, "options": options}
     except HTTPException:
         raise

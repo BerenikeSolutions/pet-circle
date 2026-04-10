@@ -50,6 +50,16 @@ logger = logging.getLogger(__name__)
 # Re-generate if the cached insight is older than this many days.
 AI_INSIGHT_CACHE_DAYS = 7
 
+# Keywords used to classify a PreventiveMaster.item_name as a vaccine for the
+# "What We Found" bullet. Case-insensitive substring match. Must include every
+# canonical vaccine item_name shipped in preventive_master so none get misfiled
+# as "other preventive items". See Bug 2.
+_VACCINE_BULLET_TERMS: list[str] = [
+    "vaccine", "rabies", "dhpp", "bordetella", "feline core",
+    "kennel cough", "nobivac",
+    "coronavirus", "ccov",
+]
+
 # Nutrition importance note is stable — re-generate only when pet ages significantly.
 NUTRITION_IMPORTANCE_CACHE_DAYS = 30
 
@@ -717,9 +727,8 @@ async def generate_recognition_bullets(db: Session, pet: Pet) -> list[Bullet]:
             ),
         )
     )
-    _VACCINE_TERMS = ["vaccine", "rabies", "dhpp", "bordetella", "feline core"]
     _vaccine_filter = or_(
-        *[PreventiveMaster.item_name.ilike(f"%{kw}%") for kw in _VACCINE_TERMS]
+        *[PreventiveMaster.item_name.ilike(f"%{kw}%") for kw in _VACCINE_BULLET_TERMS]
     )
     vaccine_count = (
         _base_preventive_q.filter(_vaccine_filter).count()

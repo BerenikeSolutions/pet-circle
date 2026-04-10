@@ -62,108 +62,6 @@ function ResultFlagBadge({ flag }: { flag: string | null }) {
   );
 }
 
-function RecordExpandedContent({
-  record,
-  onViewDoc,
-}: {
-  record: RecordItem;
-  onViewDoc: (id: string, title: string) => void;
-}) {
-  const keyFinding = record.key_finding || record.tag;
-  const hasResults = record.results && record.results.length > 0;
-
-  return (
-    <div style={{ marginTop: 12, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
-      {/* FINDING */}
-      <div
-        style={{
-          borderRadius: 10,
-          background: "#F0F9FF",
-          border: "1px solid #BAE6FD",
-          padding: "10px 12px",
-          marginBottom: 12,
-        }}
-      >
-        <div style={{ fontSize: 11, fontWeight: 700, color: "#0369A1", marginBottom: 3 }}>
-          FINDING
-        </div>
-        <div
-          style={{
-            fontSize: 13,
-            fontWeight: 600,
-            color: record.tag_color || "var(--t1)",
-            lineHeight: 1.35,
-          }}
-        >
-          {keyFinding}
-        </div>
-      </div>
-
-      {/* TEST RESULTS */}
-      {hasResults && (
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: "var(--t3)", marginBottom: 8 }}>
-            TEST RESULTS
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {(record.results as RecordResult[]).map((r, i) => {
-              const valueStr = r.unit ? `${r.value} ${r.unit}` : r.value;
-              return (
-                <div
-                  key={`${record.id}-result-${i}`}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    fontSize: 13,
-                    color: "var(--t1)",
-                  }}
-                >
-                  <span style={{ flex: 1, color: "var(--t2)" }}>{r.parameter}</span>
-                  <span style={{ fontWeight: 600, flexShrink: 0 }}>
-                    {valueStr}
-                    <ResultFlagBadge flag={r.flag} />
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* NOTES */}
-      {record.notes && (
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: "var(--t3)", marginBottom: 6 }}>
-            NOTES
-          </div>
-          <div style={{ fontSize: 12, color: "var(--t2)", lineHeight: 1.4 }}>{record.notes}</div>
-        </div>
-      )}
-
-      {/* View document link */}
-      <button
-        type="button"
-        onClick={() => onViewDoc(record.id, record.title)}
-        style={{
-          fontSize: 12,
-          color: "var(--t3)",
-          fontWeight: 600,
-          background: "none",
-          border: "1px solid var(--border)",
-          borderRadius: 8,
-          padding: "6px 12px",
-          cursor: "pointer",
-          display: "inline-block",
-        }}
-        aria-label={`View document for ${record.title}`}
-      >
-        View document ↗
-      </button>
-    </div>
-  );
-}
-
 function RecordCard({
   record,
   onViewDoc,
@@ -175,10 +73,12 @@ function RecordCard({
   const keyFindingLabel = record.key_finding || record.tag;
   const buttonId = `record-toggle-${record.id}`;
   const panelId = `record-panel-${record.id}`;
+  const hasResults = record.results && record.results.length > 0;
+  const hasExpandable = hasResults || Boolean(record.notes);
 
   return (
     <article className="card" style={{ padding: 14 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
         <div
           aria-hidden="true"
           style={{
@@ -195,19 +95,64 @@ function RecordCard({
         >
           {record.icon}
         </div>
+
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-            <div style={{ fontSize: 14, fontWeight: 700, color: "var(--t1)", flex: 1, minWidth: 0 }}>
-              {record.title}
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--t1)" }}>{record.title}</div>
+              <div style={{ fontSize: 12, color: "var(--t3)", marginTop: 2 }}>{formatDate(record.date)}</div>
             </div>
+            {keyFindingLabel && (
+              <span
+                style={{
+                  fontSize: 11,
+                  fontWeight: 700,
+                  color: record.tag_color,
+                  background: record.tag_bg,
+                  borderRadius: 999,
+                  padding: "4px 10px",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {keyFindingLabel}
+              </span>
+            )}
+            {hasExpandable && (
+              <button
+                id={buttonId}
+                type="button"
+                onClick={() => setOpen((prev) => !prev)}
+                aria-label={open ? "Collapse record" : "Expand record"}
+                aria-expanded={open}
+                aria-controls={panelId}
+                style={{
+                  width: 24,
+                  height: 24,
+                  border: "none",
+                  borderRadius: 999,
+                  background: "transparent",
+                  color: "var(--t2)",
+                  cursor: "pointer",
+                  padding: 0,
+                  fontSize: 16,
+                  lineHeight: "24px",
+                  transform: open ? "rotate(180deg)" : "rotate(0deg)",
+                  transition: "transform 0.2s ease",
+                }}
+              >
+                ▾
+              </button>
+            )}
+          </div>
+
+          <div style={{ marginTop: 8 }}>
             <button
-              id={buttonId}
               type="button"
-              onClick={() => setOpen((prev) => !prev)}
-              aria-label={open ? `Collapse ${record.title}` : `View ${record.title}`}
-              aria-expanded={open}
-              aria-controls={panelId}
+              onClick={() => onViewDoc(record.id, record.title)}
               style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
                 fontSize: 12,
                 color: "var(--orange)",
                 fontWeight: 700,
@@ -215,28 +160,63 @@ function RecordCard({
                 border: "none",
                 padding: 0,
                 cursor: "pointer",
-                flexShrink: 0,
               }}
+              aria-label={`View document for ${record.title}`}
             >
-              {open ? "Close ✕" : "View →"}
+              View →
             </button>
           </div>
-          <div style={{ fontSize: 12, color: "var(--t3)", marginTop: 3 }}>
-            {formatDate(record.date)}
-            {keyFindingLabel && (
-              <span style={{ color: record.tag_color, fontWeight: 600, marginLeft: 6 }}>
-                · {keyFindingLabel}
-              </span>
-            )}
-          </div>
+
+          {open && hasExpandable && (
+            <div
+              id={panelId}
+              role="region"
+              aria-labelledby={buttonId}
+              style={{ marginTop: 12, borderTop: "1px solid var(--border)", paddingTop: 12 }}
+            >
+              {hasResults && (
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "var(--t3)", marginBottom: 8 }}>
+                    TEST RESULTS
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {(record.results as RecordResult[]).map((r, i) => {
+                      const valueStr = r.unit ? `${r.value} ${r.unit}` : r.value;
+                      return (
+                        <div
+                          key={`${record.id}-result-${i}`}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            fontSize: 13,
+                            color: "var(--t1)",
+                          }}
+                        >
+                          <span style={{ flex: 1, color: "var(--t2)" }}>{r.parameter}</span>
+                          <span style={{ fontWeight: 600, flexShrink: 0 }}>
+                            {valueStr}
+                            <ResultFlagBadge flag={r.flag} />
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {record.notes && (
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "var(--t3)", marginBottom: 6 }}>
+                    NOTES
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--t2)", lineHeight: 1.4 }}>{record.notes}</div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
-
-      {open && (
-        <div id={panelId} role="region" aria-labelledby={buttonId}>
-          <RecordExpandedContent record={record} onViewDoc={onViewDoc} />
-        </div>
-      )}
     </article>
   );
 }

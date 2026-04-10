@@ -9,6 +9,7 @@ import pytest
 os.environ.setdefault("APP_ENV", "test")
 
 from app.services.ai_insights_service import (
+    _VACCINE_BULLET_TERMS,
     _format_found_diet_summary,
     generate_care_plan_reasons,
     generate_recognition_bullets,
@@ -19,7 +20,10 @@ from app.services.care_plan_engine import BreedSize, LifeStage
 
 class _ScalarQuery:
     def __init__(self, value):
+        # `value` may be a single int (used for scalar()) OR a list of ints
+        # consumed sequentially by count() to simulate sub-query counts.
         self._value = value
+        self._count_values = list(value) if isinstance(value, list) else None
 
     def filter(self, *args, **kwargs):
         return self
@@ -31,6 +35,13 @@ class _ScalarQuery:
         return self
 
     def scalar(self):
+        if isinstance(self._value, list):
+            return self._value[0] if self._value else 0
+        return self._value
+
+    def count(self):
+        if self._count_values is not None:
+            return self._count_values.pop(0) if self._count_values else 0
         return self._value
 
 
@@ -189,8 +200,11 @@ class _FakeInsightDB:
 
 @pytest.mark.asyncio
 async def test_generate_recognition_bullets_orders_conditions_preventive_diet():
+    # scalar_values consumed in order:
+    # 1st query → active_condition_count (scalar) = 4
+    # 2nd query → preventive base; then .count() calls: vaccines=0, total=2 → 2 "other" items
     db = _FakeSession(
-        scalar_values=[4, 2],
+        scalar_values=[4, [0, 2]],
         all_rows=[
             [
                 SimpleNamespace(type="packaged", label="Royal Canin Adult kibble", detail="50g x 3/day"),
@@ -377,3 +391,24 @@ async def test_get_or_generate_insight_accepts_namespaced_vet_questions(monkeypa
     assert result[0]["q"] == "Any follow-up panel needed?"
     assert db.executed
     assert db.executed[0]["insight_type"] == "vet_questions:condition-1"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bug 2: Kennel Cough & CCoV must be bucketed as vaccines in What We Found
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_vaccine_bullet_terms_include_kennel_cough_and_ccov():
+    """The 'What We Found' bucket must classify Kennel Cough (Nobivac KC) and
+    Canine Coronavirus (CCoV) as vaccines, not as other preventive items."""
+    # Kennel Cough canonical name: "Kennel Cough (Nobivac KC)"
+    assert any(kw in "Kennel Cough (Nobivac KC)".lower() for kw in _VACCINE_BULLET_TERMS)
+    # Canine Coronavirus canonical name: "Canine Coronavirus (CCoV)"
+    assert any(kw in "Canine Coronavirus (CCoV)".lower() for kw in _VACCINE_BULLET_TERMS)
+    # Regression: existing vaccines still match.
+    assert any(kw in "Rabies Vaccine".lower() for kw in _VACCINE_BULLET_TERMS)
+    assert any(kw in "DHPPi".lower() for kw in _VACCINE_BULLET_TERMS)
+    # Non-vaccines must NOT match.
+    assert not any(kw in "Deworming".lower() for kw in _VACCINE_BULLET_TERMS)
+    assert not any(kw in "Tick/Flea".lower() for kw in _VACCINE_BULLET_TERMS)
+    assert not any(kw in "Preventive Blood Test".lower() for kw in _VACCINE_BULLET_TERMS)

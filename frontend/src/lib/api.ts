@@ -471,6 +471,11 @@ export interface VetVisitMedication {
   duration: string | null;
 }
 
+export interface VetVisitTest {
+  name: string;
+  frequency: string | null;
+}
+
 export interface VetVisit {
   id: string;
   title: string;
@@ -481,6 +486,7 @@ export interface VetVisit {
   key_finding?: string;
   rx: string;
   medications: VetVisitMedication[];
+  tests: VetVisitTest[];
   notes: string | null;
 }
 

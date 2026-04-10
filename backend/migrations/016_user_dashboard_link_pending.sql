@@ -3,8 +3,8 @@
 -- When _finalize_onboarding() fires while document extractions are still
 -- in-flight (extraction_status='pending'), the dashboard link is held back
 -- and this flag is set to TRUE. Once all pending extractions complete,
--- _send_extraction_summary() appends the dashboard link to the summary
--- message and clears this flag.
+-- the deferred care-plan message appends the dashboard link and clears
+-- this flag.
 --
 -- Safe to re-run: uses IF NOT EXISTS / idempotent ALTER.
 

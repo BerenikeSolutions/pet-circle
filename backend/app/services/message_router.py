@@ -2122,6 +2122,10 @@ async def _send_deferred_care_plan(
                 )
         if dashboard_link:
             care_plan_msg += f"\n\nView {pet.name}'s full care plan here 👇\n{dashboard_link}"
+            care_plan_msg += (
+                f"\n\n📌 *Tip:* Pin this message so you can always find "
+                f"{pet.name}'s care plan link."
+            )
         else:
             care_plan_msg += f"\n\nSend *dashboard* anytime to get {pet.name}'s care plan link."
 
@@ -2142,146 +2146,6 @@ async def _send_deferred_care_plan(
             fail_count=fail_count,
             failed_docs=failed_docs,
         )
-
-
-async def _send_extraction_summary(
-    db: Session, user, pet, result: dict,
-    batch_total_processed: int = 0, batch_fail_count: int = 0,
-    failed_doc_names: list[str] | None = None,
-) -> None:
-    """
-    Send a WhatsApp summary after GPT extraction completes.
-
-    Includes:
-        - Count of items extracted and processed.
-        - List of extracted item names with dates.
-        - Any errors or unmatched items.
-        - Dashboard link to view updated records.
-    """
-    from_number = _get_mobile(user)
-    extracted = result.get("items_extracted", 0)
-    processed = result.get("items_processed", 0)
-    errors = result.get("errors", [])
-    status = result.get("status", "failed")
-    vaccination_details = result.get("vaccination_details", [])
-    extra_vaccines = result.get("extra_vaccines", [])
-    extra_vaccines_saved = result.get("extra_vaccines_saved", 0)
-
-    if status == "failed":
-        # Check for pet name mismatch — show a specific, clear message.
-        pet_name_errors = [e for e in errors if "Pet name mismatch" in e]
-        if pet_name_errors:
-            await send_text_message(db, from_number, pet_name_errors[0])
-            return
-
-        dashboard_link = _get_dashboard_link(db, pet)
-        msg = (
-            "Document saved but extraction encountered an issue. "
-            "You can update details manually via the dashboard."
-        )
-        if dashboard_link:
-            msg += f"\n\nView *{pet.name}'s Dashboard*:\n{dashboard_link}"
-        msg += (
-            "\n\nNeed medicines, food, or supplements? "
-            "Type *order* to place an order with us."
-        )
-        msg += "\n\nType *add pet* to register another pet."
-        await send_text_message(db, from_number, msg)
-        return
-
-    if extracted == 0 and not extra_vaccines and not extra_vaccines_saved:
-        await send_text_message(
-            db, from_number,
-            f"No preventive health items were found in {pet.name}'s document.\n\n"
-            f"If this looks wrong, you can update records manually from the dashboard.\n\n"
-            f"Need medicines, food, or supplements? Type *order* to place an order with us.\n"
-            f"Type *add pet* to register another pet.",
-        )
-        return
-
-    # Build extraction details from the preventive records in DB.
-    # Re-query the latest records to show accurate current state.
-    from app.models.preventive_master import PreventiveMaster
-    from app.models.preventive_record import PreventiveRecord
-
-    records = (
-        db.query(PreventiveRecord, PreventiveMaster)
-        .join(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
-        .filter(
-            PreventiveRecord.pet_id == pet.id,
-            PreventiveRecord.last_done_date.isnot(None),
-        )
-        .order_by(PreventiveRecord.last_done_date.desc())
-        .all()
-    )
-
-    lines = []
-    for record, master in records:
-        done_date = record.last_done_date.strftime("%d-%m-%Y") if record.last_done_date else "—"
-        next_due = record.next_due_date.strftime("%d-%m-%Y") if record.next_due_date else "—"
-        lines.append(f"  • {master.item_name}: done {done_date}, next due {next_due}")
-
-    # Use batch total if available, else single-doc count.
-    display_processed = batch_total_processed if batch_total_processed > 0 else processed
-
-    msg = f"Extraction complete for *{pet.name}*!\n\n"
-    msg += f"*{display_processed} item(s)* updated.\n"
-
-    if lines:
-        msg += "\n*Health Records:*\n" + "\n".join(lines) + "\n"
-
-    if vaccination_details:
-        msg += "\n*Vaccination Details Found:*\n"
-        for detail in vaccination_details[:5]:
-            if not isinstance(detail, dict):
-                continue
-            vaccine_name = detail.get("vaccine_name") or detail.get("vaccine_name_raw") or "Vaccine"
-            dose = detail.get("dose")
-            batch = detail.get("batch_number")
-            parts = [str(vaccine_name)]
-            if dose:
-                parts.append(f"dose {dose}")
-            if batch:
-                parts.append(f"batch {batch}")
-            msg += "  • " + ", ".join(parts) + "\n"
-
-    if extra_vaccines:
-        msg += "\n*Extra Vaccines (unmapped):*\n"
-        for detail in extra_vaccines[:5]:
-            if not isinstance(detail, dict):
-                continue
-            vaccine_name = detail.get("vaccine_name") or "Vaccine"
-            done_date = detail.get("date")
-            parts = [str(vaccine_name)]
-            if done_date:
-                parts.append(f"date {done_date}")
-            msg += "  • " + ", ".join(parts) + "\n"
-        if extra_vaccines_saved:
-            msg += f"Saved {extra_vaccines_saved} extra vaccine entr{'y' if extra_vaccines_saved == 1 else 'ies'} for this pet.\n"
-
-    if errors:
-        unmatched = [e.replace("No match for item: ", "") for e in errors if "No match" in e]
-        if unmatched:
-            msg += f"\nCould not map these document terms to tracked preventive items: {', '.join(unmatched)}\n"
-            msg += "(Usually this means lab-only or non-preventive terms; no preventive record was updated for them.)\n"
-
-    # Include per-document failure details from the batch.
-    if batch_fail_count > 0 and failed_doc_names:
-        msg += f"\n{batch_fail_count} document(s) could not be processed:\n"
-        for name in failed_doc_names:
-            msg += f"  - {name}\n"
-
-    dashboard_link = _get_dashboard_link(db, pet)
-    if dashboard_link:
-        msg += f"\nView *{pet.name}'s Dashboard*:\n{dashboard_link}"
-
-    msg += (
-        "\n\nNeed medicines, food, or supplements? "
-        "Type *order* to place an order with us."
-    )
-    msg += "\n\nType *add pet* to register another pet."
-
-    await send_text_message(db, from_number, msg)
 
 
 def _mime_to_ext(mime_type: str) -> str:
