@@ -144,28 +144,19 @@ export default function VetVisitCard({ visit, defaultOpen, onView }: VetVisitCar
                   MEDICATIONS
                 </div>
                 {visit.medications.length > 0 ? (
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                    <thead>
-                      <tr style={{ color: "var(--t3)", textAlign: "left" }}>
-                        <th style={{ padding: "6px 6px 6px 0", fontWeight: 600 }}>Name</th>
-                        <th style={{ padding: "6px", fontWeight: 600 }}>Dose</th>
-                        <th style={{ padding: "6px 0 6px 6px", fontWeight: 600 }}>Duration</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {visit.medications.map((medication, index) => (
-                        <tr key={`${visit.id}-med-${index}`} style={{ borderTop: "1px solid var(--border)" }}>
-                          <td style={{ padding: "7px 6px 7px 0", color: "var(--t1)", fontWeight: 600 }}>
-                            {medication.name}
-                          </td>
-                          <td style={{ padding: "7px 6px", color: "var(--t2)" }}>{medication.dose || "-"}</td>
-                          <td style={{ padding: "7px 0 7px 6px", color: "var(--t2)" }}>
-                            {medication.duration || "-"}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    {visit.medications.map((medication, index) => {
+                      const subtitle = [medication.dose, medication.duration].filter(Boolean).join(" · ");
+                      return (
+                        <div key={`${visit.id}-med-${index}`}>
+                          <div style={{ fontSize: 13, fontWeight: 700, color: "var(--t1)" }}>{medication.name}</div>
+                          {subtitle && (
+                            <div style={{ fontSize: 12, color: "var(--t3)", marginTop: 2 }}>{subtitle}</div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 ) : (
                   <div
                     style={{

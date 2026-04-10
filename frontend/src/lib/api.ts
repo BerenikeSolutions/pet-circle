@@ -341,6 +341,7 @@ export interface AskVetTimelineNode {
   date: string | null;
   icon: string;
   finding?: string;
+  special_type?: "untreated" | "due" | null;
 }
 
 export interface AskVetCondition {

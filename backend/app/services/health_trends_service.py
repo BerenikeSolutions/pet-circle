@@ -96,11 +96,19 @@ def _blood_group_index(marker_name: str) -> int:
 
 
 def _build_blood_panel(results: list[DiagnosticTestResult]) -> dict[str, Any] | None:
-    """Build blood panel card from latest-date blood markers."""
+    """Build blood panel card from latest-date blood markers.
+
+    Sorts abnormal rows first, then normal. Headline names the specific outliers.
+    """
     if not results:
         return None
 
-    ordered = sorted(results, key=lambda r: (_blood_group_index(r.parameter_name or ""), (r.parameter_name or "").lower()))
+    def _row_sort_key(r: DiagnosticTestResult) -> tuple[int, int, str]:
+        # abnormal rows first (0), then by biological group, then alpha
+        abnormal = 0 if (r.status_flag or "").lower() in {"low", "high", "abnormal"} else 1
+        return (abnormal, _blood_group_index(r.parameter_name or ""), (r.parameter_name or "").lower())
+
+    ordered = sorted(results, key=_row_sort_key)
     rows = [
         {
             "marker": row.parameter_name,
@@ -111,8 +119,15 @@ def _build_blood_panel(results: list[DiagnosticTestResult]) -> dict[str, Any] | 
         for row in ordered
     ]
 
-    outside = sum(1 for row in rows if row["status"] != "Normal")
-    headline = "All listed markers are within range." if outside == 0 else f"{outside} marker(s) are outside range. Discuss with your vet."
+    abnormal_names = [row["marker"] for row in rows if row["status"] != "Normal"]
+    if not abnormal_names:
+        headline = "All listed markers are within range."
+    elif len(abnormal_names) == 1:
+        headline = f"All markers normal except {abnormal_names[0]}."
+    elif len(abnormal_names) <= 3:
+        headline = f"Markers outside range: {', '.join(abnormal_names)}."
+    else:
+        headline = f"{len(abnormal_names)} markers outside range. Review with your vet."
 
     panel_date = max((r.observed_at for r in results if r.observed_at), default=None)
     return {
@@ -257,15 +272,28 @@ def _build_vaccine_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster]]
     gaps = []
     for prev, cur in zip(done_dates, done_dates[1:], strict=False):
         if prev and cur:
-            gaps.append(f"{_gap_in_weeks(prev, cur)}w")
+            gaps.append(f"~{_gap_in_weeks(prev, cur) // 4} months")
+
+    done_count = len(done_dates)
+    all_done = done_count == len(vaccine_rows)
+    if all_done and done_count > 0:
+        headline = f"All {done_count} vaccines current. Annual cadence maintained."
+    elif done_count > 0:
+        headline = f"{done_count} of {len(vaccine_rows)} vaccine rounds completed."
+    else:
+        headline = "No vaccines recorded yet."
 
     upcoming_dates = sorted(
         record.next_due_date for record, _ in vaccine_rows if record.next_due_date and record.next_due_date >= today
     )
-    footer_text = f"✓ Next due {upcoming_dates[0].isoformat()}" if upcoming_dates else "No upcoming vaccine due date available"
+    if upcoming_dates:
+        next_date = upcoming_dates[0]
+        footer_text = f"✓ Next due {next_date.strftime('%b %Y')}"
+    else:
+        footer_text = "No upcoming vaccine due date available"
 
     return {
-        "headline": "Vaccination cadence",
+        "headline": headline,
         "rounds": rounds,
         "gaps": gaps,
         "footer": {"text": footer_text, "color": "green", "bg": "#E8FFF1"},
@@ -307,10 +335,24 @@ def _build_flea_tick_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster
         if record.last_done_date:
             previous_done_date = record.last_done_date
 
+    red_gap_count = sum(1 for d in doses if d.get("status") == "red")
+    if red_gap_count > 0:
+        footer_text = "⚠ Critical coverage gaps — discuss with your vet. Gaps coincide with risk of vector-borne infection."
+        footer_color = "#B45309"
+        footer_bg = "#FFF6E6"
+    elif any(d.get("status") == "amber" for d in doses):
+        footer_text = "⚠ Some coverage gaps detected. Aim for monthly or 6-weekly dosing."
+        footer_color = "#B45309"
+        footer_bg = "#FFF6E6"
+    else:
+        footer_text = "✓ Tick & flea coverage on track."
+        footer_color = "#166534"
+        footer_bg = "#E9FBEF"
+
     return {
         "headline": "Tick & Flea coverage cadence",
         "doses": doses,
-        "footer": {"text": "Review coverage gaps with your vet.", "color": "amber", "bg": "#FFF6E6"},
+        "footer": {"text": footer_text, "color": footer_color, "bg": footer_bg},
     }
 
 
@@ -345,39 +387,101 @@ def _build_deworming_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster
     missed_count = sum(1 for n in nodes if n["state"] == "missed")
     has_now = any(n["state"] == "now" for n in nodes)
 
+    # Calculate gap from last done date to today
+    last_done_dates = [
+        record.last_done_date for record, _ in deworm_rows if record.last_done_date
+    ]
+    if last_done_dates and (missed_count > 0 or has_now):
+        last_done = max(last_done_dates)
+        gap_days = (today - last_done).days
+        gap_months = gap_days // 30
+        if gap_months >= 24:
+            gap_label = f"{gap_months // 12}+ years"
+        elif gap_months >= 12:
+            gap_label = "1+ year"
+        else:
+            gap_label = f"{gap_months} months"
+        headline = f"Only {done_count} dose{'s' if done_count != 1 else ''} in {gap_label}. Significantly overdue."
+    elif missed_count > 0 or has_now:
+        headline = "Deworming overdue. Administer as soon as possible."
+    elif done_count == len(nodes):
+        headline = "Deworming on track."
+    else:
+        headline = "Deworming cadence"
+
     if missed_count > 0 or has_now:
         footer = {"text": "🚨 Administer immediately", "color": "#b52020", "bg": "var(--tr)"}
     elif done_count == len(nodes):
-        footer = {"text": "✓ Deworming on track", "color": "green", "bg": "#E8FFF1"}
+        footer = {"text": "✓ Deworming on track", "color": "#166534", "bg": "#E9FBEF"}
     else:
-        footer = {"text": "Review deworming schedule with your vet.", "color": "amber", "bg": "#FFF6E6"}
+        footer = {"text": "Review deworming schedule with your vet.", "color": "#B45309", "bg": "#FFF6E6"}
 
     return {
-        "headline": "Deworming cadence",
+        "headline": headline,
         "nodes": nodes,
         "footer": footer,
     }
 
 
 def _build_condition_timeline(condition: Condition) -> list[dict[str, str | None]]:
-    """Build condition timeline nodes used in ask-vet cards."""
+    """Build condition timeline nodes for the ask-vet card.
+
+    Adds an UNTREATED banner node for chronic conditions with no treatment history.
+    Timeline is sorted chronologically ascending (oldest→newest), capped at 5 nodes.
+    """
     timeline: list[dict[str, str | None]] = []
     if condition.diagnosed_at:
-        timeline.append({"label": "Diagnosed", "date": condition.diagnosed_at.isoformat(), "icon": "🩺", "finding": condition.condition_type})
+        timeline.append({
+            "label": "Detected",
+            "date": condition.diagnosed_at.isoformat(),
+            "icon": "🩺",
+            "finding": condition.name,
+            "special_type": None,
+        })
+
+    ever_treated = bool(condition.medications)
+    if not ever_treated and condition.condition_type in {"chronic", "episodic"} and condition.diagnosed_at:
+        # Insert an UNTREATED node after detection — visually alarming
+        timeline.append({
+            "label": "UNTREATED",
+            "date": condition.diagnosed_at.isoformat(),
+            "icon": "⚠️",
+            "finding": "No treatment recorded",
+            "special_type": "untreated",
+        })
 
     for med in sorted(condition.medications, key=lambda row: row.started_at or date.min):
         if med.started_at:
             finding = f"{med.dose} {med.frequency}".strip() if med.dose or med.frequency else None
-            timeline.append({"label": f"{med.name} started", "date": med.started_at.isoformat(), "icon": "💊", "finding": finding})
+            timeline.append({
+                "label": f"{med.name}",
+                "date": med.started_at.isoformat(),
+                "icon": "💊",
+                "finding": finding,
+                "special_type": None,
+            })
 
     for monitor in sorted(condition.monitoring, key=lambda row: row.last_done_date or row.next_due_date or date.min):
         if monitor.last_done_date:
             finding = monitor.result_summary or None
-            timeline.append({"label": f"{monitor.name} done", "date": monitor.last_done_date.isoformat(), "icon": "✅", "finding": finding})
+            timeline.append({
+                "label": monitor.name,
+                "date": monitor.last_done_date.isoformat(),
+                "icon": "✅",
+                "finding": finding,
+                "special_type": None,
+            })
         elif monitor.next_due_date:
-            timeline.append({"label": f"{monitor.name} due", "date": monitor.next_due_date.isoformat(), "icon": "📅", "finding": None})
+            timeline.append({
+                "label": f"{monitor.name}?",
+                "date": monitor.next_due_date.isoformat(),
+                "icon": "❓",
+                "finding": "Retest due",
+                "special_type": "due",
+            })
 
-    timeline = sorted(timeline, key=lambda item: item.get("date") or "", reverse=True)
+    # Sort chronologically ascending (oldest first so timeline reads left→right)
+    timeline = sorted(timeline, key=lambda item: item.get("date") or "")
     return timeline[:5]
 
 
@@ -415,24 +519,63 @@ def _build_condition_chart_data(
 
 
 def _condition_trend(condition: Condition) -> str:
-    """Summarize current condition trend from monitoring and medication state."""
-    overdue = any(
-        mon.next_due_date and mon.next_due_date < date.today() and not mon.last_done_date
-        for mon in condition.monitoring
-    )
+    """Summarize current condition trend with clinical urgency."""
+    today = date.today()
     active_meds = sum(1 for med in condition.medications if (med.status or "active") == "active")
-    if overdue:
-        return "Monitoring overdue"
+    ever_treated = bool(condition.medications)
+
+    # Find most overdue monitoring item
+    most_overdue_mon = None
+    longest_overdue_days = 0
+    for mon in condition.monitoring:
+        if mon.next_due_date and mon.next_due_date < today and not mon.last_done_date:
+            days = (today - mon.next_due_date).days
+            if days > longest_overdue_days:
+                longest_overdue_days = days
+                most_overdue_mon = mon
+
+    if most_overdue_mon:
+        gap_months = longest_overdue_days // 30
+        if gap_months >= 24:
+            return f"{most_overdue_mon.name} overdue {gap_months // 12}+ years"
+        if gap_months >= 12:
+            return f"{most_overdue_mon.name} overdue 1+ year"
+        if gap_months >= 1:
+            return f"{most_overdue_mon.name} overdue {gap_months}+ months"
+        return f"{most_overdue_mon.name} overdue"
+
+    if not ever_treated:
+        return "Never treated — discuss treatment protocol with your vet"
     if active_meds > 0:
         return "On active management"
-    return "Stable monitoring"
+    return "Stable — continue monitoring"
 
 
 def _condition_headline(condition: Condition) -> str:
-    """Generate condition headline for ask-vet card."""
+    """Generate condition headline reflecting current clinical status, not just history."""
+    today = date.today()
+    active_meds = sum(1 for med in condition.medications if (med.status or "active") == "active")
+    ever_treated = bool(condition.medications)
+
+    # Check for overdue monitoring
+    overdue_monitors = [
+        mon for mon in condition.monitoring
+        if mon.next_due_date and mon.next_due_date < today and not mon.last_done_date
+    ]
+
+    # Build a status-centric headline
+    detected_str = condition.diagnosed_at.strftime("%b %Y") if condition.diagnosed_at else None
+
+    if not ever_treated and detected_str:
+        return f"Detected {detected_str}. Never treated."
+    if overdue_monitors:
+        mon_name = overdue_monitors[0].name
+        return f"{mon_name} overdue. Review with your vet."
+    if active_meds > 0 and condition.diagnosed_at:
+        return f"Under active management since {detected_str}."
     if condition.diagnosed_at:
-        return f"{condition.condition_type.capitalize()} status · Since {condition.diagnosed_at.strftime('%b %Y')}"
-    return f"{condition.condition_type.capitalize()} status"
+        return f"{condition.name} · Since {detected_str}"
+    return f"{condition.condition_type.capitalize()} condition under monitoring"
 
 
 def _fallback_questions(condition: Condition) -> list[str]:

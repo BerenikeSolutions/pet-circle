@@ -176,7 +176,10 @@ export default function AskVetConditionCard({
             />
             <div style={{ display: "flex", justifyContent: "space-between", position: "relative", zIndex: 1, margin: "4px 0" }}>
               {timeline.nodes.map((node, index) => {
-                const color = timelineNodeColor(node, index, timeline.nodes.length);
+                const isUntreated = node.special_type === "untreated";
+                const isDue = node.special_type === "due";
+                const color = isUntreated ? "#DC2626" : isDue ? "#B45309" : timelineNodeColor(node, index, timeline.nodes.length);
+                const nodeBg = isUntreated ? "#DC2626" : isDue ? "#F59E0B" : color;
                 return (
                   <div key={`${node.label}-${node.date || index}`} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3, width: 56 }}>
                     <div
@@ -184,18 +187,20 @@ export default function AskVetConditionCard({
                         width: 28,
                         height: 28,
                         borderRadius: "50%",
-                        background: color,
+                        background: nodeBg,
                         display: "flex",
                         alignItems: "center",
                         justifyContent: "center",
                         fontSize: 12,
-                        border: "2px solid #fff",
-                        boxShadow: "0 1px 3px rgba(0,0,0,.12)",
+                        border: isUntreated ? "2px solid #DC2626" : "2px solid #fff",
+                        boxShadow: isUntreated ? "0 0 0 2px rgba(220,38,38,0.25)" : "0 1px 3px rgba(0,0,0,.12)",
                       }}
                     >
                       {node.icon}
                     </div>
-                    <div style={{ fontSize: 9, fontWeight: 600, color: "var(--t2)", textAlign: "center" }}>{node.label}</div>
+                    <div style={{ fontSize: 9, fontWeight: isUntreated ? 800 : 600, color: isUntreated ? "#DC2626" : "var(--t2)", textAlign: "center" }}>
+                      {node.label}
+                    </div>
                     {node.finding && (
                       <div style={{ fontSize: 8, fontWeight: 500, color: color, textAlign: "center", lineHeight: 1.2, maxWidth: 56, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {node.finding}
