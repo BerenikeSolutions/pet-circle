@@ -87,7 +87,12 @@ def _lab_icon_for_document(document: Document) -> str:
 
 
 def _record_type_for_document(document: Document) -> tuple[str, str]:
-    """Classify non-prescription document into records-v2 type and icon."""
+    """Classify non-prescription document into records-v2 type and icon.
+
+    Classification is based on the medical document_category extracted by GPT.
+    source_wamid (uploaded via WhatsApp) is intentionally NOT used as a category —
+    all documents are classified by their medical content, not by upload channel.
+    """
     category = (document.document_category or "").strip().lower()
     doc_name = (document.document_name or "").strip().lower()
 
@@ -98,8 +103,9 @@ def _record_type_for_document(document: Document) -> tuple[str, str]:
     if is_imaging:
         return "imaging", "🩻"
 
-    if document.source_wamid:
-        return "whatsapp", "💬"
+    # Blood/urine/lab reports: classify by category regardless of upload channel.
+    if category in ("blood report", "urine report", "pcr & parasite panel", "lab report"):
+        return "lab_reports", _lab_icon_for_document(document)
 
     return "lab_reports", _lab_icon_for_document(document)
 

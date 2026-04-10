@@ -108,8 +108,17 @@ function isMedicineItem(name: string): boolean {
   return n.includes('deworm') || n.includes('flea') || n.includes('tick');
 }
 
+const _DISPLAY_NAME_MAP: Record<string, string> = {
+  'dhppi': 'DHPPi (Nobivac)',
+  'rabies vaccine': 'Rabies (Nobivac RL)',
+  'tick/flea': 'Flea & Tick Protection',
+};
+
 function displayItemName(itemName: string): string {
   const normalized = itemName.trim().toLowerCase();
+  if (_DISPLAY_NAME_MAP[normalized]) {
+    return _DISPLAY_NAME_MAP[normalized];
+  }
   if (normalized.includes('flea') && normalized.includes('tick')) {
     return 'Flea & Tick Protection';
   }

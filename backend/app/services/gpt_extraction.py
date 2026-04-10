@@ -36,6 +36,7 @@ import os
 import re
 from contextlib import nullcontext
 from datetime import datetime
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -57,6 +58,7 @@ from app.models.document import Document
 from app.models.pet import Pet
 from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
+from app.models.weight_history import WeightHistory
 from app.utils.date_utils import format_date_for_db, parse_date
 from app.utils.retry import retry_openai_call
 
@@ -747,10 +749,24 @@ EXTRACTION_SYSTEM_PROMPT = (
     '  - "vaccination_details": array of objects (for vaccine records; [] if none). '
     "Each object may include: vaccine_name, vaccine_name_raw, dose, dose_unit, "
     "route, manufacturer, batch_number, next_due_date, administered_by, notes\n"
+    '  - "clinical_exam": object or null — ONLY for Prescriptions / vet visit records. '
+    "Capture any clinical examination values written on the document, each field null when not present:\n"
+    '    - "weight_kg": number or null (pet body weight in kilograms as recorded by the vet)\n'
+    '    - "temperature_c": number or null (body temperature in °C — if document states °F, convert to °C)\n'
+    '    - "pulse_bpm": number or null (heart rate / pulse, beats per minute)\n'
+    '    - "respiration_rpm": number or null (respiration rate, breaths per minute)\n'
+    '    - "mucous_membranes": string or null (e.g., "pink moist", "pale", "icteric")\n'
+    '    - "clinical_findings": string or null (other examination notes: hydration, body condition score, etc.)\n'
+    '    - "in_clinic_test_values": array of objects ([] if none) — any in-clinic test values '
+    "written on the prescription such as blood glucose, PCV, SpO2. "
+    'Each entry: {"parameter_name": string, "value_numeric": number or null, "value_text": string or null, "unit": string or null}\n'
     '  - "items": array of objects, each with:\n'
     '    - "item_name": string (MUST be one of the tracked items listed below)\n'
     '    - "last_done_date": string (the date the item was done, '
-    "in DD/MM/YYYY or DD-MM-YYYY or DD-Mon-YYYY or DD Month YYYY or YYYY-MM-DD format)\n"
+    "in DD/MM/YYYY or DD-MM-YYYY or DD-Mon-YYYY or DD Month YYYY or YYYY-MM-DD format. "
+    "ALWAYS use 4-digit years (e.g. 2025, not 25). "
+    "If the year is written as 2 digits (e.g. '25'), expand it to 20XX (e.g. 2025). "
+    "If the date is unclear, illegible, or ambiguous, set last_done_date to null — do NOT guess.)\n"
     '    - "dose": string or null (dose amount, if present in the document)\n'
     '    - "doctor_name": string or null (doctor name for that line item, if present)\n'
     '    - "clinic_name": string or null (clinic name for that line item, if present)\n'
@@ -790,6 +806,11 @@ EXTRACTION_SYSTEM_PROMPT = (
     f"{_build_medicine_coverage_prompt()}\n"
     "- Drugs prescribed to treat a condition belong in that condition's medications[] array, not as a separate condition.\n"
     "- For contacts: extract vet/specialist contact details when explicitly present in the document.\n"
+    "- For Prescription documents: ALWAYS populate clinical_exam with weight, temperature, pulse, "
+    "respiration, mucous membranes, and any other examination notes written on the document. "
+    "Leave individual fields as null when not present. Omit clinical_exam (or set null) for non-prescription documents.\n"
+    "- Any in-clinic test values written on a prescription (e.g. blood glucose, PCV, SpO2) should be listed in "
+    "clinical_exam.in_clinic_test_values — do NOT duplicate them into diagnostic_values.\n"
     "- If any field is missing in the document, use null for that field.\n"
     "- If the document is not pet/veterinary related, set document_type to 'not_pet_related' and items to [].\n"
     '- If no preventive items are found, return {"document_name": "...", "document_type": "pet_medical", '
@@ -890,7 +911,7 @@ async def _call_openai_extraction_vision(image_data_uri: str) -> str:
     return await retry_openai_call(_make_call)
 
 
-def _validate_extraction_json(raw_json: str) -> tuple[list[dict], str | None, str | None, dict]:
+def _validate_extraction_json(raw_json: str, file_path: str | None = None) -> tuple[list[dict], str | None, str | None, dict]:
     """
     Parse and validate the JSON response from GPT extraction.
 
@@ -941,6 +962,7 @@ def _validate_extraction_json(raw_json: str) -> tuple[list[dict], str | None, st
         "conditions": [],
         "preventive_medications": [],
         "contacts": [],
+        "clinical_exam": None,
     }
     if isinstance(parsed, dict):
         document_name = parsed.get("document_name")
@@ -968,6 +990,9 @@ def _validate_extraction_json(raw_json: str) -> tuple[list[dict], str | None, st
         raw_contacts = parsed.get("contacts")
         if isinstance(raw_contacts, list):
             metadata["contacts"] = raw_contacts
+        raw_clinical_exam = parsed.get("clinical_exam")
+        if isinstance(raw_clinical_exam, dict):
+            metadata["clinical_exam"] = raw_clinical_exam
 
     # Handle both direct array and wrapper object formats.
     # GPT with json_object mode returns an object, not an array.
@@ -1018,12 +1043,39 @@ def _validate_extraction_json(raw_json: str) -> tuple[list[dict], str | None, st
             continue
 
         # Normalize and validate the date.
+        raw_date_str = str(item.get("last_done_date") or "").strip()
+        if not raw_date_str or raw_date_str.lower() in ("null", "none", ""):
+            # GPT returned null/missing date — try filename as fallback before skipping.
+            filename_date = _extract_date_from_filename(file_path) if file_path else None
+            if filename_date:
+                logger.info(
+                    "Item %d has no GPT date — using filename date '%s'. Item: %s",
+                    i, filename_date, str(item),
+                )
+                item["last_done_date"] = filename_date
+                validated.append(item)
+            else:
+                logger.warning(
+                    "Skipping extraction item at index %d — missing date, no filename fallback. Item: %s",
+                    i, str(item),
+                )
+            continue
         try:
-            parsed_date = parse_date(str(item["last_done_date"]))
+            parsed_date = parse_date(raw_date_str)
             if parsed_date > today:
                 logger.warning(
                     "Skipping extraction item at index %d — future date %s. Item: %s",
                     i, str(parsed_date), str(item),
+                )
+                continue
+            # Reject implausibly old dates (before 2020) — likely a GPT year
+            # hallucination (e.g. reading "25" as 1925 or misreading digit).
+            from datetime import date as _date
+            if parsed_date.year < 2020:
+                logger.warning(
+                    "Skipping extraction item at index %d — date year %d predates "
+                    "2020, likely a misread. Item: %s",
+                    i, parsed_date.year, str(item),
                 )
                 continue
             item["last_done_date"] = format_date_for_db(parsed_date)
@@ -1085,8 +1137,11 @@ def _validate_extraction_json(raw_json: str) -> tuple[list[dict], str | None, st
 
 # Mapping from common vaccine names in vaccination_details to tracked item names.
 _VACCINE_DETAIL_TO_ITEM: dict[str, str] = {
-    "rabies": "Rabies (Nobivac RL)",
-    "nobivac rl": "Rabies (Nobivac RL)",
+    # DB item_name is "Rabies Vaccine"; display name "Rabies (Nobivac RL)" is
+    # applied separately via _DISPLAY_NAME in care_plan_engine.py.
+    "rabies": "Rabies Vaccine",
+    "nobivac rl": "Rabies Vaccine",
+    "rabies vaccine": "Rabies Vaccine",
     "dhpp": "DHPPi",
     "dhppi": "DHPPi",
     "dhppi+l": "DHPPi",
@@ -1587,6 +1642,126 @@ def _match_preventive_master_from_list(
     return None
 
 
+def _coerce_float(value) -> float | None:
+    """Safely coerce a value to float; return None on failure."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _save_clinical_exam_data(
+    db: Session,
+    pet: Pet,
+    document: Document,
+    clinical_exam: dict | None,
+) -> None:
+    """
+    Persist clinical exam data extracted from a prescription document.
+
+    - weight_kg → WeightHistory entry (recorded_at = document.event_date)
+    - temperature_c / pulse_bpm / respiration_rpm → DiagnosticTestResult with test_type="vital"
+    - mucous_membranes / clinical_findings → DiagnosticTestResult (value_text) with test_type="vital"
+    - in_clinic_test_values[] → DiagnosticTestResult entries with test_type="vital"
+
+    Silently skips fields that are missing or invalid. Does not commit —
+    the caller's surrounding transaction handles commit/rollback.
+    """
+    if not clinical_exam or not isinstance(clinical_exam, dict):
+        return
+
+    observed_date = document.event_date or datetime.utcnow().date()
+
+    # --- Weight → WeightHistory ---
+    weight_kg = _coerce_float(clinical_exam.get("weight_kg"))
+    if weight_kg is not None and 0 < weight_kg < 200:
+        try:
+            existing = (
+                db.query(WeightHistory)
+                .filter(
+                    WeightHistory.pet_id == pet.id,
+                    WeightHistory.recorded_at == observed_date,
+                )
+                .first()
+            )
+            if existing is None:
+                db.add(
+                    WeightHistory(
+                        pet_id=pet.id,
+                        weight=Decimal(str(round(weight_kg, 2))),
+                        recorded_at=observed_date,
+                        note=f"From prescription: {document.document_name or 'vet visit'}"[:200],
+                    )
+                )
+        except Exception as exc:
+            logger.warning(
+                "Failed to save prescription weight for pet=%s: %s",
+                str(pet.id), str(exc),
+            )
+
+    def _add_vital(parameter_name: str, value_numeric=None, value_text=None, unit=None):
+        if value_numeric is None and not value_text:
+            return
+        try:
+            db.add(
+                DiagnosticTestResult(
+                    pet_id=pet.id,
+                    document_id=document.id,
+                    test_type="vital",
+                    parameter_name=parameter_name[:120],
+                    value_numeric=value_numeric,
+                    value_text=(str(value_text).strip()[:200] if value_text is not None else None),
+                    unit=(unit[:60] if unit else None),
+                    observed_at=observed_date,
+                )
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to save vital '%s' for pet=%s: %s",
+                parameter_name, str(pet.id), str(exc),
+            )
+
+    temperature_c = _coerce_float(clinical_exam.get("temperature_c"))
+    if temperature_c is not None and 30 <= temperature_c <= 45:
+        _add_vital("Temperature", value_numeric=temperature_c, unit="°C")
+
+    pulse_bpm = _coerce_float(clinical_exam.get("pulse_bpm"))
+    if pulse_bpm is not None and 10 <= pulse_bpm <= 400:
+        _add_vital("Pulse", value_numeric=pulse_bpm, unit="bpm")
+
+    respiration_rpm = _coerce_float(clinical_exam.get("respiration_rpm"))
+    if respiration_rpm is not None and 2 <= respiration_rpm <= 200:
+        _add_vital("Respiration", value_numeric=respiration_rpm, unit="rpm")
+
+    mucous = clinical_exam.get("mucous_membranes")
+    if mucous and isinstance(mucous, str) and mucous.strip():
+        _add_vital("Mucous Membranes", value_text=mucous.strip())
+
+    clinical_findings = clinical_exam.get("clinical_findings")
+    if clinical_findings and isinstance(clinical_findings, str) and clinical_findings.strip():
+        _add_vital("Clinical Findings", value_text=clinical_findings.strip())
+
+    in_clinic_values = clinical_exam.get("in_clinic_test_values")
+    if isinstance(in_clinic_values, list):
+        for raw in in_clinic_values:
+            if not isinstance(raw, dict):
+                continue
+            parameter_name = str(raw.get("parameter_name") or "").strip()
+            if not parameter_name:
+                continue
+            value_numeric = _coerce_float(raw.get("value_numeric"))
+            value_text = raw.get("value_text")
+            unit = raw.get("unit")
+            _add_vital(
+                parameter_name,
+                value_numeric=value_numeric,
+                value_text=value_text,
+                unit=(str(unit).strip() if unit else None),
+            )
+
+
 async def extract_and_process_document(
     db: Session,
     document_id: UUID,
@@ -1716,7 +1891,7 @@ async def extract_and_process_document(
             raw_json = await _call_openai_extraction(document_text)
 
         # --- Step 2: Validate and normalize ---
-        extracted_items, document_name, extracted_pet_name, metadata = _validate_extraction_json(raw_json)
+        extracted_items, document_name, extracted_pet_name, metadata = _validate_extraction_json(raw_json, file_path=file_path)
         results["document_type"] = metadata["document_type"]
         results["document_category"] = metadata["document_category"]
         results["diagnostic_summary"] = metadata["diagnostic_summary"]
@@ -1850,6 +2025,16 @@ async def extract_and_process_document(
                 status_flag=status_flag,
                 observed_at=observed_at,
             ))
+
+        # --- Store clinical exam data (prescriptions only) ---
+        # Weight → WeightHistory entry; vitals & in-clinic tests → DiagnosticTestResult
+        # with test_type="vital". Observed_at is the document's event_date.
+        _save_clinical_exam_data(
+            db=db,
+            pet=pet,
+            document=document,
+            clinical_exam=metadata.get("clinical_exam"),
+        )
 
         # --- Store extracted conditions ---
         extracted_conditions = metadata.get("conditions") or []

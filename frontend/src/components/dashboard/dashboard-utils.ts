@@ -351,16 +351,16 @@ export function computeCarePlanCounts(
   let dueSoon = 0;
   let overdue = 0;
 
+  // Only count items from the "continue" bucket — items in "add" (Quick Fixes)
+  // and "attend" should not inflate the overdue/on-track/due-soon totals.
   const EXCLUDED_TYPES = new Set(["food", "supplement"]);
-  for (const sections of Object.values(buckets)) {
-    for (const section of sections) {
-      for (const item of section.items) {
-        if (EXCLUDED_TYPES.has(item.test_type || "")) continue;
-        const cls = itemStatusClass(item);
-        if (cls === "s-tag-r") overdue += 1;
-        else if (cls === "s-tag-y") dueSoon += 1;
-        else onTrack += 1;
-      }
+  for (const section of buckets.continue) {
+    for (const item of section.items) {
+      if (EXCLUDED_TYPES.has(item.test_type || "")) continue;
+      const cls = itemStatusClass(item);
+      if (cls === "s-tag-r") overdue += 1;
+      else if (cls === "s-tag-y") dueSoon += 1;
+      else if (cls === "s-tag-g") onTrack += 1;
     }
   }
 

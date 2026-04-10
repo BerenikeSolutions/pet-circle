@@ -1235,11 +1235,18 @@ def dashboard_get_preventive_medicine_options(
     """
     Return medicine options for medicine-dependent preventive items.
 
-    The old product_catalog table (which carried deworming/flea-tick
-    brand+product rows) was dropped as part of the cart-rules-engine
-    rebuild. Until a replacement source exists, this endpoint returns
-    an empty options list so the UI degrades to a free-text input.
+    Medicines are sourced from the frozen set of approved brands per category.
     """
+    # Frozen-set medicine options per preventive item category.
+    _DEWORMING_MEDICINES = [
+        "Heartgard", "Milbemax", "Drontal", "Drontal Plus",
+        "Panacur", "Interceptor", "Sentinel", "Revolution",
+    ]
+    _FLEA_TICK_MEDICINES = [
+        "Bravecto", "Simparica", "Simparica Trio", "NexGard", "NexGard Spectra",
+        "Revolution", "Frontline Plus", "Advocate", "Stronghold", "Comfortis",
+    ]
+
     try:
         _get_pet_for_dashboard_token(db, token)
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
@@ -1248,7 +1255,14 @@ def dashboard_get_preventive_medicine_options(
         if not item_name_norm:
             raise HTTPException(status_code=400, detail="item_name is required")
 
-        return {"item_name": item_name, "options": []}
+        if "deworm" in item_name_norm:
+            options = _DEWORMING_MEDICINES
+        elif "flea" in item_name_norm or "tick" in item_name_norm:
+            options = _FLEA_TICK_MEDICINES
+        else:
+            options = []
+
+        return {"item_name": item_name, "options": options}
     except HTTPException:
         raise
     except ValueError:

@@ -104,7 +104,10 @@ def is_doc_upload_deadline_expired(deadline: datetime | None) -> bool:
     return datetime.now(UTC) > deadline
 
 
-_CARE_PLAN_VACCINE_TERMS = ["vaccine", "rabies", "dhpp", "bordetella", "feline core"]
+_CARE_PLAN_VACCINE_TERMS = [
+    "vaccine", "rabies", "dhpp", "bordetella", "feline core",
+    "coronavirus", "kennel cough", "leptospirosis", "nobivac",
+]
 
 
 def _count_tracked_preventive_items(db: Session, pet_id) -> int:
@@ -3881,6 +3884,10 @@ async def _finalize_onboarding(db, user, send_fn):
             f"\n\nView {pet.name}'s full care plan here 👇\n"
             f"{settings.FRONTEND_URL}/dashboard/{token}"
         )
+        care_plan_msg += (
+            f"\n\n📌 *Tip:* Pin this message so you can always find "
+            f"{pet.name}'s care plan link."
+        )
     else:
         care_plan_msg += (
             f"\n\nSend *dashboard* anytime to get {pet.name}'s care plan link."
@@ -4016,7 +4023,8 @@ async def _generate_care_plan_message(
     """
     # Build flags for deterministic variation selection.
     split_items = split_diet_items_by_type(diet_items or [])
-    has_food = bool(split_items["foods"])
+    # Care plan only references packaged/commercial pet food products — not homemade meals.
+    has_food = bool(split_items["packaged"])
     has_preventive = record_count > 0
     has_breed = bool(pet.breed)
     has_age = bool(pet.age_text or pet.dob)

@@ -889,7 +889,16 @@ async def get_document_file_for_token(
         raise ValueError("Could not load document from storage.")
 
     filename = doc.file_path.split("/")[-1] if doc.file_path else "document"
-    return file_bytes, doc.mime_type, filename
+    mime_type = doc.mime_type
+    if not mime_type:
+        ext = (doc.file_path or "").rsplit(".", 1)[-1].lower() if doc.file_path else ""
+        mime_type = {
+            "pdf": "application/pdf",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "png": "image/png",
+        }.get(ext, "application/octet-stream")
+    return file_bytes, mime_type, filename
 
 
 async def get_pet_photo_for_token(

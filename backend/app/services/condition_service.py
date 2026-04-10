@@ -26,6 +26,7 @@ from app.models.condition import Condition
 from app.models.condition_medication import ConditionMedication
 from app.models.condition_monitoring import ConditionMonitoring
 from app.models.contact import Contact
+from app.models.document import Document
 from app.models.preventive_record import PreventiveRecord
 
 logger = logging.getLogger(__name__)
@@ -520,12 +521,36 @@ def get_last_vet_visit(db: Session, pet_id: UUID) -> dict:
             "notes", "status"
         }
     """
-    # Find vet contact
-    vet = (
-        db.query(Contact)
-        .filter(Contact.pet_id == pet_id, Contact.role == "veterinarian")
+    # Find vet contact — prefer the one linked to the latest prescription.
+    vet = None
+    latest_prescription = (
+        db.query(Document)
+        .filter(
+            Document.pet_id == pet_id,
+            Document.document_category.ilike("prescription"),
+            Document.event_date.isnot(None),
+        )
+        .order_by(Document.event_date.desc())
         .first()
     )
+
+    # Pull vet contact from the prescription's doctor/clinic info when available.
+    if latest_prescription and latest_prescription.doctor_name:
+        vet = (
+            db.query(Contact)
+            .filter(
+                Contact.pet_id == pet_id,
+                Contact.role == "veterinarian",
+                Contact.name == latest_prescription.doctor_name,
+            )
+            .first()
+        )
+    if not vet:
+        vet = (
+            db.query(Contact)
+            .filter(Contact.pet_id == pet_id, Contact.role == "veterinarian")
+            .first()
+        )
 
     # Find the oldest active condition managed by this vet
     conditions = (
@@ -537,7 +562,10 @@ def get_last_vet_visit(db: Session, pet_id: UUID) -> dict:
 
     managing_condition = None
     managing_since = None
-    last_visit_date = None
+    # Use the latest prescription event_date as the primary last_visit_date.
+    last_visit_date = (
+        str(latest_prescription.event_date) if latest_prescription and latest_prescription.event_date else None
+    )
     next_due_date = None
     notes = None
 
@@ -545,7 +573,8 @@ def get_last_vet_visit(db: Session, pet_id: UUID) -> dict:
         if cond.managed_by and vet and vet.name and vet.name.lower() in cond.managed_by.lower():
             managing_condition = cond.name
             managing_since = str(cond.diagnosed_at) if cond.diagnosed_at else None
-            last_visit_date = str(cond.diagnosed_at) if cond.diagnosed_at else None
+            if not last_visit_date:
+                last_visit_date = str(cond.diagnosed_at) if cond.diagnosed_at else None
             notes = cond.notes
             # Compute next due from monitoring checks
             for mon in cond.monitoring:
@@ -559,7 +588,8 @@ def get_last_vet_visit(db: Session, pet_id: UUID) -> dict:
         cond = conditions[0]
         managing_condition = cond.name
         managing_since = str(cond.diagnosed_at) if cond.diagnosed_at else None
-        last_visit_date = str(cond.diagnosed_at) if cond.diagnosed_at else None
+        if not last_visit_date:
+            last_visit_date = str(cond.diagnosed_at) if cond.diagnosed_at else None
         notes = cond.notes
 
     # Determine status

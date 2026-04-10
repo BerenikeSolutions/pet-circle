@@ -142,12 +142,13 @@ def split_diet_items_by_type(diet_items: list) -> dict[str, list[str]]:
 
     Returns:
         {
-            "foods": [...],
+            "foods": [...],        # packaged + homemade (all food types)
+            "packaged": [...],     # only packaged/commercial pet products
             "supplements": [...],
             "other": [...]
         }
     """
-    buckets = {"foods": [], "supplements": [], "other": []}
+    buckets: dict[str, list[str]] = {"foods": [], "packaged": [], "supplements": [], "other": []}
     for item in diet_items or []:
         label = (getattr(item, "label", "") or "").strip()
         if not label:
@@ -155,7 +156,10 @@ def split_diet_items_by_type(diet_items: list) -> dict[str, list[str]]:
         item_type = (getattr(item, "type", "") or "").strip().lower()
         if item_type == "supplement":
             buckets["supplements"].append(label)
-        elif item_type in {"packaged", "homemade"}:
+        elif item_type == "packaged":
+            buckets["foods"].append(label)
+            buckets["packaged"].append(label)
+        elif item_type == "homemade":
             buckets["foods"].append(label)
         else:
             buckets["other"].append(label)

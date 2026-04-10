@@ -6,13 +6,12 @@ import { fetchRecords, getDashboardDocumentUrl } from "@/lib/api";
 import VetVisitCard from "./VetVisitCard";
 import DocumentViewer from "./DocumentViewer";
 
-type RecordsTabId = "vet_visits" | "lab_reports" | "imaging" | "whatsapp";
+type RecordsTabId = "vet_visits" | "lab_reports" | "imaging";
 
 const RECORDS_TABS: Array<{ id: RecordsTabId; label: string }> = [
   { id: "vet_visits", label: "Vet Visit" },
   { id: "lab_reports", label: "Lab Report" },
   { id: "imaging", label: "Imaging" },
-  { id: "whatsapp", label: "WhatsApp Chat" },
 ];
 
 interface RecordsViewProps {
@@ -271,7 +270,10 @@ export default function RecordsView({ token, petName, onBack }: RecordsViewProps
     if (!data?.records || activeTab === "vet_visits") return [];
 
     const getDisplayTab = (recordType: string): RecordsTabId | null => {
-      if (recordType === "lab_reports" || recordType === "imaging" || recordType === "whatsapp") return recordType;
+      // "whatsapp" typed records are re-mapped to lab_reports since they are
+      // uploaded medical documents classified by channel rather than content.
+      if (recordType === "whatsapp") return "lab_reports";
+      if (recordType === "lab_reports" || recordType === "imaging") return recordType;
       return null;
     };
 
@@ -283,10 +285,6 @@ export default function RecordsView({ token, petName, onBack }: RecordsViewProps
     if (activeTab === "vet_visits") {
       const n = data.vet_visits?.length ?? 0;
       return `${n} ${n === 1 ? "visit" : "visits"}`;
-    }
-    if (activeTab === "whatsapp") {
-      const n = filteredRecords.length;
-      return `${n} ${n === 1 ? "message" : "messages"}`;
     }
     const n = filteredRecords.length;
     return `${n} ${n === 1 ? "document" : "documents"}`;
@@ -352,10 +350,7 @@ export default function RecordsView({ token, petName, onBack }: RecordsViewProps
     }
 
     if (filteredRecords.length === 0) {
-      const emptyText = activeTab === "whatsapp"
-        ? "No WhatsApp documents shared yet."
-        : "No records in this section yet.";
-      return <EmptyState text={emptyText} />;
+      return <EmptyState text="No records in this section yet." />;
     }
 
     return (

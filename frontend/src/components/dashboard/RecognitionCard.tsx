@@ -67,30 +67,35 @@ export default function RecognitionCard({ data, onGoToRecords, isReturning = fal
       {(!isReturning || expanded) && (
         <>
           <div style={{ fontSize: 13, color: "var(--t2)", marginBottom: 12, marginTop: 6, lineHeight: 1.5 }}>
-            We reviewed <strong style={{ color: "var(--t1)" }}>{reportCount} reports</strong> and WhatsApp chat and identified {data.pet.name}
-            &apos;s current care routine.
-            {!isReturning && (
+            {reportCount > 0 ? (
               <>
-                {" "}
-                <button
-                  type="button"
-                  onClick={onGoToRecords}
-                  style={{
-                    color: "var(--t3)",
-                    textDecoration: "underline",
-                    textDecorationStyle: "dashed",
-                    textUnderlineOffset: 3,
-                    cursor: "pointer",
-                    fontSize: 12,
-                    fontWeight: 500,
-                    border: "none",
-                    background: "transparent",
-                    padding: 0,
-                  }}
-                >
-                  View all reports →
-                </button>
+                We reviewed <strong style={{ color: "var(--t1)" }}>{reportCount} {reportCount === 1 ? "report" : "reports"}</strong> and identified {data.pet.name}&apos;s current care routine.
+                {!isReturning && (
+                  <>
+                    {" "}
+                    <button
+                      type="button"
+                      onClick={onGoToRecords}
+                      style={{
+                        color: "var(--t3)",
+                        textDecoration: "underline",
+                        textDecorationStyle: "dashed",
+                        textUnderlineOffset: 3,
+                        cursor: "pointer",
+                        fontSize: 12,
+                        fontWeight: 500,
+                        border: "none",
+                        background: "transparent",
+                        padding: 0,
+                      }}
+                    >
+                      View all reports →
+                    </button>
+                  </>
+                )}
               </>
+            ) : (
+              <>We identified {data.pet.name}&apos;s current care routine.</>
             )}
           </div>
 
