@@ -484,6 +484,14 @@ export interface VetVisit {
   notes: string | null;
 }
 
+export interface RecordResult {
+  parameter: string;
+  value: string;
+  unit: string | null;
+  range: string | null;
+  flag: string | null;
+}
+
 export interface RecordItem {
   id: string;
   icon: string;
@@ -494,6 +502,8 @@ export interface RecordItem {
   tag_color: string;
   tag_bg: string;
   key_finding?: string;
+  results?: RecordResult[];
+  notes?: string | null;
 }
 
 export interface RecordsV2 {

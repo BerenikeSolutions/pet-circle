@@ -355,6 +355,12 @@ async def get_records(db: Session, pet: Pet) -> dict[str, Any]:
         pet.id,
         [document.id for document in non_prescription_docs],
     )
+    # Load conditions for non-prescription docs to surface notes in record cards
+    non_prescription_condition_map = _fetch_conditions_for_documents(
+        db,
+        pet.id,
+        [document.id for document in non_prescription_docs],
+    )
 
     vet_visits: list[dict[str, Any]] = []
     for document in sorted(prescription_docs, key=_sort_key_by_event_date, reverse=True):
@@ -398,6 +404,28 @@ async def get_records(db: Session, pet: Pet) -> dict[str, Any]:
                 # Default imaging to "All clear" when no diagnostic results
                 pass  # key_finding already set from _extract_lab_key_finding fallback
 
+        # Serialize diagnostic test results for inline expanded view
+        def _format_numeric(v: Decimal | None) -> str:
+            if v is None:
+                return ""
+            f = float(v)
+            return str(int(f)) if f == int(f) else f"{f:g}"
+
+        serialized_results = [
+            {
+                "parameter": result.parameter_name,
+                "value": _format_numeric(result.value_numeric) if result.value_numeric is not None else (result.value_text or ""),
+                "unit": result.unit,
+                "range": result.reference_range,
+                "flag": result.status_flag,
+            }
+            for result in linked_results
+        ]
+
+        # Notes from any conditions linked to this document
+        linked_conditions = non_prescription_condition_map.get(document.id, [])
+        notes = _extract_notes(linked_conditions)
+
         records.append(
             {
                 "id": str(document.id),
@@ -409,6 +437,8 @@ async def get_records(db: Session, pet: Pet) -> dict[str, Any]:
                 "tag_color": tag_color,
                 "tag_bg": tag_bg,
                 "key_finding": key_finding,
+                "results": serialized_results,
+                "notes": notes,
             }
         )
 
