@@ -25,36 +25,40 @@ export default function BottomSheet({ open, onClose, title, children }: BottomSh
         className="relative w-full max-w-[430px] bg-white rounded-t-[20px] p-5 pb-8 animate-slideUp"
         style={{ maxHeight: '85vh', overflowY: 'auto' }}
       >
+        {/* Drag handle */}
         <div className="w-10 h-1 bg-gray-300 rounded-full mx-auto mb-4" />
 
-        {/* Close button */}
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close"
-          style={{
-            position: 'absolute',
-            top: 16,
-            right: 16,
-            width: 32,
-            height: 32,
-            borderRadius: '50%',
-            border: '1.5px solid #e0e0e0',
-            background: '#f5f5f5',
-            fontSize: 18,
-            lineHeight: 1,
-            cursor: 'pointer',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: '#555',
-            fontWeight: 400,
-          }}
-        >
-          &times;
-        </button>
+        {/* Header row: title + close button inline */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+          {title
+            ? <h3 style={{ fontSize: 17, fontWeight: 700, color: '#111', margin: 0 }}>{title}</h3>
+            : <span />
+          }
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            style={{
+              width: 32,
+              height: 32,
+              borderRadius: '50%',
+              border: '1.5px solid #e0e0e0',
+              background: '#f5f5f5',
+              fontSize: 18,
+              lineHeight: 1,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: '#555',
+              fontWeight: 400,
+              flexShrink: 0,
+            }}
+          >
+            &times;
+          </button>
+        </div>
 
-        {title && <h3 className="text-lg font-bold text-gray-900 mb-4">{title}</h3>}
         {children}
       </div>
     </div>

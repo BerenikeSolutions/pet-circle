@@ -51,8 +51,11 @@ export default function ProductSelectorCard({
     setQty(1);
   }, [products]);
 
+  // Fallback: if useEffect hasn't fired yet, derive the active SKU directly from props
+  const activeSku = selectedSku || products.find((p) => p.in_stock)?.sku_id || products[0]?.sku_id || "";
+
   const handleAdd = () => {
-    if (selectedSku) onAddToCart(selectedSku, qty);
+    if (activeSku) onAddToCart(activeSku, qty);
   };
 
   const displayName = (p: ResolvedProduct) =>
@@ -62,7 +65,7 @@ export default function ProductSelectorCard({
     <BottomSheet open={open} onClose={onClose} title="Select Product">
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {products.map((p) => {
-          const isSelected = p.sku_id === selectedSku;
+          const isSelected = p.sku_id === activeSku;
           const hasDiscount = p.mrp > p.discounted_price;
 
           return (
@@ -87,7 +90,7 @@ export default function ProductSelectorCard({
                 value={p.sku_id}
                 checked={isSelected}
                 disabled={!p.in_stock}
-                onChange={() => setSelectedSku(p.sku_id)}
+                onChange={() => { setSelectedSku(p.sku_id); }}
                 style={{ marginTop: 3, accentColor: "var(--brand-primary)" }}
               />
 
@@ -271,16 +274,16 @@ export default function ProductSelectorCard({
         <button
           type="button"
           onClick={handleAdd}
-          disabled={!selectedSku}
+          disabled={!activeSku}
           style={{
             padding: "10px 24px",
             borderRadius: 10,
             border: "none",
-            background: selectedSku ? "var(--brand-primary)" : "var(--border)",
+            background: activeSku ? "var(--brand-primary)" : "var(--border)",
             fontSize: 14,
             fontWeight: 700,
             color: "var(--white)",
-            cursor: selectedSku ? "pointer" : "default",
+            cursor: activeSku ? "pointer" : "default",
           }}
         >
           Add to cart

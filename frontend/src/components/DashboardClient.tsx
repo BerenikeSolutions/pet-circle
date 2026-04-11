@@ -141,17 +141,18 @@ function DashboardInner({ token }: { token: string }) {
     mrp: number,
     icon: string,
     section: string,
+    quantity = 1,
   ) => {
     setCart((prev) => {
       const existing = prev.find((entry) => entry.id === skuId);
       if (existing) {
         return prev.map((entry) =>
-          entry.id === skuId ? { ...entry, quantity: entry.quantity + 1 } : entry
+          entry.id === skuId ? { ...entry, quantity: entry.quantity + quantity } : entry
         );
       }
       return [
         ...prev,
-        { id: skuId, name, quantity: 1, price, mrp: mrp > price ? mrp : undefined, icon, section },
+        { id: skuId, name, quantity, price, mrp: mrp > price ? mrp : undefined, icon, section },
       ];
     });
   }, []);

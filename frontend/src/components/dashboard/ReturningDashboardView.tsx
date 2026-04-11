@@ -112,20 +112,25 @@ export default function ReturningDashboardView({
   }, [token, onAddToCart]);
 
   const handleSelectorAdd = useCallback(async (skuId: string, quantity: number) => {
+    const product = selectorProducts.find((p) => p.sku_id === skuId);
+
+    // Optimistic update — close popup and add to cart immediately using local product data
+    const icon = product?.category === "food" ? "🥣" : "💊";
+    const name = product?.product_line || product?.brand_name || skuId;
+    const price = product?.discounted_price ?? 0;
+    const mrp = product?.mrp ?? price;
+    onAddBySku(skuId, name, price, mrp, icon, pendingSectionTitle, quantity);
+    setSelectorOpen(false);
+
+    // Sync with backend in background (best-effort)
     try {
-      const res = await fetch(`${API_BASE}/dashboard/${token}/cart/add`, {
+      await fetch(`${API_BASE}/dashboard/${token}/cart/add`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sku_id: skuId, quantity }),
       });
-      if (!res.ok) throw new Error("add to cart failed");
-      const data = await res.json();
-      const product = selectorProducts.find((p) => p.sku_id === skuId);
-      const mrp = product?.mrp ?? data.price;
-      onAddBySku(skuId, data.name, data.price, mrp, data.icon || "📦", pendingSectionTitle);
-      setSelectorOpen(false);
     } catch (e) {
-      console.error("Failed to add to cart:", e);
+      console.error("Failed to sync cart with backend:", e);
     }
   }, [token, selectorProducts, pendingSectionTitle, onAddBySku]);
 

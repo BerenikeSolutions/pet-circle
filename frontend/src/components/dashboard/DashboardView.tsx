@@ -27,7 +27,7 @@ export interface DashboardViewProps {
   onGoToRecords: () => void;
   onGoToCart: () => void;
   onAddToCart: (item: CarePlanItem, sectionTitle: string) => void;
-  onAddBySku: (skuId: string, name: string, price: number, mrp: number, icon: string, section: string) => void;
+  onAddBySku: (skuId: string, name: string, price: number, mrp: number, icon: string, section: string, quantity?: number) => void;
 }
 
 function cartItemId(item: CarePlanItem, sectionTitle: string): string {
@@ -133,7 +133,7 @@ export default function DashboardView({
     const name = product?.product_line || product?.brand_name || skuId;
     const price = product?.discounted_price ?? 0;
     const mrp = product?.mrp ?? price;
-    onAddBySku(skuId, name, price, mrp, icon, pendingSectionTitle);
+    onAddBySku(skuId, name, price, mrp, icon, pendingSectionTitle, quantity);
     setSelectorOpen(false);
 
     // Sync with backend in background (best-effort)

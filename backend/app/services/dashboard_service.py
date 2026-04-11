@@ -581,7 +581,12 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         document_data.append({
             "id": str(doc.id),
             "document_name": doc.document_name,
-            "document_category": _resolve_document_category(doc.document_category, inferred_category),
+            "document_category": _resolve_document_category(
+                doc.document_category,
+                inferred_category,
+                document_name=doc.document_name,
+                file_path=doc.file_path,
+            ),
             "doctor_name": doc.doctor_name,
             "hospital_name": doc.hospital_name,
             "mime_type": doc.mime_type,

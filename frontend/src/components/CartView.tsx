@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import BottomSheet from "./ui/BottomSheet";
 import ProductSelectorCard, { type ResolvedProduct } from "./dashboard/ProductSelectorCard";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -12,7 +13,7 @@ interface CartViewProps {
   onUpdateQuantity: (id: string, quantity: number) => void;
   onRemoveItem: (id: string) => void;
   onProceedToCheckout: () => void;
-  onAddBySku: (skuId: string, name: string, price: number, mrp: number, icon: string, section: string) => void;
+  onAddBySku: (skuId: string, name: string, price: number, mrp: number, icon: string, section: string, quantity?: number) => void;
 }
 
 export interface CartItem {
@@ -62,6 +63,7 @@ export default function CartView({
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
+  const [resultsSheetOpen, setResultsSheetOpen] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ProductSelectorCard state
@@ -71,6 +73,7 @@ export default function CartView({
   const runSearch = useCallback(async (q: string) => {
     if (q.length < 2) {
       setSearchResults([]);
+      setResultsSheetOpen(false);
       return;
     }
     setSearchLoading(true);
@@ -80,7 +83,9 @@ export default function CartView({
       );
       if (!res.ok) throw new Error("search failed");
       const data = await res.json();
-      setSearchResults(data.results || []);
+      const results = data.results || [];
+      setSearchResults(results);
+      if (results.length > 0) setResultsSheetOpen(true);
     } catch {
       setSearchResults([]);
     } finally {
@@ -108,7 +113,7 @@ export default function CartView({
     return Object.entries(groups).map(([brand, skus]) => ({ brand, skus }));
   }, [searchResults]);
 
-  // Open ProductSelectorCard with the brand's SKUs
+  // Close results sheet and open the variant picker for the chosen brand
   const handleSearchGroupAdd = useCallback((skus: SearchResult[]) => {
     const products: ResolvedProduct[] = skus.map((r) => ({
       sku_id: r.sku_id,
@@ -124,6 +129,7 @@ export default function CartView({
       vet_diet_flag: false,
       is_highlighted: false,
     }));
+    setResultsSheetOpen(false);
     setSelectorProducts(products);
     setSelectorOpen(true);
   }, []);
@@ -137,7 +143,7 @@ export default function CartView({
     const name = product?.product_line || product?.brand_name || skuId;
     const price = product?.discounted_price ?? 0;
     const mrp = product?.mrp ?? price;
-    onAddBySku(skuId, name, price, mrp, icon, "Search");
+    onAddBySku(skuId, name, price, mrp, icon, "Search", quantity);
     setSelectorOpen(false);
     setSearchQuery("");
     setSearchResults([]);
@@ -249,71 +255,9 @@ export default function CartView({
               />
             )}
           </div>
-
           {searchQuery.length >= 2 && !searchLoading && groupedResults.length === 0 && (
             <div style={{ marginTop: 10, fontSize: 13, color: "var(--t3)", textAlign: "center" }}>
               No products found
-            </div>
-          )}
-
-          {/* Show one row per brand — clicking Add opens the variant popup */}
-          {groupedResults.length > 0 && (
-            <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-              {groupedResults.map(({ brand, skus }) => {
-                const firstSku = skus[0];
-                const allOutOfStock = skus.every((s) => !s.in_stock);
-                const alreadyInCart = skus.some((s) => cartSkuIds.has(s.sku_id));
-                const minPrice = Math.min(...skus.map((s) => s.discounted_price));
-                const maxMrp = Math.max(...skus.map((s) => s.mrp));
-                const hasDiscount = maxMrp > minPrice;
-                return (
-                  <div
-                    key={brand}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 10,
-                      padding: "10px 0",
-                      borderBottom: "1px solid var(--border)",
-                    }}
-                  >
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--t1)" }}>{brand}</div>
-                      <div style={{ fontSize: 11, color: "var(--t3)" }}>
-                        {skus.length === 1 ? firstSku.pack_size : `${skus.length} options available`}
-                      </div>
-                      <div style={{ display: "flex", alignItems: "baseline", gap: 5, marginTop: 2 }}>
-                        {hasDiscount && (
-                          <span style={{ fontSize: 11, color: "var(--t3)", textDecoration: "line-through" }}>
-                            Rs {maxMrp.toLocaleString("en-IN")}
-                          </span>
-                        )}
-                        <span style={{ fontSize: 13, fontWeight: 700, color: "var(--brand-primary)" }}>
-                          from Rs {minPrice.toLocaleString("en-IN")}
-                        </span>
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      disabled={allOutOfStock || alreadyInCart}
-                      onClick={() => handleSearchGroupAdd(skus)}
-                      style={{
-                        padding: "7px 14px",
-                        borderRadius: 8,
-                        border: "none",
-                        background: alreadyInCart ? "var(--border)" : allOutOfStock ? "var(--border)" : "var(--brand-primary)",
-                        color: "var(--white)",
-                        fontSize: 12,
-                        fontWeight: 700,
-                        cursor: allOutOfStock || alreadyInCart ? "default" : "pointer",
-                        flexShrink: 0,
-                      }}
-                    >
-                      {alreadyInCart ? "In Cart" : allOutOfStock ? "Out of Stock" : "Add"}
-                    </button>
-                  </div>
-                );
-              })}
             </div>
           )}
         </div>
@@ -403,7 +347,86 @@ export default function CartView({
         </div>
       </div>
 
-      {/* Product variant popup — same pattern as dashboard */}
+      {/* Search results bottom sheet */}
+      <BottomSheet
+        open={resultsSheetOpen}
+        onClose={() => {
+          setResultsSheetOpen(false);
+          setSearchQuery("");
+          setSearchResults([]);
+        }}
+        title={`Results for "${searchQuery}"`}
+      >
+        {groupedResults.length === 0 ? (
+          <div style={{ textAlign: "center", fontSize: 13, color: "var(--t3)", padding: "16px 0" }}>
+            No products found
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 16 }}>
+            {groupedResults.map(({ brand, skus }) => {
+              const firstSku = skus[0];
+              const allOutOfStock = skus.every((s) => !s.in_stock);
+              const alreadyInCart = skus.some((s) => cartSkuIds.has(s.sku_id));
+              const minPrice = Math.min(...skus.map((s) => s.discounted_price));
+              const maxMrp = Math.max(...skus.map((s) => s.mrp));
+              const hasDiscount = maxMrp > minPrice;
+              return (
+                <div
+                  key={brand}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "12px 0",
+                    borderBottom: "1px solid var(--border)",
+                  }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: "var(--t1)" }}>{brand}</div>
+                    <div style={{ fontSize: 11, color: "var(--t3)", marginTop: 2 }}>
+                      {skus.length === 1 ? firstSku.pack_size : `${skus.length} options available`}
+                    </div>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 5, marginTop: 3 }}>
+                      {hasDiscount && (
+                        <span style={{ fontSize: 11, color: "var(--t3)", textDecoration: "line-through" }}>
+                          Rs {maxMrp.toLocaleString("en-IN")}
+                        </span>
+                      )}
+                      <span style={{ fontSize: 13, fontWeight: 700, color: "var(--brand-primary)" }}>
+                        from Rs {minPrice.toLocaleString("en-IN")}
+                      </span>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={allOutOfStock || alreadyInCart}
+                    onClick={() => handleSearchGroupAdd(skus)}
+                    style={{
+                      padding: "8px 16px",
+                      borderRadius: 8,
+                      border: "none",
+                      background: alreadyInCart
+                        ? "var(--border)"
+                        : allOutOfStock
+                        ? "var(--border)"
+                        : "var(--brand-primary)",
+                      color: "var(--white)",
+                      fontSize: 13,
+                      fontWeight: 700,
+                      cursor: allOutOfStock || alreadyInCart ? "default" : "pointer",
+                      flexShrink: 0,
+                    }}
+                  >
+                    {alreadyInCart ? "In Cart" : allOutOfStock ? "Out of Stock" : "Add"}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </BottomSheet>
+
+      {/* Variant picker bottom sheet */}
       <ProductSelectorCard
         open={selectorOpen}
         onClose={() => setSelectorOpen(false)}
