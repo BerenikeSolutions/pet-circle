@@ -35,12 +35,12 @@ MAX_UPLOAD_BYTES: int = MAX_UPLOAD_MB * 1024 * 1024
 
 # Maximum number of file uploads allowed per pet per day.
 # Prevents abuse and controls storage costs.
-MAX_UPLOADS_PER_PET_PER_DAY: int = 10
+MAX_UPLOADS_PER_PET_PER_DAY: int = 1000
 
 # Maximum number of pending (unprocessed) documents allowed per pet at a time.
 # If a pet already has this many pending documents, new uploads are rejected
 # until existing ones finish extraction. Prevents queue flooding.
-MAX_PENDING_DOCS_PER_PET: int = 5
+MAX_PENDING_DOCS_PER_PET: int = 100
 
 # Maximum number of concurrent background extraction tasks system-wide.
 # Sized to allow multiple pet batches to extract in parallel while

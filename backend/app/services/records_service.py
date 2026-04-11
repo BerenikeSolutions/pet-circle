@@ -137,6 +137,54 @@ def _is_vaccine_visit(conditions: list[Condition]) -> bool:
     return False
 
 
+def _canonical_display_name(document: Document) -> str:
+    """
+    Generate canonical display name for a document with MonYY date suffix.
+
+    Returns: e.g., "BloodReport_Sep25", "Vaccination_Apr26", "VetPrescription_Jan25"
+    """
+    category = (document.document_category or "").strip().lower()
+    doc_name = (document.document_name or "").strip().lower()
+
+    # Determine base name based on category and keywords
+    if category == "prescription":
+        base_name = "VetPrescription"
+    elif category == "vaccination" or any(kw in doc_name for kw in _VACCINE_DOC_KEYWORDS):
+        base_name = "Vaccination"
+    elif category == "imaging" or any(pattern.search(doc_name) for pattern in _IMAGING_PATTERNS):
+        # Imaging subtypes
+        if any(kw in doc_name for kw in ("x-ray", "xray", "x ray")):
+            base_name = "XRay"
+        elif any(kw in doc_name for kw in ("ultrasound", "usg")):
+            base_name = "Ultrasound"
+        elif any(kw in doc_name for kw in ("ecg", "ekg")):
+            base_name = "ECG"
+        elif any(kw in doc_name for kw in ("eeg",)):
+            base_name = "EEG"
+        else:
+            base_name = "ImagingReport"
+    elif category == "diagnostic" or category in ("blood report", "urine report", "pcr & parasite panel", "lab report", "fecal analysis"):
+        # Lab report subtypes
+        if any(kw in doc_name for kw in _BLOOD_KEYWORDS):
+            base_name = "BloodReport"
+        elif any(kw in doc_name for kw in _URINE_KEYWORDS):
+            base_name = "UrineReport"
+        elif "fecal" in doc_name:
+            base_name = "FecalAnalysisReport"
+        else:
+            base_name = "LabReport"
+    else:
+        # Fallback to generic lab report name
+        base_name = "LabReport"
+
+    # Append date suffix if event_date exists
+    if document.event_date:
+        date_suffix = document.event_date.strftime("%b%y").lower()
+        return f"{base_name}_{date_suffix}"
+
+    return base_name
+
+
 def _extract_rx_summary(conditions: list[Condition]) -> str:
     """Build a compact Rx chip summary combining prescribed tests and medications.
 
@@ -529,7 +577,7 @@ async def get_records(db: Session, pet: Pet) -> dict[str, Any]:
                 "id": str(document.id),
                 "icon": icon,
                 "type": record_type,
-                "title": document.document_name or "Health record",
+                "title": _canonical_display_name(document),
                 "date": document.event_date.isoformat() if document.event_date else None,
                 "tag": style["tag"],
                 "tag_color": tag_color,

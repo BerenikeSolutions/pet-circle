@@ -408,7 +408,10 @@ def _infer_document_category(
     }
     if item_names & {"rabies vaccine", "core vaccine", "feline core"}:
         return "Vaccination"
-    if "preventive blood test" in item_names:
+    # "Preventive Blood Test" item alone does NOT imply the document is a blood report —
+    # prescriptions ordering blood tests also produce this item. Only infer "Blood Report"
+    # when actual diagnostic_values (lab results with reference ranges) are also present.
+    if "preventive blood test" in item_names and diagnostic_values:
         return "Blood Report"
     if any(item_name in item_names for item_name in ("annual checkup", "dental check", "deworming", "tick/flea")):
         return "Prescription"
@@ -423,6 +426,9 @@ def _resolve_document_category(
     file_path: str | None = None,
     clinical_exam: dict | None = None,
     conditions: list[dict] | None = None,
+    doctor_name: str | None = None,
+    clinic_name: str | None = None,
+    diagnostic_values: list[dict] | None = None,
 ) -> str:
     """Prefer inferred category when GPT returned blank, Other, or a coarse legacy value.
 
@@ -432,8 +438,11 @@ def _resolve_document_category(
        extraction prompt and beat any GPT category, including "Blood Report"
        (which GPT may return when a prescription lists in-clinic test values).
     2. If filename/document name has a strong keyword that contradicts GPT → use keyword signal.
-    3. If raw is None / "Other" and inferred is specific → use inferred.
-    4. Otherwise trust GPT's (normalized) raw_category.
+    3. Vet-origin signal: doctor_name/clinic_name present AND GPT returned None/"Other",
+       or GPT returned "Blood Report" but no actual diagnostic_values were extracted
+       (ordering tests ≠ reporting results) → "Prescription".
+    4. If raw is None / "Other" and inferred is specific → use inferred.
+    5. Otherwise trust GPT's (normalized) raw_category.
 
     This keeps the 5 specific categories (Blood Report, Urine Report, Imaging,
     Prescription, PCR & Parasite Panel) authoritative over GPT's legacy "Diagnostic".
@@ -458,6 +467,20 @@ def _resolve_document_category(
         return "Imaging"
     if any(kw in combined for kw in ("urine culture", "urinalysis", "urine test")):
         return "Urine Report"
+
+    # Vet-origin signal: if a doctor or clinic name is identified, the document came from a
+    # vet's office. Use this to rescue two failure modes:
+    #   a) GPT returned None/"Other" — almost always a vet visit record.
+    #   b) GPT returned "Blood Report" but extracted zero diagnostic_values — the document
+    #      is ORDERING tests (e.g. "Get CBC done"), not REPORTING results. Actual lab reports
+    #      always produce diagnostic_values rows (parameter values + reference ranges).
+    has_vet_origin = bool(doctor_name or clinic_name)
+    has_actual_results = bool(diagnostic_values)
+    if has_vet_origin:
+        if raw_category in (None, "Other"):
+            return "Prescription"
+        if raw_category == "Blood Report" and not has_actual_results:
+            return "Prescription"
 
     # If GPT returned a specific known category, trust it.
     if raw_category and raw_category not in (None, "Other"):
@@ -575,7 +598,7 @@ def _append_single_extracted_date_to_filename(
     Preserve original filename and append a date only when extraction has one unique date.
 
     Rules:
-      - If exactly one valid unique `last_done_date` exists, append it to the filename.
+      - If exactly one valid unique `last_done_date` exists, append it to the filename in MonYY format (e.g., "Sep25").
       - If zero or multiple unique dates exist, return the original filename unchanged.
       - If the filename already contains that date, return unchanged (idempotent).
     """
@@ -596,15 +619,20 @@ def _append_single_extracted_date_to_filename(
     if len(unique_dates) != 1:
         return original_filename
 
-    only_date = next(iter(unique_dates))
-    if only_date in original_filename:
+    only_date_iso = next(iter(unique_dates))
+
+    # Convert to MonYY format (e.g., "Sep25" for September 2025)
+    date_obj = datetime.strptime(only_date_iso, "%Y-%m-%d")
+    date_suffix = date_obj.strftime("%b%y").lower()  # e.g., "sep25"
+
+    if date_suffix in original_filename:
         return original_filename
 
     # Append date before extension when present.
     dot = original_filename.rfind(".")
     if dot > 0:
-        return f"{original_filename[:dot]}_{only_date}{original_filename[dot:]}"
-    return f"{original_filename}_{only_date}"
+        return f"{original_filename[:dot]}_{date_suffix}{original_filename[dot:]}"
+    return f"{original_filename}_{date_suffix}"
 
 
 def _extract_date_from_filename(file_path: str | None) -> str | None:
@@ -829,6 +857,13 @@ EXTRACTION_SYSTEM_PROMPT = (
     "A document that only lists test RESULTS from a diagnostic lab (with reference ranges and status flags) "
     "is a 'Blood Report' / 'Urine Report' / etc., NOT a Prescription. The distinguishing signal is: "
     "ordered tests → Prescription; reported test results → Lab report.\n"
+    "- Handwritten medication lists are Prescriptions: A handwritten page listing drug names with doses "
+    "and frequencies (e.g., 'Tab Pan 40mg BID', 'Tab Toxomox 500mg AIT', 'Tab Gabapentin 600mg') is ALWAYS "
+    "a Prescription even if no clinic letterhead or formal diagnosis is visible. Set document_category to "
+    "'Prescription'. Place these medications inside a conditions[] entry using a descriptive condition_name "
+    "such as 'Treatment course' or 'Post-operative care' — never leave prescribed medications unclassified.\n"
+    "- Prescribed non-preventive medications (antibiotics, analgesics, antacids, etc.) must NEVER go into "
+    "preventive_medications[]. They belong in conditions[].medications[].\n"
     "- For Prescription documents: ALWAYS populate clinical_exam with weight, temperature, pulse, "
     "respiration, mucous membranes, and any other examination notes written on the document. "
     "Leave individual fields as null when not present. Omit clinical_exam (or set null) for non-prescription documents.\n"
@@ -1938,6 +1973,9 @@ async def extract_and_process_document(
             file_path=document.file_path,
             clinical_exam=metadata.get("clinical_exam"),
             conditions=metadata.get("conditions"),
+            doctor_name=metadata.get("doctor_name"),
+            clinic_name=metadata.get("clinic_name"),
+            diagnostic_values=metadata.get("diagnostic_values"),
         )
         results["document_category"] = document_category
 

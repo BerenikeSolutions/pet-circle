@@ -1,0 +1,23 @@
+Records Renaming 
+
+Right now we will not got into subcategory of test, three categories only: 
+
+- Urine Report
+- ⁠Blood Report
+- ⁠Fecal Analysis Report
+- ⁠anything else name it “LabReport”
+
+Imaging , categories:
+- ⁠XRay
+- ⁠Ultrasound
+- ⁠ECG
+- ⁠EEG
+- ⁠anything Else tag as “Imaging Report”
+
+- Vaccination cards image will be “Vaccination”
+- ⁠prescription will be “Vet Prescription”
+
+*Naming Convention will be as follows*
+
+1. BloodReport_Sep25 ( MONYY format ) 
+2. UrineReport_⁠Mar24

@@ -127,11 +127,49 @@ export default function CartView({
   return (
     <div className="min-h-screen" style={{ background: "var(--bg-app)" }}>
       <div className="app">
-        <div className="vh">
-          <button className="back-btn" onClick={onBack} type="button" aria-label="Back to dashboard">
-            Back
+        <div
+          style={{
+            padding: '14px 16px',
+            borderBottom: '1px solid var(--border, #e0e0e0)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            background: 'var(--white, #fff)',
+          }}
+        >
+          <button
+            onClick={onBack}
+            style={{
+              width: 34,
+              height: 34,
+              borderRadius: '50%',
+              border: '1.5px solid var(--border, #e0e0e0)',
+              background: 'var(--white, #fff)',
+              fontSize: 16,
+              cursor: 'pointer',
+              fontWeight: 600,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: 'var(--t1, #111)',
+              lineHeight: 1,
+            }}
+            type="button"
+            aria-label="Back"
+          >
+            &larr;
           </button>
-          <div className="vh-title">Your Cart</div>
+          <div
+            style={{
+              fontSize: 28,
+              fontWeight: 700,
+              color: 'var(--t1, #000)',
+              letterSpacing: '-0.01em',
+              lineHeight: 1.1,
+            }}
+          >
+            Your Cart
+          </div>
         </div>
 
         {/* Search bar */}

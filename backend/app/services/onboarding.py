@@ -517,10 +517,15 @@ async def handle_onboarding_step(
         profile_name = user.full_name if user.full_name != "_pending" else "there"
         await send_fn(
             db, mobile,
-            f"Hello {profile_name}! 👋 Welcome to PetCircle — your pet's personalised "
-            f"care companion, right here on WhatsApp. I'm here to make sure your pet "
-            f"never misses the care they deserve.\n\n"
-            f"Let's start — what's your pet's name?",
+            f"Hi {profile_name}, welcome to PetCircle — your pet care companion.\n\n"
+            f"We're here to make pet parenting simpler, helping you stay on top of your pet's health, nutrition, and everyday wellness.\n\n"
+            f"Here's how we support you:\n"
+            f"• Organise your pet's complete health records\n"
+            f"• Send timely reminders with one-click reordering\n"
+            f"• Deliver personalised diet and nutrition recommendations\n"
+            f"• Highlight health patterns and support better vet conversations\n\n"
+            f"Because your pet deserves the very best care.\n\n"
+            f"Let's get started — what's your pet's name?",
         )
 
 
@@ -1370,14 +1375,6 @@ async def _step_gender_weight(db, user, text, send_fn):
                 age_years = float(nums[0])
             except ValueError:
                 pass
-
-    life_stage = _compute_life_stage(age_years)
-    if life_stage:
-        stage_name, one_liner = life_stage
-        await send_fn(
-            db, mobile,
-            f"{pet.name} is a {stage_name} — {one_liner}",
-        )
 
     # Advance to food type question.
     # Start at -1 so a queued message that arrives before the user sees the
@@ -3555,7 +3552,10 @@ async def _parse_preventive_care(text: str) -> dict:
         "- Return deworming and flea_tick as objects with 'date', 'medicine', and "
         "'prevention_targets' keys.\n"
         "- prevention_targets must be an array containing one or both of: 'deworming', "
-        "'flea_tick', based on what the medicine covers.\n"
+        "'flea_tick'. Always include ALL categories listed for that medicine in the "
+        "MEDICINE COVERAGE GUIDE below, regardless of how the user described it. "
+        "For example, if the guide says a medicine covers both flea_tick and deworming, "
+        "include both even if the user only mentioned one.\n"
         f"{medicine_guide}\n"
         "- If no medicine is provided, use an empty prevention_targets array.\n\n"
         'Return ONLY valid JSON, no markdown: '
@@ -3837,7 +3837,7 @@ def _normalize_preventive_medicine_categories(parsed: dict) -> dict:
                 elif token in {"deworm", "deworming", "worm", "worms"}:
                     explicit_categories.add("deworming")
 
-        categories = explicit_categories or _get_preventive_categories_for_medicine(medicine)
+        categories = explicit_categories | _get_preventive_categories_for_medicine(medicine)
         if not categories:
             continue
 
@@ -3904,25 +3904,6 @@ def _normalize_preventive_medicine_categories(parsed: dict) -> dict:
         final_missing.append("blood_test")
     normalized["missing"] = final_missing
     return normalized
-
-
-def _compute_life_stage(age_years: float | None) -> tuple[str, str] | None:
-    """
-    Compute life stage and warm one-liner from age in years.
-
-    Returns (stage_name, one_liner) or None if age is unknown.
-    """
-    if age_years is None:
-        return None
-
-    if age_years < 1:
-        return ("Puppy", "still finding their feet and learning fast!")
-    elif age_years < 2:
-        return ("Junior", "growing into themselves — curious, energetic, and full of surprises!")
-    elif age_years < 7:
-        return ("Adult", "right in their prime and full of energy!")
-    else:
-        return ("Senior", "been around long enough to know exactly how to wrap you around their paw. 🐾")
 
 
 def _infer_species_from_breed(breed_key: str) -> str | None:
@@ -4523,7 +4504,7 @@ async def _generate_care_plan_message(
     # Build "x vaccines and y preventive care items" label for care plan message.
     if vaccine_count > 0 and other_preventive_count > 0:
         _preventive_label = (
-            f"{vaccine_count} vaccine{'s' if vaccine_count != 1 else ''} and "
+            f"{vaccine_count} vaccine{'s' if vaccine_count != 1 else ''} & "
             f"{other_preventive_count} preventive care item"
             f"{'s' if other_preventive_count != 1 else ''}"
         )
@@ -4586,11 +4567,11 @@ async def _generate_care_plan_message(
         if top_names:
             if len(top_names) == 1:
                 supplement_rec = (
-                    f"We'd suggest adding {top_names[0]} supplement based on {name}'s current diet analysis."
+                    f"{name}'s current diet is wholesome, based on {name}'s age & conditions we recommend adding {top_names[0]}"
                 )
             else:
                 supplement_rec = (
-                    f"We'd suggest adding {top_names[0]} and {top_names[1]} supplements based on {name}'s current diet analysis."
+                    f"{name}'s current diet is wholesome, based on {name}'s age & conditions we recommend adding {top_names[0]} & {top_names[1]}"
                 )
         elif missing_micros and existing_supp_labels:
             supplement_rec = (
@@ -4630,8 +4611,8 @@ async def _generate_care_plan_message(
             fallback_supp = missing_candidates[0]
             if has_food:
                 supplement_rec = (
-                    f"We'd suggest adding {fallback_supp} based on {name}'s "
-                    f"diet and life stage."
+                    f"{name}'s current diet is wholesome, based on {name}'s "
+                    f"age & conditions we recommend adding {fallback_supp}"
                 )
             else:
                 supplement_rec = (
@@ -4639,11 +4620,11 @@ async def _generate_care_plan_message(
                     f"age and breed for coat health, joint support, and overall immunity."
                 )
         else:
-            fallback_supp = f"{missing_candidates[0]} and {missing_candidates[1]}"
+            fallback_supp = f"{missing_candidates[0]} & {missing_candidates[1]}"
             if has_food:
                 supplement_rec = (
-                    f"We'd suggest adding {fallback_supp} based on {name}'s "
-                    f"diet and life stage."
+                    f"{name}'s current diet is wholesome, based on {name}'s "
+                    f"age & conditions we recommend adding {fallback_supp}"
                 )
             else:
                 supplement_rec = (

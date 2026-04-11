@@ -8,6 +8,7 @@ import LifeStageCard from "./LifeStageCard";
 import HealthConditionsCard from "./HealthConditionsCard";
 import DietAnalysisCard from "./DietAnalysisCard";
 import CarePlanCard from "./CarePlanCard";
+import EndNoteCard from "./EndNoteCard";
 import CartFloater from "./CartFloater";
 import ProductSelectorCard, { type ResolvedProduct } from "./ProductSelectorCard";
 import { buildCarePlanBuckets, computeCarePlanCounts } from "./dashboard-utils";
@@ -160,6 +161,7 @@ export default function DashboardView({
         addedIds={addedIds}
         onAddToCart={handleAddToCart}
       />
+      <EndNoteCard petName={data.pet.name} onUploadClick={onGoToRecords} />
       <CartFloater unlocked={floaterUnlocked} cartCount={cartCount} totalPrice={cartTotal} onGoToCart={onGoToCart} />
       <ProductSelectorCard
         open={selectorOpen}

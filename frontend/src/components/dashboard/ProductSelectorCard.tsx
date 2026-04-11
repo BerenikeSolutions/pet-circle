@@ -252,6 +252,7 @@ export default function ProductSelectorCard({
           justifyContent: hideSearchMore ? "flex-end" : "space-between",
           gap: 10,
           marginTop: 12,
+          marginBottom: 70,
         }}
       >
         {!hideSearchMore && (
