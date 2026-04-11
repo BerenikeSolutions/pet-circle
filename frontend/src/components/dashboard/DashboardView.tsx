@@ -12,6 +12,7 @@ import EndNoteCard from "./EndNoteCard";
 import CartFloater from "./CartFloater";
 import ProductSelectorCard, { type ResolvedProduct } from "./ProductSelectorCard";
 import { buildCarePlanBuckets, computeCarePlanCounts } from "./dashboard-utils";
+import DocumentUploadModal from "./DocumentUploadModal";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -52,6 +53,7 @@ export default function DashboardView({
   const timerIdsRef = useRef<number[]>([]);
 
   // ProductSelectorCard state
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [selectorOpen, setSelectorOpen] = useState(false);
   const [selectorProducts, setSelectorProducts] = useState<ResolvedProduct[]>([]);
   const [selectorSignalLevel, setSelectorSignalLevel] = useState("");
@@ -161,7 +163,12 @@ export default function DashboardView({
         addedIds={addedIds}
         onAddToCart={handleAddToCart}
       />
-      <EndNoteCard petName={data.pet.name} onUploadClick={onGoToRecords} />
+      <EndNoteCard petName={data.pet.name} onUploadClick={() => setUploadModalOpen(true)} />
+      <DocumentUploadModal
+        open={uploadModalOpen}
+        token={token}
+        onClose={() => setUploadModalOpen(false)}
+      />
       <CartFloater unlocked={floaterUnlocked} cartCount={cartCount} totalPrice={cartTotal} onGoToCart={onGoToCart} />
       <ProductSelectorCard
         open={selectorOpen}

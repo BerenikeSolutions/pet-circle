@@ -1582,6 +1582,33 @@ async def _step_supplements_v2(db, user, text, send_fn):
         and normalized not in _NONE_KEYWORDS
         and normalized not in _NO_INPUTS
     ):
+        # Guard: if the user sent preventive care info (flea/tick brands, deworming
+        # medicines) during the supplements step, save it as a prefill for the upcoming
+        # preventive step rather than misclassifying it as a dietary supplement.
+        _PREVENTIVE_KEYWORDS = {
+            "flea", "tick", "deworming", "deworm", "worm", "simparica", "nexgard",
+            "bravecto", "frontline", "drontal", "milbemax", "panacur", "advocate",
+            "revolution", "credelio", "seresto", "advantix", "fipronil", "ivermectin",
+            "fenbendazole", "pyrantel", "albendazole", "prazitel", "verminator",
+            "blood test", "blood tests", "vaccine", "vaccination",
+        }
+        if any(kw in text_lower for kw in _PREVENTIVE_KEYWORDS):
+            prefill = await _parse_preventive_care(text)
+            existing_prefill = _get_onboarding_data(user).get("preventive_prefill") or {}
+            # Merge: only fill keys not already set.
+            for k, v in prefill.items():
+                if k != "missing" and v and not existing_prefill.get(k):
+                    existing_prefill[k] = v
+            _set_onboarding_data(user, "preventive_prefill", existing_prefill)
+            db.commit()
+            # Re-ask supplements so the user still gets a chance to answer it.
+            await send_fn(
+                db, mobile,
+                f"Got it, noted that for {pet.name}'s care plan! "
+                + _supplements_question_for_pet(pet.name, _get_onboarding_data(user)),
+            )
+            return
+
         # Guard against late-arriving meal messages: if the user sent food items
         # (e.g. "boiled egg whites") across multiple messages and the second message
         # arrived after the state already advanced to awaiting_supplements, detect this
@@ -1741,6 +1768,20 @@ async def _step_preventive(db, user, text, send_fn):
 
     # GPT parse preventive care.
     parsed = await _parse_preventive_care(text)
+
+    # Merge any preventive care data saved as prefill from an earlier step
+    # (e.g. user mentioned flea/tick brand during the supplements step).
+    prefill = od.get("preventive_prefill") or {}
+    if prefill:
+        for k, v in prefill.items():
+            if k != "missing" and v and not parsed.get(k):
+                parsed[k] = v
+        # Recalculate missing after merge.
+        all_fields_check = {"vaccines", "deworming", "flea_tick", "blood_test"}
+        parsed["missing"] = [
+            f for f in all_fields_check if not parsed.get(f) or parsed.get(f) == "none"
+        ]
+        _set_onboarding_data(user, "preventive_prefill", {})
 
     missing = parsed.get("missing", [])
 
@@ -3139,10 +3180,17 @@ async def _classify_prior_step_input(text: str, current_step: str) -> str:
         "question about diet or supplements. Classify this reply:\n"
         "- 'food': clearly describes regular food or meal items a pet eats "
         "(kibble, chicken, rice, eggs, vegetables, curd, etc.) — NOT health supplements\n"
-        "- 'supplement': clearly describes a health supplement the pet takes "
-        "(Omega-3, joint support, probiotics, calcium, fish oil capsule, etc.) — NOT regular food\n"
-        "- 'on_topic': appears to address the current question, OR is ambiguous\n\n"
-        "Only return 'food' or 'supplement' when CERTAIN. Default to 'on_topic' if unsure.\n\n"
+        "- 'supplement': clearly describes a DIETARY supplement the pet takes "
+        "(Omega-3, joint support, probiotics, calcium, fish oil capsule, multivitamin, etc.) "
+        "— NOT regular food, and NOT preventive care medicines. "
+        "IMPORTANT: flea/tick treatments (Simparica, NexGard, Bravecto, Frontline, Credelio, "
+        "Seresto, Advantix, Revolution, Advocate, Fipronil) and deworming medicines "
+        "(Drontal, Milbemax, Panacur, Prazitel, Verminator, Ivermectin, Fenbendazole, "
+        "Pyrantel, Albendazole) are NOT dietary supplements — classify these as 'on_topic'.\n"
+        "- 'on_topic': appears to address the current question, mentions preventive care "
+        "(flea/tick treatment, deworming, vaccines, blood tests), OR is ambiguous\n\n"
+        "Only return 'food' or 'supplement' when CERTAIN it is diet-related. "
+        "Default to 'on_topic' if unsure.\n\n"
         'Return ONLY valid JSON: {"classification": "food"|"supplement"|"on_topic"}'
     )
     try:
