@@ -978,10 +978,8 @@ async def _step_welcome(db, user, text, send_fn, message_data: dict | None = Non
     pet = Pet(user_id=user.id, name=pet_name, species="_pending")
     db.add(pet)
 
-    # Start at -1 so a queued message from the previous step gets a grace
-    # pass instead of triggering an immediate clarification.
     user.onboarding_state = "awaiting_breed_age"
-    _set_onboarding_data(user, "breed_age_attempts", -1)
+    _set_onboarding_data(user, "breed_age_attempts", 0)
     db.commit()
 
     await send_fn(
@@ -1008,13 +1006,6 @@ async def _step_breed_age(db, user, text, send_fn):
     od = _get_onboarding_data(user)
     attempts = od.get("breed_age_attempts", 0)
 
-    # Grace pass: queued message from the previous step arrived before the
-    # user could see the breed/age question. Discard it silently.
-    if attempts < 0:
-        _set_onboarding_data(user, "breed_age_attempts", 0)
-        db.commit()
-        return
-
     if text_lower == "waitlist" and od.get("non_dog_waitlist_prompted"):
         await send_fn(
             db,
@@ -1029,7 +1020,7 @@ async def _step_breed_age(db, user, text, send_fn):
         if detected_species == "dog":
             pet.species = "dog"
             _set_onboarding_data(user, "needs_species", False)
-            _set_onboarding_data(user, "gender_weight_attempts", -1)
+            _set_onboarding_data(user, "gender_weight_attempts", 0)
             user.onboarding_state = "awaiting_gender_weight"
             db.commit()
             await send_fn(
@@ -1052,7 +1043,7 @@ async def _step_breed_age(db, user, text, send_fn):
 
     # Handle skip.
     if text_lower in _SKIP_INPUTS:
-        _set_onboarding_data(user, "gender_weight_attempts", -1)
+        _set_onboarding_data(user, "gender_weight_attempts", 0)
         user.onboarding_state = "awaiting_gender_weight"
         db.commit()
         await send_fn(
@@ -1177,7 +1168,7 @@ async def _step_breed_age(db, user, text, send_fn):
         return
 
     # All good — advance to next step.
-    _set_onboarding_data(user, "gender_weight_attempts", -1)
+    _set_onboarding_data(user, "gender_weight_attempts", 0)
     user.onboarding_state = "awaiting_gender_weight"
     db.commit()
 
@@ -1208,12 +1199,6 @@ async def _step_gender_weight(db, user, text, send_fn):
     gw_attempts = od.get("gender_weight_attempts", 0)
     skip_current_parse = False
 
-    # Grace pass: queued message from the previous step arrived before the
-    # user could see the gender/weight question. Discard it silently.
-    if gw_attempts < 0:
-        _set_onboarding_data(user, "gender_weight_attempts", 0)
-        db.commit()
-        return
 
     if od.get("gender_neuter_confirm_pending"):
         confirm_reply = _resolve_binary_confirmation_reply(text_lower)
@@ -1381,7 +1366,7 @@ async def _step_gender_weight(db, user, text, send_fn):
     # question gets one free pass (increments to 0) instead of triggering
     # an immediate clarification.
     user.onboarding_state = "awaiting_food_type"
-    _set_onboarding_data(user, "food_type_attempts", -1)
+    _set_onboarding_data(user, "food_type_attempts", 0)
     db.commit()
 
     await send_fn(
@@ -1424,8 +1409,8 @@ async def _step_food_type(db, user, text, send_fn):
             food_type = ai_food_type
 
     if not food_type:
-        if attempts >= 1 or attempts < 0:
-            food_type = "mix"  # Default on grace pass (queued msg) or second unrecognized.
+        if attempts >= 1:
+            food_type = "mix"  # Default on second unrecognized attempt.
         else:
             _set_onboarding_data(user, "food_type_attempts", attempts + 1)
             db.commit()
@@ -1439,9 +1424,7 @@ async def _step_food_type(db, user, text, send_fn):
             return
 
     _set_onboarding_data(user, "food_type", food_type)
-    # Start at -1 so a queued message from the food_type step gets a grace
-    # pass instead of triggering an immediate clarification.
-    _set_onboarding_data(user, "meal_details_attempts", -1)
+    _set_onboarding_data(user, "meal_details_attempts", 0)
     _set_onboarding_data(user, "meal_confirm_pending", False)
     _set_onboarding_data(user, "meal_supplement_labels", [])
     user.onboarding_state = "awaiting_meal_details"
@@ -1485,12 +1468,6 @@ async def _step_meal_details(db, user, text, send_fn):
     example_shown = od.get("meal_example_shown", "")
     text_lower = text.strip().lower()
 
-    # Grace pass: queued message from the food_type step arrived before the
-    # user could see the meal details question. Discard it silently.
-    if meal_attempts < 0:
-        _set_onboarding_data(user, "meal_details_attempts", 0)
-        db.commit()
-        return
 
     # --- Handle confirmation reply (user was asked "Is this what X eats?") ---
     if confirm_pending:
@@ -1654,7 +1631,7 @@ async def _step_supplements_v2(db, user, text, send_fn):
     # an immediate clarification.
     _PREVENTIVE_EXAMPLE = "vaccines last Dec, deworming Jan, flea 2 months ago, no blood test yet"
     user.onboarding_state = "awaiting_preventive"
-    _set_onboarding_data(user, "preventive_attempts", -1)
+    _set_onboarding_data(user, "preventive_attempts", 0)
     _set_onboarding_data(user, "preventive_confirm_pending", False)
     _set_onboarding_data(user, "preventive_example_shown", _PREVENTIVE_EXAMPLE)
     db.commit()
@@ -1747,13 +1724,7 @@ async def _step_preventive(db, user, text, send_fn):
         )
         return
 
-    # Grace pass: a queued on-topic message arrived before the user could see the
-    # preventive question. Silently discard it and wait for a real answer.
     attempts = od.get("preventive_attempts", 0)
-    if attempts < 0:
-        _set_onboarding_data(user, "preventive_attempts", 0)
-        db.commit()
-        return
 
     # Detect "same as example" intent.
     if example_shown and _is_same_as_example_intent(text_lower):
