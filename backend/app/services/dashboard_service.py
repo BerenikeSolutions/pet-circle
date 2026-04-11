@@ -733,10 +733,10 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
             })
 
     # --- Dashboard Rebuild v2 enrichments ---
-    # Hard 15s timeout per enrichment. Dashboard loads were hanging when an
-    # upstream OpenAI call stalled; with this ceiling the tab always renders
-    # with a sensible default instead of timing out the whole request.
-    _ENRICHMENT_TIMEOUT_SECONDS = 15
+    # Hard 10s timeout per enrichment. Lowered from 15s so that two sequential
+    # enrichment phases (gather + care_plan_reasons) cannot together exceed the
+    # 30s frontend request timeout (10s + 10s leaves 10s of headroom).
+    _ENRICHMENT_TIMEOUT_SECONDS = 10
 
     async def _safe_async_call(label: str, default, coro):
         try:
@@ -774,7 +774,7 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
     care_plan_reasons = await _safe_async_call(
         "ai_insights_service.generate_care_plan_reasons",
         {},
-        generate_care_plan_reasons(db, pet, orderable_items),
+        generate_care_plan_reasons(db, pet, orderable_items, diet_summary=diet_summary),
     )
     care_plan_v2 = _apply_reasons_to_care_plan(care_plan_v2, care_plan_reasons)
     care_plan_v2 = _inject_supplement_recommendations(care_plan_v2, diet_summary)

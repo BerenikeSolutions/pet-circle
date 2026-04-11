@@ -812,6 +812,7 @@ async def generate_care_plan_reasons(
     db: Session,
     pet: Pet,
     orderable_items: list[dict[str, Any]],
+    diet_summary: dict | None = None,
 ) -> dict[str, str]:
     """
     Generate one-sentence reasons for orderable care plan items.
@@ -823,6 +824,8 @@ async def generate_care_plan_reasons(
         db: SQLAlchemy session.
         pet: Pet model instance.
         orderable_items: List of orderable item payloads with id/name fields.
+        diet_summary: Pre-computed diet summary dict; if provided, skips the
+            get_diet_summary() OpenAI call to avoid a redundant round-trip.
 
     Returns:
         Mapping of item_id -> reason sentence.
@@ -860,7 +863,9 @@ async def generate_care_plan_reasons(
         breed_size = _get_breed_size(weight_kg, pet.breed)
         life_stage = _get_life_stage(age_months, breed_size).value
 
-        nutrition_summary = await get_diet_summary(db, pet)
+        # Use caller-supplied diet_summary to avoid a redundant OpenAI call when
+        # the dashboard has already fetched it in the parallel enrichment phase.
+        nutrition_summary = diet_summary if diet_summary is not None else await get_diet_summary(db, pet)
         missing_micros = nutrition_summary.get("missing_micros", [])
         nutrition_gap_names = [
             str(gap.get("name"))
