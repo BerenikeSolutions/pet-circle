@@ -8,6 +8,8 @@ import AnalysisSummaryCard from "./AnalysisSummaryCard";
 import CarePlanCard from "./CarePlanCard";
 import CartFloater from "./CartFloater";
 import ProductSelectorCard, { type ResolvedProduct } from "./ProductSelectorCard";
+import EndNoteCard from "./EndNoteCard";
+import DocumentUploadModal from "./DocumentUploadModal";
 import type { DashboardViewProps } from "./DashboardView";
 import { buildCarePlanBuckets, computeCarePlanCounts } from "./dashboard-utils";
 
@@ -34,6 +36,8 @@ export default function ReturningDashboardView({
   const [floaterUnlocked, setFloaterUnlocked] = useState(false);
   const [addedIds, setAddedIds] = useState<Record<string, boolean>>({});
   const timerIdsRef = useRef<number[]>([]);
+
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
 
   // ProductSelectorCard state
   const [selectorOpen, setSelectorOpen] = useState(false);
@@ -142,6 +146,12 @@ export default function ReturningDashboardView({
         )}
         addedIds={addedIds}
         onAddToCart={handleAddToCart}
+      />
+      <EndNoteCard petName={data.pet.name} onUploadClick={() => setUploadModalOpen(true)} />
+      <DocumentUploadModal
+        open={uploadModalOpen}
+        token={token}
+        onClose={() => setUploadModalOpen(false)}
       />
       <CartFloater unlocked={floaterUnlocked} cartCount={cartCount} totalPrice={cartTotal} onGoToCart={onGoToCart} />
       <ProductSelectorCard
