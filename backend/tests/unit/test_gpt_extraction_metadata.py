@@ -64,6 +64,51 @@ def test_resolve_document_category_overrides_other_with_inferred_diagnostic() ->
     assert resolved == "Diagnostic"
 
 
+def test_resolve_document_category_forces_prescription_when_clinical_exam_present() -> None:
+    # Reproduces the Prescription_Chavan_12_02_25.jpg case: GPT sees "Blood Test"
+    # on a handwritten vet prescription and returns "Blood Report", but the
+    # extracted clinical_exam (weight, temperature) proves it's a vet visit.
+    resolved = gpt_extraction._resolve_document_category(
+        "Blood Report",
+        "Blood Report",
+        document_name="General Examination",
+        file_path="uploads/anon_name.jpg",
+        clinical_exam={"weight_kg": 29, "temperature_c": 38.78, "clinical_findings": "Anal Glands Cleaned"},
+        conditions=[],
+    )
+
+    assert resolved == "Prescription"
+
+
+def test_resolve_document_category_forces_prescription_when_conditions_present() -> None:
+    resolved = gpt_extraction._resolve_document_category(
+        "Blood Report",
+        "Blood Report",
+        document_name="General Examination",
+        file_path="uploads/anon_name.jpg",
+        clinical_exam=None,
+        conditions=[{"diagnosis": "Skin infection", "medications": [{"name": "Cefpodoxime"}]}],
+    )
+
+    assert resolved == "Prescription"
+
+
+def test_resolve_document_category_ignores_empty_clinical_exam() -> None:
+    # A clinical_exam dict where every field is None must NOT trigger the override,
+    # otherwise lab reports that GPT wraps in an empty clinical_exam shell would
+    # flip to Prescription.
+    resolved = gpt_extraction._resolve_document_category(
+        "Blood Report",
+        "Blood Report",
+        document_name="CBC Report",
+        file_path="uploads/CBC_12_02_25.pdf",
+        clinical_exam={"weight_kg": None, "temperature_c": None, "clinical_findings": None},
+        conditions=[],
+    )
+
+    assert resolved == "Blood Report"
+
+
 def test_extract_date_from_filename_supports_sample_report_names() -> None:
     extracted = gpt_extraction._extract_date_from_filename("uploads/CBC_12_02_25.pdf")
 

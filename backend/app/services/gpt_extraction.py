@@ -421,17 +421,32 @@ def _resolve_document_category(
     inferred_category: str,
     document_name: str | None = None,
     file_path: str | None = None,
+    clinical_exam: dict | None = None,
+    conditions: list[dict] | None = None,
 ) -> str:
     """Prefer inferred category when GPT returned blank, Other, or a coarse legacy value.
 
     Rules (in priority order):
-    1. If raw is None / "Other" and inferred is specific → use inferred.
+    1. Structural prescription signals (clinical_exam populated, or any condition
+       extracted) force "Prescription" — these are prescription-only per the
+       extraction prompt and beat any GPT category, including "Blood Report"
+       (which GPT may return when a prescription lists in-clinic test values).
     2. If filename/document name has a strong keyword that contradicts GPT → use keyword signal.
-    3. Otherwise trust GPT's (normalized) raw_category.
+    3. If raw is None / "Other" and inferred is specific → use inferred.
+    4. Otherwise trust GPT's (normalized) raw_category.
 
     This keeps the 5 specific categories (Blood Report, Urine Report, Imaging,
     Prescription, PCR & Parasite Panel) authoritative over GPT's legacy "Diagnostic".
     """
+    # Structural signals — clinical_exam is prompt-guaranteed prescription-only,
+    # and any extracted condition means a vet diagnosed + prescribed something.
+    if isinstance(clinical_exam, dict) and any(
+        value not in (None, "", [], {}) for value in clinical_exam.values()
+    ):
+        return "Prescription"
+    if conditions and any(isinstance(c, dict) for c in conditions):
+        return "Prescription"
+
     combined = f"{(document_name or '').lower()} {os.path.basename(file_path or '').lower()}"
 
     # Always trust strong keyword signals in filename / document name.
@@ -1913,6 +1928,8 @@ async def extract_and_process_document(
             inferred_category,
             document_name=document_name or document.document_name,
             file_path=document.file_path,
+            clinical_exam=metadata.get("clinical_exam"),
+            conditions=metadata.get("conditions"),
         )
         results["document_category"] = document_category
 
