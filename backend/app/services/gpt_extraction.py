@@ -1933,14 +1933,32 @@ async def extract_and_process_document(
         if document_category:
             document.document_category = document_category
 
-        # Compute event_date: the most recent last_done_date from extracted items.
-        # If a document has multiple items with different dates, use the most recent.
+        # Compute event_date: prefer last_done_date from preventive items.
+        # For diagnostic-only documents (urine, blood panel with no tracked items),
+        # fall back to observed_at from diagnostic_values, then filename date.
         event_dates: list = []
         for item in extracted_items:
             raw_date = item.get("last_done_date")
             if raw_date:
                 try:
                     event_dates.append(parse_date(str(raw_date)))
+                except ValueError:
+                    pass
+        if not event_dates:
+            # Diagnostic-only document — try observed_at from diagnostic_values.
+            for dv in (metadata.get("diagnostic_values") or []):
+                observed_at = dv.get("observed_at") if isinstance(dv, dict) else None
+                if observed_at:
+                    try:
+                        event_dates.append(parse_date(str(observed_at)))
+                    except ValueError:
+                        pass
+        if not event_dates:
+            # Last resort — extract date from the original filename.
+            fn_date = _extract_date_from_filename(document.file_path)
+            if fn_date:
+                try:
+                    event_dates.append(parse_date(fn_date))
                 except ValueError:
                     pass
         if event_dates:

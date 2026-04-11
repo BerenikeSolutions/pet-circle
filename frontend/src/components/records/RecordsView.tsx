@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { RecordItem, RecordsV2 } from "@/lib/api";
-import { fetchRecords, getDashboardDocumentUrl } from "@/lib/api";
+import type { FailedDocument, RecordItem, RecordsV2 } from "@/lib/api";
+import { fetchRecords, getDashboardDocumentUrl, retryAllFailedDocuments } from "@/lib/api";
 import VetVisitCard from "./VetVisitCard";
 import DocumentViewer from "./DocumentViewer";
 
@@ -148,6 +148,8 @@ export default function RecordsView({ token, petName, onBack }: RecordsViewProps
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [viewerDoc, setViewerDoc] = useState<{ id: string; title: string } | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const [retryMsg, setRetryMsg] = useState<string | null>(null);
   const activePanelId = `records-panel-${activeTab}`;
 
   const load = useCallback(async () => {
@@ -162,6 +164,26 @@ export default function RecordsView({ token, petName, onBack }: RecordsViewProps
       setLoading(false);
     }
   }, [token]);
+
+  const handleRetryAll = useCallback(async () => {
+    setRetrying(true);
+    setRetryMsg(null);
+    try {
+      const result = await retryAllFailedDocuments(token);
+      const succeeded = result.results.filter((r) => r.status === "success").length;
+      const failed = result.results.filter((r) => r.status === "failed" || r.status === "skipped").length;
+      setRetryMsg(
+        succeeded > 0
+          ? `${succeeded} document${succeeded > 1 ? "s" : ""} processed successfully.${failed > 0 ? ` ${failed} still failed.` : ""}`
+          : `Processing failed. Please re-upload the documents on WhatsApp.`
+      );
+      await load();
+    } catch {
+      setRetryMsg("Retry failed. Please try again.");
+    } finally {
+      setRetrying(false);
+    }
+  }, [token, load]);
 
   useEffect(() => {
     load();
@@ -312,6 +334,51 @@ export default function RecordsView({ token, petName, onBack }: RecordsViewProps
         <div id={activePanelId} role="tabpanel" aria-labelledby={`records-tab-${activeTab}`}>
           {renderContent()}
         </div>
+
+        {!loading && (data?.failed_documents?.length ?? 0) > 0 && (
+          <div style={{ marginTop: 20 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--t3)", letterSpacing: "0.5px", textTransform: "uppercase", marginBottom: 8 }}>
+              Failed to process ({data!.failed_documents.length})
+            </div>
+            {data!.failed_documents.map((doc: FailedDocument) => (
+              <div
+                key={doc.id}
+                className="card"
+                style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}
+              >
+                <span style={{ fontSize: 18, flexShrink: 0 }}>⚠️</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "var(--t1)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {doc.title}
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--t3)", marginTop: 2 }}>Couldn&apos;t be processed</div>
+                </div>
+              </div>
+            ))}
+            {retryMsg && (
+              <div style={{ fontSize: 13, color: "var(--t2)", padding: "8px 0", textAlign: "center" }}>{retryMsg}</div>
+            )}
+            <button
+              type="button"
+              onClick={handleRetryAll}
+              disabled={retrying}
+              style={{
+                width: "100%",
+                marginTop: 4,
+                padding: "10px",
+                borderRadius: 10,
+                border: "1px solid var(--border)",
+                background: retrying ? "var(--bg-app)" : "var(--white)",
+                color: retrying ? "var(--t3)" : "var(--brand)",
+                fontWeight: 700,
+                fontSize: 14,
+                cursor: retrying ? "default" : "pointer",
+              }}
+            >
+              {retrying ? "Retrying…" : "Retry processing"}
+            </button>
+          </div>
+        )}
 
         <button className="floater fl-home" onClick={onBack} type="button" aria-label="Go to dashboard" title="Go to dashboard">
           🏠

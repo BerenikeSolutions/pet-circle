@@ -370,6 +370,19 @@ def _fetch_documents(db: Session, pet_id: Any) -> list[Document]:
     )
 
 
+def _fetch_failed_documents(db: Session, pet_id: Any) -> list[Document]:
+    """Load failed documents for one pet, most recently uploaded first."""
+    return (
+        db.query(Document)
+        .filter(
+            Document.pet_id == pet_id,
+            Document.extraction_status == "failed",
+        )
+        .order_by(Document.created_at.desc())
+        .all()
+    )
+
+
 def _fetch_conditions_for_documents(
     db: Session,
     pet_id: Any,
@@ -527,4 +540,14 @@ async def get_records(db: Session, pet: Pet) -> dict[str, Any]:
             }
         )
 
-    return {"vet_visits": vet_visits, "records": records}
+    failed_documents = _fetch_failed_documents(db, pet.id)
+    failed: list[dict[str, Any]] = [
+        {
+            "id": str(doc.id),
+            "title": doc.document_name or doc.file_path.split("/")[-1],
+            "uploaded_at": doc.created_at.isoformat() if doc.created_at else None,
+        }
+        for doc in failed_documents
+    ]
+
+    return {"vet_visits": vet_visits, "records": records, "failed_documents": failed}

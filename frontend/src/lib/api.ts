@@ -512,9 +512,16 @@ export interface RecordItem {
   notes?: string | null;
 }
 
+export interface FailedDocument {
+  id: string;
+  title: string;
+  uploaded_at: string | null;
+}
+
 export interface RecordsV2 {
   vet_visits: VetVisit[];
   records: RecordItem[];
+  failed_documents: FailedDocument[];
 }
 
 export interface DashboardData {
@@ -1148,6 +1155,15 @@ export async function fetchRecords(token: string): Promise<RecordsV2> {
 
 export function getDashboardDocumentUrl(token: string, documentId: string): string {
   return `${API_BASE}/dashboard/${token}/document/${documentId}`;
+}
+
+export async function retryAllFailedDocuments(token: string): Promise<{ retried: number; results: { id: string; status: string }[] }> {
+  const res = await fetch(`${API_BASE}/dashboard/${token}/retry-all-failed`, { method: "POST" });
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    throw new Error(data?.detail || `Request failed: ${res.status}`);
+  }
+  return res.json();
 }
 
 // --- Diet Items & Nutrition API ---

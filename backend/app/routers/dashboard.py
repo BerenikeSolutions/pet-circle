@@ -171,6 +171,7 @@ class DashboardRecordsV2Response(BaseModel):
 
     vet_visits: list[dict[str, Any]] = Field(default_factory=list)
     records: list[dict[str, Any]] = Field(default_factory=list)
+    failed_documents: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def _get_pet_for_dashboard_token(db: Session, token: str) -> Pet:
@@ -504,6 +505,75 @@ async def dashboard_retry_extraction(
             status_code=503,
             detail="Extraction retry failed. Please try again later.",
         )
+
+
+@router.post("/{token}/retry-all-failed")
+async def dashboard_retry_all_failed(
+    token: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Retry GPT extraction for all failed documents belonging to this pet.
+
+    Iterates every document with extraction_status='failed', re-downloads
+    from storage, and re-runs the extraction pipeline. Returns per-document
+    outcomes so the frontend can report partial success.
+    """
+    try:
+        pet = _get_pet_for_dashboard_token(db, token)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+
+    from app.models.document import Document as DocumentModel
+    from app.services.document_upload import download_from_supabase
+    from app.services.gpt_extraction import extract_and_process_document
+    import asyncio as _asyncio
+
+    failed_docs = (
+        db.query(DocumentModel)
+        .filter(
+            DocumentModel.pet_id == pet.id,
+            DocumentModel.extraction_status == "failed",
+        )
+        .all()
+    )
+
+    if not failed_docs:
+        return {"retried": 0, "results": []}
+
+    outcomes = []
+    for doc in failed_docs:
+        try:
+            file_bytes = await download_from_supabase(
+                doc.file_path,
+                backend=getattr(doc, "storage_backend", "supabase"),
+            )
+            if not file_bytes:
+                outcomes.append({"id": str(doc.id), "status": "skipped", "reason": "download_failed"})
+                continue
+
+            doc.extraction_status = "pending"
+            db.commit()
+
+            result = await _asyncio.wait_for(
+                extract_and_process_document(
+                    db, doc.id,
+                    f"[file: {doc.file_path}]",
+                    file_bytes=file_bytes,
+                ),
+                timeout=120,
+            )
+            outcomes.append({"id": str(doc.id), "status": result.get("status", "unknown")})
+        except Exception as e:
+            doc.extraction_status = "failed"
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+            outcomes.append({"id": str(doc.id), "status": "failed", "reason": str(e)})
+            logger.error("Bulk retry failed for doc %s: %s", str(doc.id), str(e))
+
+    return {"retried": len(failed_docs), "results": outcomes}
 
 
 @router.delete("/{token}/document/{document_id}")

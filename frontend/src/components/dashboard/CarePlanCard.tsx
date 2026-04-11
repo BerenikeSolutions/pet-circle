@@ -122,7 +122,7 @@ export default function CarePlanCard({
                         <div className="care-meta">
                           {item.freq} · Next: {item.next_due || "--"}
                         </div>
-                        {item.reason && (
+                        {item.reason && !(bucketKey === "continue" && item.test_type === "food") && (
                           <div style={{ fontSize: 11, color: "var(--t2)", lineHeight: 1.4, marginTop: 3, fontStyle: "italic" }}>
                             {item.reason}
                           </div>
