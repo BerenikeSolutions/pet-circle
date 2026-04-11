@@ -45,6 +45,19 @@ _BLOOD_KEYWORDS = ("blood", "cbc", "cbp", "haemogram", "hemogram", "platelet", "
 _URINE_KEYWORDS = ("urine", "urinalysis", "urocult", "urinary")
 _SNAP_KEYWORDS = ("snap", "4dx", "pcr", "tick", "anaplasma", "ehrlichia", "heartworm", "lyme", "leishmania")
 _CULTURE_KEYWORDS = ("culture", "sensitivity", "c&s", "c/s")
+_VACCINE_DOC_KEYWORDS = (
+    "vaccine",
+    "vaccin",
+    "immunization",
+    "immunisation",
+    "nobivac",
+    "dhpp",
+    "rabies",
+    "fvrcp",
+    "booster",
+    "bordetella",
+    "lepto",
+)
 
 # Lab result classification
 _ABNORMAL_FLAGS = frozenset({"low", "high", "abnormal"})
@@ -73,6 +86,8 @@ def _style_for_category(document_category: str | None) -> dict[str, str]:
 def _lab_icon_for_document(document: Document) -> str:
     """Select a relevant emoji icon based on the document name keywords."""
     doc_name = (document.document_name or "").lower()
+    if any(kw in doc_name for kw in _VACCINE_DOC_KEYWORDS):
+        return "💉"
     if any(kw in doc_name for kw in _SNAP_KEYWORDS):
         return "🧬"
     if any(kw in doc_name for kw in _URINE_KEYWORDS) and any(kw in doc_name for kw in _CULTURE_KEYWORDS):
