@@ -5,14 +5,15 @@ Identifies the primary vet contact for a pet by analysing care contacts
 extracted from uploaded documents.
 
 Primary vet selection rules:
-    1. Count distinct document references per vet name (mention count).
-    2. Vet with the highest mention count is selected as primary.
-    3. Tie-break: vet with the most recent document event_date wins.
-    4. If event_dates are also tied, result is non-deterministic (acceptable
-       for Phase 1 — no clinical impact).
+    1. Only documents in the "Prescription" or "Vaccination" categories are
+       considered — diagnostic reports and other document types are excluded
+       because they do not reliably indicate the treating vet.
+    2. Among eligible documents, the vet name on the single most recent
+       document (by event_date, fallback to created_at) is selected.
+    3. last_visit is the event_date of that most-recent document.
 
-Returns a VetSummary (name + last_visit date) or None when no veterinarian
-contacts exist for the pet.
+Returns a VetSummary (name + last_visit date) or None when no eligible
+veterinarian contacts exist for the pet.
 """
 
 import logging
@@ -20,7 +21,6 @@ from dataclasses import dataclass
 from datetime import date
 from uuid import UUID
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.contact import Contact
@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 
 # Role constant — matches the value stored in contacts.role
 ROLE_VETERINARIAN = "veterinarian"
+
+# Only these document categories may supply the primary vet name.
+# Diagnostic reports, generic "Other" docs, etc. are deliberately excluded.
+ELIGIBLE_CATEGORIES = ("Prescription", "Vaccination")
 
 
 @dataclass
@@ -42,18 +46,15 @@ class VetSummary:
 
 def get_vet_summary(db: Session, pet_id: UUID) -> VetSummary | None:
     """
-    Return the primary vet for *pet_id*, or None if no vet contacts exist.
+    Return the primary vet for *pet_id*, or None if no eligible contacts exist.
 
-    Primary vet = the vet name that appears across the greatest number of
-    distinct uploaded documents.  Tie-break: the vet associated with the
-    most recent document event_date wins.
+    Primary vet = the veterinarian contact linked to the most recent
+    "Prescription" or "Vaccination" document for this pet.  Diagnostic
+    reports and all other document categories are ignored.
 
-    The query performs a single aggregation pass:
-      - LEFT JOIN documents so that contacts whose document was deleted (SET
-        NULL) are included in the mention count but contribute NULL to the
-        date aggregation.
-      - GROUP BY contact name, then order by mention_count DESC, last_visit
-        DESC NULLS LAST so the desired candidate is always rows[0].
+    Ordering: event_date DESC NULLS LAST, then created_at DESC so that
+    documents without an explicit event date are ranked below dated ones
+    but still participate when no dated documents exist.
 
     Args:
         db:      Active SQLAlchemy session.
@@ -62,29 +63,29 @@ def get_vet_summary(db: Session, pet_id: UUID) -> VetSummary | None:
     Returns:
         VetSummary with name and most-recent visit date, or None.
     """
-    rows = (
+    row = (
         db.query(
             Contact.name,
-            func.count(Contact.document_id.distinct()).label("mention_count"),
-            func.max(Document.event_date).label("last_visit"),
+            Document.event_date.label("last_visit"),
         )
-        .outerjoin(Document, Document.id == Contact.document_id)
+        # INNER JOIN — contact must be linked to a document to be eligible
+        .join(Document, Document.id == Contact.document_id)
         .filter(
             Contact.pet_id == pet_id,
             Contact.role == ROLE_VETERINARIAN,
+            # Only vet-visit prescriptions and vaccination records count
+            Document.document_category.in_(ELIGIBLE_CATEGORIES),
         )
-        .group_by(Contact.name)
         .order_by(
-            # Most-mentioned vet first
-            func.count(Contact.document_id.distinct()).desc(),
-            # Tie-break: newest event_date first; NULLs pushed to end
-            func.max(Document.event_date).desc().nullslast(),
+            # Most recent document first; push null event_dates to the end
+            Document.event_date.desc().nullslast(),
+            # Secondary sort on upload time for documents with the same event_date
+            Document.created_at.desc(),
         )
-        .all()
+        .first()
     )
 
-    if not rows:
+    if row is None:
         return None
 
-    top = rows[0]
-    return VetSummary(name=top.name, last_visit=top.last_visit)
+    return VetSummary(name=row.name, last_visit=row.last_visit)

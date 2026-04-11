@@ -41,6 +41,19 @@ _DEDUP_CACHE: OrderedDict[str, float] = OrderedDict()
 _DEDUP_MAX_SIZE = 2000
 _DEDUP_TTL_SECONDS = 3600  # 1 hour — Meta may retry webhooks for hours after failures
 
+# --- Per-user message debounce buffer ---
+# Users often send a single thought across multiple quick messages
+# (e.g. "vaccines last Dec" / "deworming Jan" / "no flea treatment yet").
+# Processing each independently races the state machine forward before the user
+# is done. We buffer text messages per user and flush them as one combined
+# message after a short idle window.
+#
+# Only text messages are buffered. Buttons and media bypass the buffer and
+# process immediately — they represent discrete, deliberate actions.
+_DEBOUNCE_SECONDS = 2.5
+_USER_MSG_BUFFERS: dict[str, list[dict]] = {}   # mobile → ordered list of message_data
+_USER_DEBOUNCE_TASKS: dict[str, "asyncio.Task"] = {}  # mobile → pending flush task
+
 
 def _is_duplicate_message(message_id: str) -> bool:
     """
@@ -72,6 +85,71 @@ def _is_duplicate_message(message_id: str) -> bool:
         _DEDUP_CACHE.popitem(last=False)
 
     return False
+
+async def _flush_user_messages(mobile: str) -> None:
+    """
+    Wait for the debounce window, then process all buffered messages as one.
+
+    Cancelled and restarted each time a new message arrives within the window,
+    so only the final message in a rapid burst triggers processing.
+    """
+    await asyncio.sleep(_DEBOUNCE_SECONDS)
+
+    messages = _USER_MSG_BUFFERS.pop(mobile, [])
+    _USER_DEBOUNCE_TASKS.pop(mobile, None)
+
+    if not messages:
+        return
+
+    if len(messages) == 1:
+        asyncio.create_task(_process_message_background(messages[0]))
+        return
+
+    # Combine all buffered text into a single message.
+    # Use the last message's metadata (message_id, timestamp) so dedup and
+    # logging stay accurate. The joined text is what the router will process.
+    combined_text = "\n".join(
+        m["text"] for m in messages if m.get("text")
+    )
+    merged = dict(messages[-1])
+    merged["text"] = combined_text
+    logger.info(
+        "Debounce flush: combining %d messages for %s",
+        len(messages),
+        mask_phone(mobile),
+    )
+    asyncio.create_task(_process_message_background(merged))
+
+
+def _enqueue_text_or_dispatch(message_data: dict) -> None:
+    """
+    Route a message to the debounce buffer (text) or direct dispatch (everything else).
+
+    Text messages are held for _DEBOUNCE_SECONDS so rapid multi-message bursts
+    are merged into one before the state machine sees them. Buttons and media
+    are dispatched immediately — they are deliberate, discrete actions.
+    """
+    mobile = message_data.get("from_number")
+    msg_type = message_data.get("type")
+
+    # Non-text messages bypass debounce — process immediately.
+    if msg_type != "text" or not mobile:
+        asyncio.create_task(_process_message_background(message_data))
+        return
+
+    # Cancel any pending flush for this user (they're still typing).
+    existing = _USER_DEBOUNCE_TASKS.get(mobile)
+    if existing and not existing.done():
+        existing.cancel()
+
+    # Append to this user's buffer.
+    _USER_MSG_BUFFERS.setdefault(mobile, []).append(message_data)
+
+    # Schedule a fresh flush after the idle window.
+    _USER_DEBOUNCE_TASKS[mobile] = asyncio.create_task(
+        _flush_user_messages(mobile)
+    )
+
 
 async def _process_message_background(message_data: dict) -> None:
     """
@@ -260,15 +338,12 @@ async def handle_whatsapp_message(request: Request, db: Session = Depends(get_db
             mask_phone(from_number),
         )
 
-        # CRITICAL: Process message in a background task and return 200
-        # immediately. Meta's webhook timeout is ~20 seconds. If we block
-        # here (media download, Supabase upload, WhatsApp API calls), Meta
-        # retries the webhook, causing phantom duplicate uploads.
-        # The background task uses its own DB session since the request-
-        # scoped session closes when we return.
-        asyncio.create_task(
-            _process_message_background(message_data)
-        )
+        # Route to debounce buffer (text) or immediate dispatch (button/media).
+        # Text messages are held for _DEBOUNCE_SECONDS and merged with any
+        # others from the same user so rapid multi-message bursts are processed
+        # as one combined input rather than advancing the state machine
+        # prematurely. Buttons and media bypass the buffer entirely.
+        _enqueue_text_or_dispatch(message_data)
 
     else:
         # Log non-message payloads (status updates, etc.) without dedup.

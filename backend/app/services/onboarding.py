@@ -973,8 +973,10 @@ async def _step_welcome(db, user, text, send_fn, message_data: dict | None = Non
     pet = Pet(user_id=user.id, name=pet_name, species="_pending")
     db.add(pet)
 
+    # Start at -1 so a queued message from the previous step gets a grace
+    # pass instead of triggering an immediate clarification.
     user.onboarding_state = "awaiting_breed_age"
-    _set_onboarding_data(user, "breed_age_attempts", 0)
+    _set_onboarding_data(user, "breed_age_attempts", -1)
     db.commit()
 
     await send_fn(
@@ -1001,6 +1003,13 @@ async def _step_breed_age(db, user, text, send_fn):
     od = _get_onboarding_data(user)
     attempts = od.get("breed_age_attempts", 0)
 
+    # Grace pass: queued message from the previous step arrived before the
+    # user could see the breed/age question. Discard it silently.
+    if attempts < 0:
+        _set_onboarding_data(user, "breed_age_attempts", 0)
+        db.commit()
+        return
+
     if text_lower == "waitlist" and od.get("non_dog_waitlist_prompted"):
         await send_fn(
             db,
@@ -1015,7 +1024,7 @@ async def _step_breed_age(db, user, text, send_fn):
         if detected_species == "dog":
             pet.species = "dog"
             _set_onboarding_data(user, "needs_species", False)
-            _set_onboarding_data(user, "gender_weight_attempts", 0)
+            _set_onboarding_data(user, "gender_weight_attempts", -1)
             user.onboarding_state = "awaiting_gender_weight"
             db.commit()
             await send_fn(
@@ -1038,7 +1047,7 @@ async def _step_breed_age(db, user, text, send_fn):
 
     # Handle skip.
     if text_lower in _SKIP_INPUTS:
-        _set_onboarding_data(user, "gender_weight_attempts", 0)
+        _set_onboarding_data(user, "gender_weight_attempts", -1)
         user.onboarding_state = "awaiting_gender_weight"
         db.commit()
         await send_fn(
@@ -1163,7 +1172,7 @@ async def _step_breed_age(db, user, text, send_fn):
         return
 
     # All good — advance to next step.
-    _set_onboarding_data(user, "gender_weight_attempts", 0)
+    _set_onboarding_data(user, "gender_weight_attempts", -1)
     user.onboarding_state = "awaiting_gender_weight"
     db.commit()
 
@@ -1193,6 +1202,13 @@ async def _step_gender_weight(db, user, text, send_fn):
     od = _get_onboarding_data(user)
     gw_attempts = od.get("gender_weight_attempts", 0)
     skip_current_parse = False
+
+    # Grace pass: queued message from the previous step arrived before the
+    # user could see the gender/weight question. Discard it silently.
+    if gw_attempts < 0:
+        _set_onboarding_data(user, "gender_weight_attempts", 0)
+        db.commit()
+        return
 
     if od.get("gender_neuter_confirm_pending"):
         confirm_reply = _resolve_binary_confirmation_reply(text_lower)
@@ -1426,7 +1442,9 @@ async def _step_food_type(db, user, text, send_fn):
             return
 
     _set_onboarding_data(user, "food_type", food_type)
-    _set_onboarding_data(user, "meal_details_attempts", 0)
+    # Start at -1 so a queued message from the food_type step gets a grace
+    # pass instead of triggering an immediate clarification.
+    _set_onboarding_data(user, "meal_details_attempts", -1)
     _set_onboarding_data(user, "meal_confirm_pending", False)
     _set_onboarding_data(user, "meal_supplement_labels", [])
     user.onboarding_state = "awaiting_meal_details"
@@ -1469,6 +1487,13 @@ async def _step_meal_details(db, user, text, send_fn):
     confirm_pending = od.get("meal_confirm_pending", False)
     example_shown = od.get("meal_example_shown", "")
     text_lower = text.strip().lower()
+
+    # Grace pass: queued message from the food_type step arrived before the
+    # user could see the meal details question. Discard it silently.
+    if meal_attempts < 0:
+        _set_onboarding_data(user, "meal_details_attempts", 0)
+        db.commit()
+        return
 
     # --- Handle confirmation reply (user was asked "Is this what X eats?") ---
     if confirm_pending:
@@ -1583,6 +1608,32 @@ async def _step_supplements_v2(db, user, text, send_fn):
         and normalized not in _NONE_KEYWORDS
         and normalized not in _NO_INPUTS
     ):
+        # Guard against late-arriving meal messages: if the user sent food items
+        # (e.g. "boiled egg whites") across multiple messages and the second message
+        # arrived after the state already advanced to awaiting_supplements, detect this
+        # and save as additional diet items instead of misclassifying as supplements.
+        is_food_not_supplement = await _ai_is_food_not_supplement(text)
+        if is_food_not_supplement:
+            od = _get_onboarding_data(user)
+            food_type = od.get("food_type", "mix")
+            extra_items = await _parse_diet_input(text)
+            await _store_meal_items(db, pet, extra_items, food_type)
+            extra_supp_labels = await _store_meal_supplement_items(db, pet, text)
+            existing_labels = od.get("meal_supplement_labels") or []
+            _set_onboarding_data(
+                user,
+                "meal_supplement_labels",
+                existing_labels + extra_supp_labels,
+            )
+            db.commit()
+            # Re-ask supplements so the user still gets a chance to answer.
+            await send_fn(
+                db, mobile,
+                f"Got it, added that to {pet.name}'s diet. "
+                + _supplements_question_for_pet(pet.name, _get_onboarding_data(user)),
+            )
+            return
+
         items = await _parse_diet_input(text)
         for entry in items:
             label = entry[0]
@@ -1601,9 +1652,12 @@ async def _step_supplements_v2(db, user, text, send_fn):
     )
 
     # Preventive care question.
+    # Start at -1 so a queued message that arrives before the user sees the
+    # question gets one free pass (increments to 0) instead of triggering
+    # an immediate clarification.
     _PREVENTIVE_EXAMPLE = "vaccines last Dec, deworming Jan, flea 2 months ago, no blood test yet"
     user.onboarding_state = "awaiting_preventive"
-    _set_onboarding_data(user, "preventive_attempts", 0)
+    _set_onboarding_data(user, "preventive_attempts", -1)
     _set_onboarding_data(user, "preventive_confirm_pending", False)
     _set_onboarding_data(user, "preventive_example_shown", _PREVENTIVE_EXAMPLE)
     db.commit()
@@ -1681,6 +1735,29 @@ async def _step_preventive(db, user, text, send_fn):
         await _transition_to_documents(db, user, pet, send_fn)
         return
 
+    # Guard against late-arriving diet/supplement messages from prior steps.
+    # Run before the grace pass so that food/supplement data is saved rather than discarded.
+    prior_classification = await _classify_prior_step_input(text, "awaiting_preventive")
+    if prior_classification in ("food", "supplement"):
+        reask = (
+            f"Got it, added that to {pet.name}'s "
+            f"{'diet' if prior_classification == 'food' else 'supplements'}. "
+            f"What do you remember about {pet.name}'s vaccines, deworming, "
+            f"flea & tick, and blood tests? (rough is fine)."
+        )
+        await _save_prior_step_dietary_input(
+            db, user, pet, text, prior_classification, send_fn, reask
+        )
+        return
+
+    # Grace pass: a queued on-topic message arrived before the user could see the
+    # preventive question. Silently discard it and wait for a real answer.
+    attempts = od.get("preventive_attempts", 0)
+    if attempts < 0:
+        _set_onboarding_data(user, "preventive_attempts", 0)
+        db.commit()
+        return
+
     # Detect "same as example" intent.
     if example_shown and _is_same_as_example_intent(text_lower):
         _set_onboarding_data(user, "preventive_confirm_pending", True)
@@ -1698,7 +1775,6 @@ async def _step_preventive(db, user, text, send_fn):
     parsed = await _parse_preventive_care(text)
 
     missing = parsed.get("missing", [])
-    attempts = od.get("preventive_attempts", 0)
 
     # If ALL fields are missing (nothing parsed at all), clarify with AI first.
     all_fields = {"vaccines", "deworming", "flea_tick", "blood_test"}
@@ -1862,6 +1938,27 @@ async def _step_prev_retry(db, user, text, send_fn):
         and normalized not in _NONE_KEYWORDS
         and normalized not in _NO_INPUTS
     ):
+        # Guard against late-arriving diet/supplement messages from prior steps.
+        od = _get_onboarding_data(user)
+        prior_classification = await _classify_prior_step_input(text, "awaiting_prev_retry")
+        if prior_classification in ("food", "supplement"):
+            missing = list(od.get("preventive_missing") or [])
+            _MISSING_NAMES = {
+                "vaccines": "vaccines",
+                "deworming": "deworming",
+                "flea_tick": "flea & tick treatment",
+                "blood_test": "blood tests",
+            }
+            missing_str = " and ".join(_MISSING_NAMES.get(m, m) for m in missing)
+            reask = (
+                f"Got it, added that to {pet.name}'s "
+                f"{'diet' if prior_classification == 'food' else 'supplements'}. "
+            ) + (f"What about {missing_str}?" if missing_str else "Any other preventive care details?")
+            await _save_prior_step_dietary_input(
+                db, user, pet, text, prior_classification, send_fn, reask
+            )
+            return
+
         parsed = await _parse_preventive_care(text)
 
         # Apply the same generic vaccine / flea-without-brand detection as
@@ -1973,6 +2070,49 @@ def _is_pending_vaccine_intent(raw: str | None) -> bool:
     return any(phrase in n for phrase in _PENDING_VACCINE_PHRASES)
 
 
+def _looks_like_vaccine_selection(text: str) -> bool:
+    """Return True if the text is a deliberate vaccine type selection (options 1-4 or keywords).
+
+    Used in _step_vaccine_type to distinguish a vaccine selection reply from
+    additional free-text health data the user sends before answering the question.
+    """
+    t = text.strip().lower()
+    t = re.sub(r"[.!?,]+$", "", t)
+
+    # Explicit numeric options.
+    if t in {"1", "2", "3", "4"}:
+        return True
+
+    # Never / skip variants.
+    never_keywords = {
+        "never", "never done", "not vaccinated", "no vaccine", "no vaccines",
+        "none", "nope", "n/a", "na", "skip", "not done", "not sure",
+    }
+    if t in never_keywords:
+        return True
+
+    # Pending intent ("should be given", "not yet", etc.).
+    if _is_pending_vaccine_intent(t):
+        return True
+
+    # Named vaccine-selection phrases.
+    vaccine_phrases = {
+        "mandatory", "mandatory only", "only mandatory",
+        "rabies and dhppi", "rabies + dhppi", "dhppi and rabies",
+        "mandatory + corona", "corona", "mandatory + coronavirus",
+        "mandatory + kennel cough", "kennel cough", "mandatory + kennel",
+        "all", "all four", "all 4", "all vaccines", "all four vaccines",
+    }
+    if t in vaccine_phrases:
+        return True
+
+    # Vaccine-name keywords present in the text.
+    if any(kw in t for kw in ("kennel", "corona", "rabies", "dhppi", "bordetella")):
+        return True
+
+    return False
+
+
 def _resolve_vaccine_type_selection(text: str) -> list[str]:
     """
     Map the user's reply to a list of vaccine master item_names to update.
@@ -2059,6 +2199,36 @@ async def _step_vaccine_type(db, user, text, send_fn):
     missing = od.get("preventive_missing", [])
     attempts = od.get("preventive_attempts", 0)
 
+    # If the user sent additional health data instead of a vaccine selection, parse and
+    # merge it, then re-ask the vaccine type question — never silently discard health info.
+    if not _looks_like_vaccine_selection(text):
+        # Guard: detect late-arriving diet/supplement before attempting preventive merge.
+        prior_classification = await _classify_prior_step_input(text, "awaiting_vaccine_type")
+        if prior_classification in ("food", "supplement"):
+            reask = (
+                f"Got it, added that to {pet.name}'s "
+                f"{'diet' if prior_classification == 'food' else 'supplements'}. "
+                + _vaccine_type_question(pet.name)
+            )
+            await _save_prior_step_dietary_input(
+                db, user, pet, text, prior_classification, send_fn, reask
+            )
+            return
+
+        additional = await _parse_preventive_care(text)
+        for key in ("deworming", "flea_tick", "blood_test"):
+            if additional.get(key) and parsed.get(key) is None:
+                parsed[key] = additional[key]
+        # Recalculate missing: remove categories now present in parsed.
+        missing = [cat for cat in missing if parsed.get(cat) is None]
+        needs_flea_brand_q = _is_flea_without_brand(parsed)
+        _set_onboarding_data(user, "pending_preventive_parsed", parsed)
+        _set_onboarding_data(user, "pending_flea_brand_needed", needs_flea_brand_q)
+        _set_onboarding_data(user, "preventive_missing", missing)
+        db.commit()
+        await send_fn(db, mobile, _vaccine_type_question(pet.name))
+        return
+
     # Resolve which vaccine names the user selected.
     vaccine_names = _resolve_vaccine_type_selection(text)
     parsed["vaccine_names_to_update"] = vaccine_names
@@ -2114,6 +2284,19 @@ async def _step_flea_brand(db, user, text, send_fn):
     parsed = dict(od.get("pending_preventive_parsed") or {})
     missing = od.get("preventive_missing", [])
     attempts = od.get("preventive_attempts", 0)
+
+    # Guard against late-arriving diet/supplement messages from prior steps.
+    prior_classification = await _classify_prior_step_input(text, "awaiting_flea_brand")
+    if prior_classification in ("food", "supplement"):
+        reask = (
+            f"Got it, added that to {pet.name}'s "
+            f"{'diet' if prior_classification == 'food' else 'supplements'}. "
+            + _flea_brand_question(pet.name)
+        )
+        await _save_prior_step_dietary_input(
+            db, user, pet, text, prior_classification, send_fn, reask
+        )
+        return
 
     # Inject brand into flea_tick entry (unless user said "not sure").
     brand = text.strip()
@@ -2912,6 +3095,153 @@ async def _store_meal_items(db, pet, items: list, food_type: str):
             logger.error("Failed to save diet item for pet %s: %s", str(pet.id), str(e))
 
 
+async def _ai_is_food_not_supplement(text: str) -> bool:
+    """
+    Use GPT to decide if the text describes regular food/meal items (not supplements).
+
+    Called in the supplements step to catch late-arriving meal messages — e.g. a user
+    who typed their diet across multiple messages where the second message arrives after
+    the state has already advanced to awaiting_supplements.
+
+    Returns True  → the text is food/meal (treat as additional diet, re-ask supplements).
+    Returns False → the text is a supplement, "none", or ambiguous (proceed normally).
+    """
+    client = _get_openai_onboarding_client()
+    prompt = (
+        "A pet parent was asked: 'Is your pet on any supplements right now? "
+        "(e.g., joint support, Omega-3, calcium — or just say None)'\n"
+        f"They replied: \"{text}\"\n\n"
+        "Determine if this reply describes regular food or meal items (eggs, chicken, "
+        "curd, kibble, rice, vegetables, etc.) rather than health supplements "
+        "(capsules, oils, powders, tablets, Omega-3, probiotics, joint support, etc.).\n\n"
+        "Answer YES if the reply is clearly food/meals with no supplement content.\n"
+        "Answer NO if it mentions supplements, says none/no/skip, or is ambiguous.\n\n"
+        'Return ONLY valid JSON: {"is_food": true|false}'
+    )
+    try:
+        response = await retry_openai_call(
+            client.chat.completions.create,
+            model="gpt-4.1-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=50,
+        )
+        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        data = json.loads(raw)
+        return bool(data.get("is_food", False))
+    except Exception as e:
+        logger.warning("AI supplement-vs-food check failed: %s", str(e))
+        return False  # Default: treat as supplement answer to avoid blocking the flow.
+
+
+async def _classify_prior_step_input(text: str, current_step: str) -> str:
+    """
+    Classify whether text belongs to a prior onboarding step rather than the current one.
+
+    Used from awaiting_preventive onwards to catch late-arriving diet or supplement
+    messages — e.g. a user who types across multiple WhatsApp messages where a later
+    message arrives after state has already advanced past the diet steps.
+
+    Returns:
+        "food"       — text is regular food/meal (belongs to awaiting_meal_details)
+        "supplement" — text is a health supplement (belongs to awaiting_supplements)
+        "on_topic"   — text appears to address the current step (default on failure)
+    """
+    _STEP_CONTEXT = {
+        "awaiting_preventive": (
+            "the pet's vaccination, deworming, flea & tick treatment, and blood test history"
+        ),
+        "awaiting_prev_retry": (
+            "any remaining vaccination, deworming, flea & tick, or blood test information"
+        ),
+        "awaiting_vaccine_type": (
+            "which type of vaccine the pet received (e.g. Rabies, DHPP, Bordetella)"
+        ),
+        "awaiting_flea_brand": (
+            "the brand/name of flea & tick treatment the pet uses (e.g. Simparica, NexGard)"
+        ),
+        "awaiting_documents": "uploading or skipping vaccine/vet documents",
+    }
+    step_context = _STEP_CONTEXT.get(current_step, "the current onboarding question")
+    client = _get_openai_onboarding_client()
+    prompt = (
+        f"During pet onboarding, the current question is about: {step_context}.\n"
+        f"The user replied: \"{text}\"\n\n"
+        "The user might have sent this message late — it could belong to an earlier "
+        "question about diet or supplements. Classify this reply:\n"
+        "- 'food': clearly describes regular food or meal items a pet eats "
+        "(kibble, chicken, rice, eggs, vegetables, curd, etc.) — NOT health supplements\n"
+        "- 'supplement': clearly describes a health supplement the pet takes "
+        "(Omega-3, joint support, probiotics, calcium, fish oil capsule, etc.) — NOT regular food\n"
+        "- 'on_topic': appears to address the current question, OR is ambiguous\n\n"
+        "Only return 'food' or 'supplement' when CERTAIN. Default to 'on_topic' if unsure.\n\n"
+        'Return ONLY valid JSON: {"classification": "food"|"supplement"|"on_topic"}'
+    )
+    try:
+        response = await retry_openai_call(
+            client.chat.completions.create,
+            model="gpt-4.1-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=50,
+        )
+        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        data = json.loads(raw)
+        classification = data.get("classification", "on_topic")
+        if classification not in ("food", "supplement", "on_topic"):
+            return "on_topic"
+        return classification
+    except Exception as e:
+        logger.warning("Prior-step input classification failed: %s", str(e))
+        return "on_topic"  # Default: treat as on-topic to avoid blocking the flow.
+
+
+async def _save_prior_step_dietary_input(
+    db,
+    user,
+    pet,
+    text: str,
+    classification: str,
+    send_fn,
+    reask_message: str,
+) -> None:
+    """
+    Persist a late-arriving diet or supplement message from a prior onboarding step,
+    then re-ask the current step's question so the user can still answer it.
+
+    Args:
+        classification: "food" or "supplement" (as returned by _classify_prior_step_input).
+        reask_message:  The question text to send after saving.
+    """
+    mobile = user._plaintext_mobile
+    od = _get_onboarding_data(user)
+    food_type = od.get("food_type", "mix")
+
+    if classification == "food":
+        extra_items = await _parse_diet_input(text)
+        await _store_meal_items(db, pet, extra_items, food_type)
+        # Also persist any supplement hidden inside the food message.
+        extra_supp_labels = await _store_meal_supplement_items(db, pet, text)
+        existing_labels = list(od.get("meal_supplement_labels") or [])
+        _set_onboarding_data(
+            user, "meal_supplement_labels", existing_labels + extra_supp_labels
+        )
+    else:  # supplement
+        items = await _parse_diet_input(text)
+        for entry in items:
+            label = entry[0]
+            detail = entry[1] if len(entry) > 1 else ""
+            try:
+                await add_diet_item(db, pet.id, "supplement", label, detail or None)
+            except Exception as e:
+                logger.error(
+                    "Failed to save supplement for pet %s: %s", str(pet.id), str(e)
+                )
+
+    db.commit()
+    await send_fn(db, mobile, reask_message)
+
+
 async def _ai_check_diet_relevance(text: str, pet_name: str) -> bool:
     """
     Use GPT to check if the user's message actually describes food/diet/meals.
@@ -3679,10 +4009,15 @@ async def _generate_doc_upload_reply(
         f"- Files already uploaded: {docs_uploaded}\n"
         f"- Files they can still upload: {remaining}\n"
         f"- Accepted formats: JPEG, PNG, PDF\n\n"
-        f"The user said: \"{user_message}\"\n\n"
-        "Reply in 1-2 short, warm sentences. Address what they said naturally. "
-        f"If they're asking whether they can add more, tell them they can send {remaining} more. "
-        "If remaining is 0, let them know they've hit the upload limit. "
+        f"The user sent a TEXT message (not a file): \"{user_message}\"\n\n"
+        "CRITICAL RULES:\n"
+        "- The user has NOT uploaded or shared anything — this is a text message only.\n"
+        "- NEVER say 'Thanks for sharing', 'Got it', 'Great', 'Awesome', or any phrase that implies they already shared a file.\n"
+        "- Do NOT treat words like 'sharing', 'sending', 'uploading' in their text as if they already did it.\n"
+        "- If they seem to be indicating they will upload soon (e.g. 'sharing', 'sending now'), simply encourage them to go ahead and send the file.\n"
+        f"- If they're asking whether they can add more, tell them they can send {remaining} more.\n"
+        "- If remaining is 0, let them know they've hit the upload limit.\n\n"
+        "Reply in 1-2 short, warm sentences that match the actual context. "
         "Do NOT mention 'skip', 'skipping', or any way to exit/continue the upload step. "
         "Do NOT use markdown headings. Use *bold* sparingly for key info only."
     )
@@ -3781,11 +4116,27 @@ async def _step_awaiting_documents(db, user, text_lower, send_fn):
         )
         return
 
+    # Guard against late-arriving diet/supplement messages from prior onboarding steps.
+    # Fetch pet early here; the variable is re-used below for upload-count logic.
+    pet = db.query(Pet).filter(Pet.user_id == user.id).order_by(Pet.created_at.desc()).first()
+    pet_name = pet.name if pet else "your pet"
+    if pet:
+        prior_classification = await _classify_prior_step_input(text_lower, "awaiting_documents")
+        if prior_classification in ("food", "supplement"):
+            reask = (
+                f"Got it, added that to {pet_name}'s "
+                f"{'diet' if prior_classification == 'food' else 'supplements'}. "
+                f"You can now send any vaccination, deworming, or vet documents — "
+                f"or reply *skip* to continue."
+            )
+            await _save_prior_step_dietary_input(
+                db, user, pet, text_lower, prior_classification, send_fn, reask
+            )
+            return
+
     # Count uploads using BOTH the DB and the in-memory batch tracker.
     # The in-memory count avoids a race where a text message arrives before
     # the async upload pipeline has committed the Document rows.
-    pet = db.query(Pet).filter(Pet.user_id == user.id).order_by(Pet.created_at.desc()).first()
-    pet_name = pet.name if pet else "your pet"
     db_count = 0
     in_memory_count = 0
     if pet:

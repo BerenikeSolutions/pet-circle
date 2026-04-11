@@ -28,6 +28,12 @@ Root cause: `_select_level2_message` only enforced O+N gating for slots within `
 Fix: Added post-schedule day gating in Level 2 using `NUDGE_POST_SCHEDULE_INTERVAL_DAYS`, with inactivity override still explicitly controlled by `ignore_schedule=True`.
 File(s): backend/app/services/nudge_scheduler.py, backend/tests/test_nudges_and_reminders_comprehensive.py
 
+## [2026-04-11] Late-arriving meal/supplement messages misclassified at every post-diet step
+What broke: When a user sent diet or supplement details across multiple WhatsApp messages, later messages arrived after state had already advanced. The wrong step handler processed them — food got stored as supplements, supplements got treated as preventive info, etc. — and the original step's question was never properly answered.
+Root cause: No onboarding step handler guarded against cross-step input. Each step blindly processed any incoming text using its own parser, without checking whether the message actually belonged to a prior step.
+Fix: Added two helpers — `_ai_is_food_not_supplement()` for the supplements step, and the generalised `_classify_prior_step_input()` + `_save_prior_step_dietary_input()` pair for all later steps. Guards inserted in: `awaiting_supplements`, `awaiting_preventive`, `awaiting_prev_retry`, `awaiting_vaccine_type`, `awaiting_flea_brand`, `awaiting_documents`. On detection, data is saved to the correct table and the current step's question is re-asked.
+File(s): backend/app/services/onboarding.py
+
 ## [2026-04-04] NudgesView category extras iteration failed TS target compatibility
 What broke: Frontend type-check and build failed after introducing NudgesView category grouping logic.
 Root cause: Spreading `Map.keys()` (`[...groups.keys()]`) required iterator downlevel support not available under the current TypeScript target/tooling settings.
