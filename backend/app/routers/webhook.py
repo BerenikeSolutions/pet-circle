@@ -51,8 +51,13 @@ _DEDUP_TTL_SECONDS = 3600  # 1 hour — Meta may retry webhooks for hours after 
 # Only text messages are buffered. Buttons and media bypass the buffer and
 # process immediately — they represent discrete, deliberate actions.
 _DEBOUNCE_SECONDS = 2.5
+_DEBOUNCE_SECONDS_LONG = 5.0  # For multi-message steps: preventive history, meal details
 _USER_MSG_BUFFERS: dict[str, list[dict]] = {}   # mobile → ordered list of message_data
 _USER_DEBOUNCE_TASKS: dict[str, "asyncio.Task"] = {}  # mobile → pending flush task
+_USER_DEBOUNCE_DURATIONS: dict[str, float] = {}  # mobile → active debounce duration
+
+# States where users commonly split a single thought across multiple rapid messages.
+_LONG_DEBOUNCE_STATES = frozenset({"awaiting_preventive", "awaiting_meal_details"})
 
 
 def _is_duplicate_message(message_id: str) -> bool:
@@ -93,10 +98,12 @@ async def _flush_user_messages(mobile: str) -> None:
     Cancelled and restarted each time a new message arrives within the window,
     so only the final message in a rapid burst triggers processing.
     """
-    await asyncio.sleep(_DEBOUNCE_SECONDS)
+    duration = _USER_DEBOUNCE_DURATIONS.get(mobile, _DEBOUNCE_SECONDS)
+    await asyncio.sleep(duration)
 
     messages = _USER_MSG_BUFFERS.pop(mobile, [])
     _USER_DEBOUNCE_TASKS.pop(mobile, None)
+    _USER_DEBOUNCE_DURATIONS.pop(mobile, None)
 
     if not messages:
         return
@@ -121,11 +128,11 @@ async def _flush_user_messages(mobile: str) -> None:
     asyncio.create_task(_process_message_background(merged))
 
 
-def _enqueue_text_or_dispatch(message_data: dict) -> None:
+def _enqueue_text_or_dispatch(message_data: dict, debounce_seconds: float = _DEBOUNCE_SECONDS) -> None:
     """
     Route a message to the debounce buffer (text) or direct dispatch (everything else).
 
-    Text messages are held for _DEBOUNCE_SECONDS so rapid multi-message bursts
+    Text messages are held for debounce_seconds so rapid multi-message bursts
     are merged into one before the state machine sees them. Buttons and media
     are dispatched immediately — they are deliberate, discrete actions.
     """
@@ -142,8 +149,9 @@ def _enqueue_text_or_dispatch(message_data: dict) -> None:
     if existing and not existing.done():
         existing.cancel()
 
-    # Append to this user's buffer.
+    # Append to this user's buffer and record the debounce duration for this window.
     _USER_MSG_BUFFERS.setdefault(mobile, []).append(message_data)
+    _USER_DEBOUNCE_DURATIONS[mobile] = debounce_seconds
 
     # Schedule a fresh flush after the idle window.
     _USER_DEBOUNCE_TASKS[mobile] = asyncio.create_task(
@@ -339,11 +347,28 @@ async def handle_whatsapp_message(request: Request, db: Session = Depends(get_db
         )
 
         # Route to debounce buffer (text) or immediate dispatch (button/media).
-        # Text messages are held for _DEBOUNCE_SECONDS and merged with any
+        # Text messages are held for debounce_seconds and merged with any
         # others from the same user so rapid multi-message bursts are processed
         # as one combined input rather than advancing the state machine
         # prematurely. Buttons and media bypass the buffer entirely.
-        _enqueue_text_or_dispatch(message_data)
+        # Steps where users split a thought across many quick messages
+        # (preventive history, meal details) use a longer 5s window.
+        debounce_duration = _DEBOUNCE_SECONDS
+        if from_number and from_number != "unknown":
+            try:
+                from app.core.encryption import hash_field as _hash_field
+                from app.models.user import User as _User
+                _mobile_hash = _hash_field(from_number)
+                _row = (
+                    db.query(_User.onboarding_state)
+                    .filter(_User.mobile_hash == _mobile_hash, _User.is_deleted == False)  # noqa: E712
+                    .first()
+                )
+                if _row and _row.onboarding_state in _LONG_DEBOUNCE_STATES:
+                    debounce_duration = _DEBOUNCE_SECONDS_LONG
+            except Exception:
+                pass
+        _enqueue_text_or_dispatch(message_data, debounce_seconds=debounce_duration)
 
     else:
         # Log non-message payloads (status updates, etc.) without dedup.
