@@ -1547,8 +1547,14 @@ async def _delayed_batch_extraction(
                     if not file_bytes:
                         fail_count += 1
                         doc_label = doc_id_to_name.get(str(doc.id), doc.file_path.split("/")[-1])
-                        failed_docs.append({"name": doc_label, "reason": "unclear", "extra": ""})
+                        failed_docs.append({"name": doc_label, "reason": "download_failed", "extra": ""})
                         doc.extraction_status = "failed"
+                        logger.error(
+                            "File download returned None for doc %s (backend=%s, path=%s)",
+                            str(doc.id),
+                            getattr(doc, "storage_backend", "supabase"),
+                            doc.file_path,
+                        )
                         bg_db.commit()
                         continue
 
@@ -1598,7 +1604,7 @@ async def _delayed_batch_extraction(
                 except TimeoutError:
                     fail_count += 1
                     doc_label = doc_id_to_name.get(str(doc.id), doc.file_path.split("/")[-1])
-                    failed_docs.append({"name": doc_label, "reason": "unclear", "extra": ""})
+                    failed_docs.append({"name": doc_label, "reason": "timeout", "extra": ""})
                     logger.error(
                         "Extraction timed out for doc %s (%d/%d) pet %s",
                         str(doc.id), idx, total, str(pet_id),
@@ -1887,14 +1893,18 @@ def _format_error_lines(failed_docs: list[dict], pet_name: str) -> list[str]:
     Each reason type gets one line (using plural/singular based on count).
 
     Reasons:
-        "unclear"   — extraction failed (image unreadable)
-        "wrong_pet" — document belongs to a different pet
-        "not_health"— document is not a health record
+        "unclear"         — GPT extraction failed (image unreadable or poor quality)
+        "download_failed" — file could not be retrieved from storage
+        "timeout"         — extraction exceeded the 120s processing limit
+        "wrong_pet"       — document belongs to a different pet
+        "not_health"      — document is not a health record
     """
     lines: list[str] = []
 
     # Group by reason
     unclear = [d for d in failed_docs if d.get("reason") == "unclear"]
+    download_failed = [d for d in failed_docs if d.get("reason") == "download_failed"]
+    timeout = [d for d in failed_docs if d.get("reason") == "timeout"]
     wrong_pet = [d for d in failed_docs if d.get("reason") == "wrong_pet"]
     not_health = [d for d in failed_docs if d.get("reason") == "not_health"]
 
@@ -1902,6 +1912,18 @@ def _format_error_lines(failed_docs: list[dict], pet_name: str) -> list[str]:
         lines.append(
             f"• '{doc['name']}' couldn't be processed as the image was unclear. "
             f"You can share a clearer picture and I'll update it right away."
+        )
+
+    for doc in download_failed:
+        lines.append(
+            f"• '{doc['name']}' couldn't be accessed from storage. "
+            f"Please try uploading it again and I'll process it right away."
+        )
+
+    for doc in timeout:
+        lines.append(
+            f"• '{doc['name']}' took too long to process. "
+            f"Please try uploading it again and I'll process it right away."
         )
 
     for doc in wrong_pet:
@@ -2118,12 +2140,23 @@ async def _send_deferred_care_plan(
         dashboard_link = _get_dashboard_link(db, pet)
         if fail_count > 0:
             # Surface failed-doc names in the care plan message using friendly tone.
-            unclear_docs = [d for d in failed_docs if d.get("reason") == "unclear"]
-            for doc in unclear_docs:
-                care_plan_msg += (
-                    f"\n\n• '{doc['name']}' couldn't be processed as the image was unclear. "
-                    f"You can share a clearer picture and I'll update it right away."
-                )
+            for doc in failed_docs:
+                reason = doc.get("reason", "unclear")
+                if reason == "download_failed":
+                    care_plan_msg += (
+                        f"\n\n• '{doc['name']}' couldn't be accessed from storage. "
+                        f"Please try uploading it again and I'll process it right away."
+                    )
+                elif reason == "timeout":
+                    care_plan_msg += (
+                        f"\n\n• '{doc['name']}' took too long to process. "
+                        f"Please try uploading it again and I'll process it right away."
+                    )
+                elif reason == "unclear":
+                    care_plan_msg += (
+                        f"\n\n• '{doc['name']}' couldn't be processed as the image was unclear. "
+                        f"You can share a clearer picture and I'll update it right away."
+                    )
         if dashboard_link:
             care_plan_msg += f"\n\nView {pet.name}'s full care plan here 👇\n{dashboard_link}"
             care_plan_msg += (

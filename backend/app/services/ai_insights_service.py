@@ -782,7 +782,8 @@ async def generate_recognition_bullets(db: Session, pet: Pet) -> list[Bullet]:
             {"icon": "💉", "label": "0 preventive care items tracked"}
         )
 
-    # 3. Diet — build a specific food + supplement line
+    # 3. Diet — build a specific food + supplement line.
+    # What We Found shows all food types (packaged + homemade).
     food_items = [d for d in diet_items if d.type in ("packaged", "homemade")]
     supplement_items = [d for d in diet_items if d.type == "supplement"]
 

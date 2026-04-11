@@ -1891,7 +1891,7 @@ async def extract_and_process_document(
             raw_json = await _call_openai_extraction(document_text)
 
         # --- Step 2: Validate and normalize ---
-        extracted_items, document_name, extracted_pet_name, metadata = _validate_extraction_json(raw_json, file_path=file_path)
+        extracted_items, document_name, extracted_pet_name, metadata = _validate_extraction_json(raw_json, file_path=document.file_path)
         results["document_type"] = metadata["document_type"]
         results["document_category"] = metadata["document_category"]
         results["diagnostic_summary"] = metadata["diagnostic_summary"]
