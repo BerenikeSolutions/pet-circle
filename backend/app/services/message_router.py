@@ -528,10 +528,15 @@ async def route_message(db: Session, message_data: dict) -> None:
                 greeting_name = profile_name.split()[0] if profile_name else "there"
                 await send_text_message(
                     db, from_number,
-                    f"Hello {greeting_name}! 👋 Welcome to PetCircle — your pet's "
-                    f"personalised care companion, right here on WhatsApp. I'm here "
-                    f"to make sure your pet never misses the care they deserve.\n\n"
-                    f"Let's start — what's your pet's name?",
+                    f"Hi {greeting_name}, welcome to PetCircle — your pet care companion.\n\n"
+                    f"We're here to make pet parenting simpler, helping you stay on top of your pet's health, nutrition, and everyday wellness.\n\n"
+                    f"Here's how we support you:\n"
+                    f"• Organise your pet's complete health records\n"
+                    f"• Send timely reminders with one-click reordering\n"
+                    f"• Deliver personalised diet and nutrition recommendations\n"
+                    f"• Highlight health patterns and support better vet conversations\n\n"
+                    f"Because your pet deserves the very best care.\n\n"
+                    f"Let's get started — what's your pet's name?",
                 )
                 return
             # Otherwise fall through to handle user as existing.
