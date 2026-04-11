@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import BottomSheet from "@/components/ui/BottomSheet";
 
 export interface ResolvedProduct {
@@ -41,19 +41,15 @@ export default function ProductSelectorCard({
   onAddToCart,
   hideSearchMore,
 }: ProductSelectorCardProps) {
-  const firstInStock = products.find((p) => p.in_stock);
-  const [selectedSku, setSelectedSku] = useState<string>(firstInStock?.sku_id || products[0]?.sku_id || "");
+  const [selectedSku, setSelectedSku] = useState<string>("");
   const [qty, setQty] = useState(1);
 
-  // Reset selection when products change
-  const resetKey = products.map((p) => p.sku_id).join(",");
-  const [prevKey, setPrevKey] = useState(resetKey);
-  if (resetKey !== prevKey) {
-    setPrevKey(resetKey);
+  // Reset selection whenever the product list changes (e.g. popup opens with new products)
+  useEffect(() => {
     const first = products.find((p) => p.in_stock) || products[0];
     setSelectedSku(first?.sku_id || "");
     setQty(1);
-  }
+  }, [products]);
 
   const handleAdd = () => {
     if (selectedSku) onAddToCart(selectedSku, qty);

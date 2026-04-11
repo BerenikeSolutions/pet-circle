@@ -233,24 +233,6 @@ export default function DocumentUploadModal({ open, token, onClose }: DocumentUp
       {/* Actions */}
       <button
         type="button"
-        onClick={() => inputRef.current?.click()}
-        style={{
-          width: "100%",
-          padding: "11px 16px",
-          borderRadius: 10,
-          border: "1px solid var(--border, #e0e0e0)",
-          background: "var(--white, #fff)",
-          color: "var(--t1, #000)",
-          fontSize: 14,
-          fontWeight: 600,
-          cursor: "pointer",
-          marginBottom: 10,
-        }}
-      >
-        + Add more files
-      </button>
-      <button
-        type="button"
         onClick={handleClose}
         disabled={anyUploading}
         style={{
