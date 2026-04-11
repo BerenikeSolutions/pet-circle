@@ -1503,13 +1503,17 @@ async def _delayed_batch_extraction(
                 f"I'm starting to process them now to update {pet.name}'s records."
             )
             if unsupported_count > 0:
+                _doc_s = "s" if unsupported_count != 1 else ""
+                _they_re = "they're" if unsupported_count != 1 else "it's"
+                _these = "these" if unsupported_count != 1 else "this"
+                _them = "them" if unsupported_count != 1 else "it"
                 ack += (
                     f"\n\nJust a heads up: {unsupported_count} "
-                    f"document{'s' if unsupported_count != 1 else ''} couldn't be "
-                    f"read as {'they\'re' if unsupported_count != 1 else 'it\'s'} in "
+                    f"document{_doc_s} couldn't be "
+                    f"read as {_they_re} in "
                     f"an unsupported format (like .docx). You can share "
-                    f"{'these' if unsupported_count != 1 else 'this'} as an image or "
-                    f"PDF and I'll pick {'them' if unsupported_count != 1 else 'it'} "
+                    f"{_these} as an image or "
+                    f"PDF and I'll pick {_them} "
                     f"up right away.\n\nGive me a few seconds while I go through the rest."
                 )
             else:
