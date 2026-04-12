@@ -447,6 +447,18 @@ def _resolve_document_category(
     This keeps the 5 specific categories (Blood Report, Urine Report, Imaging,
     Prescription, PCR & Parasite Panel) authoritative over GPT's legacy "Diagnostic".
     """
+    combined = f"{(document_name or '').lower()} {os.path.basename(file_path or '').lower()}"
+
+    # Lab-report keyword signals take precedence over structural prescription
+    # heuristics.  A urine culture that extracts conditions (e.g. E. coli) must
+    # still be classified as "Urine Report", not "Prescription".
+    if any(kw in combined for kw in ("urine culture", "urinalysis", "urine test", "urine report")):
+        return "Urine Report"
+    if any(kw in combined for kw in ("blood report", "cbc report", "hemogram report", "haematology report")):
+        return "Blood Report"
+    if any(kw in combined for kw in ("pcr", "parasite panel", "parasite screen")):
+        return "PCR & Parasite Panel"
+
     # Structural signals — clinical_exam is prompt-guaranteed prescription-only,
     # and any extracted condition means a vet diagnosed + prescribed something.
     if isinstance(clinical_exam, dict) and any(
@@ -456,17 +468,11 @@ def _resolve_document_category(
     if conditions and any(isinstance(c, dict) for c in conditions):
         return "Prescription"
 
-    combined = f"{(document_name or '').lower()} {os.path.basename(file_path or '').lower()}"
-
     # Always trust strong keyword signals in filename / document name.
     if "prescription" in combined or " rx " in combined:
         return "Prescription"
-    if any(kw in combined for kw in ("pcr", "parasite panel", "parasite screen")):
-        return "PCR & Parasite Panel"
     if any(kw in combined for kw in ("ultrasound", "usg", "x-ray", "xray", " xray")):
         return "Imaging"
-    if any(kw in combined for kw in ("urine culture", "urinalysis", "urine test")):
-        return "Urine Report"
 
     # Vet-origin signal: if a doctor or clinic name is identified, the document came from a
     # vet's office. Use this to rescue two failure modes:

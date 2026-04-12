@@ -10,7 +10,7 @@ export default function EndNoteCard({ petName, onUploadClick }: EndNoteCardProps
     <div
       className="card"
       style={{
-        borderLeft: "8px solid #E07D41",
+        borderLeft: "8px solid var(--brand-primary, #D44800)",
         paddingLeft: 16,
       }}
     >
@@ -23,7 +23,7 @@ export default function EndNoteCard({ petName, onUploadClick }: EndNoteCardProps
             marginBottom: 8,
           }}
         >
-          Great start — {petName}&apos;s care is in good hands.
+          Great Start! {petName}&apos;s Care is in good hands.
         </div>
         <div
           style={{
@@ -39,7 +39,7 @@ export default function EndNoteCard({ petName, onUploadClick }: EndNoteCardProps
         <div
           style={{
             fontSize: 14,
-            color: "#E07D41",
+            color: "var(--orange, #FF6B35)",
             fontStyle: "italic",
             marginBottom: 10,
           }}
@@ -65,7 +65,7 @@ export default function EndNoteCard({ petName, onUploadClick }: EndNoteCardProps
           padding: "12px 16px",
           borderRadius: 10,
           border: "none",
-          background: "#E07D41",
+          background: "var(--brand-primary, #D44800)",
           color: "white",
           fontSize: 14,
           fontWeight: 700,

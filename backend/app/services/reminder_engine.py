@@ -347,6 +347,12 @@ def _candidates_from_preventive_records(db: Session, today: date) -> list[Remind
             or (record.medicine_name or "Unknown")
         )
         category = _classify_item(item_name)
+
+        # Skip non-mandatory vaccines that were never actually given (phantom entries).
+        # These are recommendations, not tracked items — no reminder needed.
+        if category == "vaccine" and master and not master.is_mandatory and not record.last_done_date:
+            continue
+
         snooze = _snooze_for_category(category)
 
         stage = _determine_stage(db, record.id, due, today, source_type="preventive_record")

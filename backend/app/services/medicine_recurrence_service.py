@@ -19,6 +19,7 @@ import re
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.core.constants import OPENAI_QUERY_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +165,7 @@ def _gpt_recurrence(
         )
 
         response = client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model=OPENAI_QUERY_MODEL,
             temperature=0.0,
             max_tokens=100,
             messages=[

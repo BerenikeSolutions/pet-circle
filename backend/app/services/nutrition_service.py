@@ -186,14 +186,13 @@ def _build_food_estimation_prompt(
     conditions: list[str] | None = None,
 ) -> str:
     """
-    Build a pet-specific food estimation prompt using ALL known pet info.
+    Build a comprehensive pet-specific food estimation prompt.
 
-    Previously the prompt was hardcoded to "medium-sized dog" which produced
-    generic estimates regardless of the actual pet. Now we pass species,
-    breed, weight, age, gender and any diagnosed health conditions so the
-    model can size the serving correctly and apply species-specific and
-    condition-specific nutrient rules (e.g. low phosphorus for kidney
-    disease, taurine for cats, joint support for hip dysplasia).
+    Uses a strict veterinary nutritionist decision framework:
+    1. Resolve food identity (exact product, brand, variant)
+    2. Determine serving size (brand guidelines / user-provided / UNKNOWN)
+    3. Estimate daily nutrition with confidence scoring
+    4. Fail-safe when data is insufficient
     """
     species_norm = (species or "dog").lower().strip()
     breed_norm = (breed or "mixed breed").strip()
@@ -202,6 +201,17 @@ def _build_food_estimation_prompt(
     gender_part = f" {gender.lower()}" if gender else ""
 
     pet_descriptor = f"a {weight_part}{breed_norm}{gender_part} {species_norm}{age_part}"
+
+    # Age category for feeding guideline selection
+    age_category = "adult"
+    if age_description:
+        desc_lower = age_description.lower()
+        if "month" in desc_lower and "year" not in desc_lower:
+            age_category = "puppy" if species_norm == "dog" else "kitten"
+        elif "senior" in desc_lower or any(
+            f"{y} year" in desc_lower for y in range(8, 20)
+        ):
+            age_category = "senior"
 
     species_rules = ""
     if species_norm == "cat":
@@ -231,24 +241,65 @@ def _build_food_estimation_prompt(
         )
 
     return (
-        "You are a board-certified veterinary nutritionist. Given a food "
-        "product name and type, estimate its nutritional content per typical "
-        f"DAILY serving for {pet_descriptor}. Scale the serving size to the "
-        "pet's body weight — a 5kg pet needs a much smaller serving than a "
-        "40kg pet.\n\n"
-        "Rules:\n"
-        "- Return ONLY valid JSON with these keys:\n"
-        "  calories_per_serving (int), protein_pct (float), fat_pct (float), fibre_pct (float), "
-        "moisture_pct (float), calcium (float, %), phosphorus (float, %), "
-        "omega_3_mg (int), omega_6_mg (int), vitamin_e_iu (int), vitamin_d3_iu (int), "
-        "glucosamine_mg (int), probiotics (bool)\n"
-        "- For packaged food, estimate based on typical commercial pet food values "
-        "for this species and size.\n"
-        "- For homemade food, estimate based on common home-cooked recipes for this species.\n"
-        "- For supplements, provide the nutrient the supplement is known for.\n"
+        "You are a board-certified veterinary nutritionist.\n\n"
+        "Your task: Given a food item name and type, estimate its DAILY nutritional "
+        f"intake for {pet_descriptor}.\n\n"
+        "Follow this strict decision framework:\n\n"
+        "---\n"
+        "STEP 1 — RESOLVE FOOD IDENTITY\n"
+        "---\n"
+        "- Identify the most likely specific product based on the food name, "
+        f"species ({species_norm}), and age ({age_category}).\n"
+        f"- Example: \"Pedigree\" + {age_category} {species_norm} → Pedigree "
+        f"{age_category.title()} {species_norm.title()} Food\n"
+        "- If multiple variants are possible, choose the most common one and reduce confidence.\n"
+        "- If product identity is highly ambiguous, reduce confidence.\n\n"
+        "---\n"
+        "STEP 2 — DETERMINE SERVING SIZE\n"
+        "---\n"
+        "CASE A: USER PROVIDED QUANTITY\n"
+        "- If the user message includes a daily portion (e.g. \"200g/day\", \"2 cups/day\"), "
+        "use EXACTLY that quantity. Do NOT override, scale, or reinterpret it.\n\n"
+        "CASE B: COMMERCIAL / PACKAGED FOOD AND NO QUANTITY PROVIDED\n"
+        "- Use ONLY official brand feeding guidelines for the product.\n"
+        f"- Use pet weight ({weight_part.strip() or 'unknown'}) and age ({age_category}) "
+        "ONLY to select the correct feeding range.\n"
+        "- Choose a reasonable midpoint within that range.\n"
+        "- Do NOT invent or extrapolate beyond brand guidance.\n\n"
+        "CASE C: HOMEMADE / GENERIC FOOD AND NO QUANTITY PROVIDED\n"
+        "- DO NOT estimate or assume any serving size.\n"
+        "- Set confidence below 0.6.\n\n"
+        "IF serving size cannot be determined with confidence, set confidence < 0.6.\n\n"
+        "---\n"
+        "STEP 3 — NUTRITION ESTIMATION\n"
+        "---\n"
+        "- Estimate TOTAL DAILY intake based on determined serving size.\n"
+        "- Ensure values are realistic and internally consistent.\n"
+        "- Macro percentages must remain within realistic biological limits.\n"
+        "- Total calories must fall within realistic daily intake ranges "
+        f"for {pet_descriptor}.\n"
+        "- Be conservative with estimates.\n\n"
         f"{species_rules}"
         f"{condition_rules}"
-        "- Be conservative with estimates.\n"
+        "---\n"
+        "OUTPUT FORMAT\n"
+        "---\n"
+        "Return ONLY valid JSON with these exact keys:\n"
+        "  resolved_name (string — the specific product you identified),\n"
+        "  confidence (float 0-1),\n"
+        "  serving_description (string — e.g. \"250g/day based on Royal Canin guidelines\"),\n"
+        "  calories_per_day (int),\n"
+        "  protein_pct (float), fat_pct (float), fibre_pct (float), moisture_pct (float),\n"
+        "  calcium (float, %), phosphorus (float, %),\n"
+        "  omega_3_mg (int), omega_6_mg (int), vitamin_e_iu (int), vitamin_d3_iu (int),\n"
+        "  glucosamine_mg (int), probiotics (bool)\n\n"
+        "---\n"
+        "FAIL-SAFE\n"
+        "---\n"
+        "If product identity is ambiguous OR serving size is missing/unclear "
+        "OR confidence < 0.6, RETURN:\n"
+        '{"confidence": <value>, "error": "INSUFFICIENT_DATA", '
+        '"message": "Provide exact SKU or serving size for accurate diet analysis"}\n\n'
         "- No explanation, no markdown — JSON only"
     )
 
@@ -456,6 +507,7 @@ async def estimate_food_nutrition(
     age_description: str | None = None,
     gender: str | None = None,
     conditions: list[str] | None = None,
+    daily_portion_g: int | None = None,
 ) -> dict | None:
     """
     Estimate nutrition for foods not matched in product_catalog.
@@ -475,8 +527,10 @@ async def estimate_food_nutrition(
         if conditions_sorted else "none"
     )
     # Encode pet context into the cache key (avoids a schema migration).
+    # v2 prefix invalidates old cache entries from the previous prompt version.
+    portion_key = str(daily_portion_g) if daily_portion_g and daily_portion_g > 0 else "unset"
     label_normalized = (
-        f"{species_norm}|{bucket}|{cond_hash}|{food_label.lower().strip()}"
+        f"v2|{species_norm}|{bucket}|{cond_hash}|{portion_key}|{food_label.lower().strip()}"
     )
 
     # 1. Check DB cache
@@ -506,6 +560,7 @@ async def estimate_food_nutrition(
             _call_openai_food_estimation,
             food_label, food_type,
             species, breed, weight_kg, age_description, gender, conditions_sorted,
+            daily_portion_g,
         )
     except Exception as e:
         logger.error("OpenAI food estimation failed: %s", e)
@@ -540,6 +595,7 @@ async def _call_openai_food_estimation(
     age_description: str | None = None,
     gender: str | None = None,
     conditions: list[str] | None = None,
+    daily_portion_g: int | None = None,
 ) -> dict | None:
     """Call OpenAI to estimate nutritional content of a food item."""
     client = _get_openai_client()
@@ -552,6 +608,8 @@ async def _call_openai_food_estimation(
         conditions=conditions,
     )
     user_prompt = f"Food name: {food_label}\nType: {food_type}"
+    if daily_portion_g and daily_portion_g > 0:
+        user_prompt += f"\nUser-provided daily portion: {daily_portion_g}g"
 
     response = await client.chat.completions.create(
         model=OPENAI_QUERY_MODEL,
@@ -566,10 +624,21 @@ async def _call_openai_food_estimation(
     raw = response.choices[0].message.content
     logger.debug("OpenAI food estimation raw: %s", raw)
     try:
-        return json.loads(raw)
+        result = json.loads(raw)
     except (json.JSONDecodeError, TypeError) as e:
         logger.error("Failed to parse food estimation response: %s — raw: %s", e, raw)
         return None
+
+    # Fail-safe: reject low-confidence or error responses
+    if result.get("error") == "INSUFFICIENT_DATA":
+        logger.warning("Insufficient data for food: %s — %s", food_label, result.get("message"))
+        return None
+    confidence = result.get("confidence", 1.0)
+    if isinstance(confidence, (int, float)) and confidence < 0.6:
+        logger.warning("Low confidence (%.2f) for food: %s", confidence, food_label)
+        return None
+
+    return result
 
 
 # ─── Step 3d: AI Recommendation ─────────────────────────────────────
@@ -734,6 +803,7 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
                 age_description=pet_age_desc,
                 gender=pet_gender,
                 conditions=condition_full_names,
+                daily_portion_g=getattr(item, "daily_portion_g", None),
             )
         except Exception as e:
             logger.error("Food estimation failed for %s: %s", item.label, e)
@@ -852,7 +922,7 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
 
 def _accumulate_from_estimation(actual: dict, est: dict) -> None:
     """Accumulate nutritional values from AI-estimated food nutrition."""
-    actual["calories"] += int(est.get("calories_per_serving", 0))
+    actual["calories"] += int(est.get("calories_per_day", 0) or est.get("calories_per_serving", 0))
     actual["protein"] = max(actual["protein"], float(est.get("protein_pct", 0)))
     actual["fat"] = max(actual["fat"], float(est.get("fat_pct", 0)))
     actual["fibre"] = max(actual["fibre"], float(est.get("fibre_pct", 0)))

@@ -48,7 +48,7 @@ Rules:
 ```
 
 **Model Configuration:**
-- Model: `gpt-4.1-mini` (OPENAI_QUERY_MODEL)
+- Model: `gpt-4.1` (OPENAI_QUERY_MODEL)
 - Temperature: 0 (deterministic)
 - Max Tokens: 1500
 - Retry Policy: 3 attempts (1s, 2s backoff)
@@ -83,7 +83,7 @@ Do not include any explanation outside the JSON object.
 ```
 
 **Model Configuration:**
-- Model: `gpt-4.1-mini`
+- Model: `gpt-4.1`
 - Temperature: 0
 - Max Tokens: 300
 - Response Format: JSON
@@ -114,7 +114,7 @@ Do not include any explanation outside the JSON object.
 ```
 
 **Model Configuration:**
-- Model: `gpt-4.1-mini`
+- Model: `gpt-4.1`
 - Temperature: 0
 - Max Tokens: 500
 - Response Format: JSON
@@ -147,7 +147,7 @@ Respond with ONLY valid JSON array:
 ```
 
 **Model Configuration:**
-- Model: `gpt-4.1-mini`
+- Model: `gpt-4.1`
 - Temperature: 0
 - Max Tokens: 800
 - Response Format: JSON Array
@@ -172,7 +172,7 @@ Be encouraging and parent-friendly. Plain text only — no bullets, headers, or 
 ```
 
 **Model Configuration:**
-- Model: `gpt-4.1-mini`
+- Model: `gpt-4.1`
 - Temperature: 0.6
 - Max Tokens: 200
 - Cache Duration: 30 days (NUTRITION_IMPORTANCE_CACHE_DAYS)
@@ -232,7 +232,7 @@ Orderable items:
 ```
 
 **Model Configuration:**
-- Model: `gpt-4.1-mini`
+- Model: `gpt-4.1`
 - Temperature: 0
 - Max Tokens: 500
 - Response Format: JSON Object
@@ -269,7 +269,7 @@ Rules:
 ```
 
 **Model Configuration:**
-- Model: `gpt-4.1-mini`
+- Model: `gpt-4.1`
 - Temperature: 0
 - Max Tokens: 500
 - Response Format: JSON
@@ -316,7 +316,7 @@ Rules:
 ```
 
 **Model Configuration:**
-- Model: `gpt-4.1-mini`
+- Model: `gpt-4.1`
 - Temperature: 0
 - Max Tokens: 500
 - Response Format: JSON
@@ -344,7 +344,7 @@ Rules:
 ```
 
 **Model Configuration:**
-- Model: `gpt-4.1-mini`
+- Model: `gpt-4.1`
 - Temperature: 0.7
 - Max Tokens: 200
 - Cache Duration: 4 hours (in-process TTL, per-recipe)
@@ -389,7 +389,7 @@ Requirements:
 ```
 
 **Model Configuration:**
-- Model: `gpt-4.1-mini`
+- Model: `gpt-4.1`
 - Temperature: 0.7
 - Max Tokens: 1500
 - Response Format: JSON Array
@@ -423,7 +423,7 @@ Rules:
 ```
 
 **Model Configuration:**
-- Model: `gpt-4.1-mini`
+- Model: `gpt-4.1`
 - Temperature: 0
 - Max Tokens: 200
 - Response Format: JSON
@@ -466,7 +466,7 @@ What is the recommended interval between doses/applications in days?
 ```
 
 **Model Configuration:**
-- Model: `gpt-4.1-mini`
+- Model: `gpt-4.1`
 - Temperature: 0
 - Max Tokens: 100
 - Response Format: JSON
@@ -492,7 +492,7 @@ Return as valid JSON only.
 ```
 
 **Model Configuration:**
-- Model: `gpt-4.1-mini`
+- Model: `gpt-4.1`
 - Temperature: 0
 - Max Tokens: 600
 - Response Format: JSON
@@ -577,7 +577,7 @@ Always validate inputs and handle errors gracefully.
 ```
 
 **Model Configuration:**
-- Model: `gpt-4.1-mini`
+- Model: `gpt-4.1`
 - Temperature: 0.7
 - Max Tokens: 300
 
@@ -591,27 +591,27 @@ Always validate inputs and handle errors gracefully.
 
 | Purpose | Model | Temperature | Max Tokens | Caching |
 |---------|-------|-------------|-----------|---------|
-| Query Engine | gpt-4.1-mini | 0 | 1500 | None |
-| Health Summary | gpt-4.1-mini | 0 | 500 | 7 days |
-| Conditions Summary | gpt-4.1-mini | 0 | 300 | 7 days |
-| Vet Questions | gpt-4.1-mini | 0 | 800 | 7 days |
-| Nutrition Importance | gpt-4.1-mini | 0.6 | 200 | 30 days |
+| Query Engine | gpt-4.1 | 0 | 1500 | None |
+| Health Summary | gpt-4.1 | 0 | 500 | 7 days |
+| Conditions Summary | gpt-4.1 | 0 | 300 | 7 days |
+| Vet Questions | gpt-4.1 | 0 | 800 | 7 days |
+| Nutrition Importance | gpt-4.1 | 0.6 | 200 | 30 days |
 | What We Found Bullets | *N/A (Database only)* | — | — | — |
-| Care Plan Reasons | gpt-4.1-mini | 0 | 500 | Per-request |
-| Nutrition Targets | gpt-4.1-mini | 0 | 500 | Variable |
-| Food Estimation | gpt-4.1-mini | 0 | 500 | Variable |
-| Nutrition Recommendation | gpt-4.1-mini | 0.7 | 200 | 4 hours |
-| Product Recommendations | gpt-4.1-mini | 0.7 | 1500 | Per-profile |
-| Weight Lookup | gpt-4.1-mini | 0 | 200 | Variable |
-| Medicine Recurrence | gpt-4.1-mini | 0 | 100 | Per-profile |
-| Life Stage Traits | gpt-4.1-mini | 0 | 600 | Per-pet |
+| Care Plan Reasons | gpt-4.1 | 0 | 500 | Per-request |
+| Nutrition Targets | gpt-4.1 | 0 | 500 | Variable |
+| Food Estimation | gpt-4.1 | 0 | 500 | Variable |
+| Nutrition Recommendation | gpt-4.1 | 0.7 | 200 | 4 hours |
+| Product Recommendations | gpt-4.1 | 0.7 | 1500 | Per-profile |
+| Weight Lookup | gpt-4.1 | 0 | 200 | Variable |
+| Medicine Recurrence | gpt-4.1 | 0 | 100 | Per-profile |
+| Life Stage Traits | gpt-4.1 | 0 | 600 | Per-pet |
 | Document Extraction | gpt-4.1 | 0 | 1500 | None |
-| Order Assistant | gpt-4.1-mini | 0.7 | 300 | None |
+| Order Assistant | gpt-4.1 | 0.7 | 300 | None |
 
 ### Model Selection Logic
 
 - **gpt-4.1**: Used for complex document parsing (extraction) where accuracy is critical
-- **gpt-4.1-mini**: Used for most dashboard generation tasks where cost-efficiency and speed matter
+- **gpt-4.1**: Used for most dashboard generation tasks where cost-efficiency and speed matter
 - **Temperature 0**: Deterministic, factual responses (queries, targets, lookups, extraction)
 - **Temperature 0.6-0.7**: Creative, varied responses (recommendations, nutritional advice, conversational)
 
@@ -646,7 +646,7 @@ Never provide medical diagnoses or treatment recommendations. Always defer to ve
 If LLM call fails, fallback to reasonable defaults rather than crashing or leaving the UI broken.
 
 ### 5. Cost Efficiency
-Use gpt-4.1-mini for most tasks; reserve gpt-4.1 for extraction where accuracy is critical.
+Use gpt-4.1 for most tasks; reserve gpt-4.1 for extraction where accuracy is critical.
 
 ### 6. Caching
 Cache results where appropriate to reduce API calls and improve response times:

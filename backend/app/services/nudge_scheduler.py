@@ -42,6 +42,7 @@ from app.core.constants import (
     NUDGE_MIN_GAP_HOURS,
     NUDGE_POST_SCHEDULE_INTERVAL_DAYS,
     NUDGE_SCHEDULE_DAYS,
+    OPENAI_QUERY_MODEL,
 )
 from app.core.encryption import decrypt_field
 from app.core.log_sanitizer import mask_phone
@@ -815,7 +816,7 @@ def _get_or_generate_nudge_insight(db: Session, user: User, pet: Pet) -> str | N
         from openai import OpenAI
         client = OpenAI(api_key=settings.OPENAI_API_KEY)
         resp = client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=120,
             temperature=0.7,

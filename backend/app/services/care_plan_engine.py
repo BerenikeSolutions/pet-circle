@@ -998,14 +998,15 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
                 # historical completion evidence or an active prescription.
                 continue
 
-            # Non-core vaccines (e.g. Leptospirosis, Canine Influenza) should
-            # only appear when the user has logged a completion date.  Without
-            # this guard they show up with a NO_HISTORY classification and a
-            # rolling "next_due = today + 365" that looks like a phantom update.
+            # Non-mandatory vaccines (e.g. Kennel Cough, CCoV, Leptospirosis)
+            # should only appear when the user has logged a completion date.
+            # Without this guard they show up with a NO_HISTORY classification
+            # and a rolling "next_due = today + 365" that looks like a phantom
+            # quick-fix recommendation the user never asked for.
             if (
                 test_type == "vaccine"
                 and record.last_done_date is None
-                and not bool(getattr(master, "is_core", False))
+                and not bool(getattr(master, "is_mandatory", False))
             ):
                 continue
 
@@ -1182,7 +1183,7 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
                 "name": name,
                 "test_type": test_type,
                 "freq": freq_label,
-                "next_due": next_due.isoformat() if next_due else None,
+                "next_due": next_due.strftime("%d/%m/%y") if next_due else None,
                 "status_tag": status_tag,
                 "classification": classification.value,
                 "reason": None,

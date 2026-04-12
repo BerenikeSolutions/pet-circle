@@ -45,6 +45,7 @@ from app.core.constants import (
     MAX_PENDING_DOCS_PER_PET,
     MAX_PET_WEIGHT_KG,
     MAX_PETS_PER_USER,
+    OPENAI_QUERY_MODEL,
 )
 from app.core.encryption import decrypt_field, encrypt_field, hash_field
 from app.core.log_sanitizer import mask_phone
@@ -148,8 +149,15 @@ def _count_tracked_preventive_items_split(db: Session, pet_id) -> tuple[int, int
             ),
         )
     )
+    # Match vaccine keywords against BOTH PreventiveMaster.item_name and
+    # CustomPreventiveItem.item_name.  Vaccines logged as custom items (e.g.
+    # when the extractor couldn't map them to a master) have master=NULL after
+    # the outer-join, so a filter on PreventiveMaster.item_name alone would
+    # undercount them to zero — which surfaces as "N preventive care items"
+    # with no vaccine split in the care-plan message.
     vaccine_filter = _or(
-        *[PreventiveMaster.item_name.ilike(f"%{kw}%") for kw in _CARE_PLAN_VACCINE_TERMS]
+        *[PreventiveMaster.item_name.ilike(f"%{kw}%") for kw in _CARE_PLAN_VACCINE_TERMS],
+        *[CustomPreventiveItem.item_name.ilike(f"%{kw}%") for kw in _CARE_PLAN_VACCINE_TERMS],
     )
     vaccine_count = base_q.filter(vaccine_filter).count()
     total = base_q.count()
@@ -757,7 +765,7 @@ async def _ai_extract_pet_name_correction(text: str, current_name: str | None = 
     try:
         response = await retry_openai_call(
             client.chat.completions.create,
-            model="gpt-4.1-mini",
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=80,
@@ -1895,7 +1903,7 @@ async def _extract_meal_supplement_items(text: str) -> list[tuple[str, str]]:
     try:
         response = await retry_openai_call(
             client.chat.completions.create,
-            model="gpt-4.1-mini",
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=350,
@@ -2957,7 +2965,7 @@ async def _ai_clarify_input(
     try:
         response = await retry_openai_call(
             client.chat.completions.create,
-            model="gpt-4.1-mini",
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
             max_tokens=150,
@@ -3033,7 +3041,7 @@ async def _ai_resolve_example_confirmation(
     try:
         response = await retry_openai_call(
             client.chat.completions.create,
-            model="gpt-4.1-mini",
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=300,
@@ -3130,7 +3138,7 @@ async def _ai_is_food_not_supplement(text: str) -> bool:
     try:
         response = await retry_openai_call(
             client.chat.completions.create,
-            model="gpt-4.1-mini",
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=50,
@@ -3196,7 +3204,7 @@ async def _classify_prior_step_input(text: str, current_step: str) -> str:
     try:
         response = await retry_openai_call(
             client.chat.completions.create,
-            model="gpt-4.1-mini",
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=50,
@@ -3278,7 +3286,7 @@ async def _ai_check_diet_relevance(text: str, pet_name: str) -> bool:
     try:
         response = await retry_openai_call(
             client.chat.completions.create,
-            model="gpt-4.1-mini",
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=50,
@@ -3315,7 +3323,7 @@ async def _ai_parse_food_type(text: str, pet_name: str) -> str | None:
     try:
         response = await retry_openai_call(
             client.chat.completions.create,
-            model="gpt-4.1-mini",
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=100,
@@ -3379,7 +3387,7 @@ async def _parse_diet_input(text: str) -> list[tuple[str, str, str]]:
     try:
         response = await retry_openai_call(
             client.chat.completions.create,
-            model="gpt-4.1-mini",
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=500,
@@ -3470,7 +3478,7 @@ async def _parse_breed_age(text: str) -> dict:
     try:
         response = await retry_openai_call(
             client.chat.completions.create,
-            model="gpt-4.1-mini",
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=200,
@@ -3510,7 +3518,7 @@ async def _parse_gender_weight_neutered(text: str) -> dict:
     try:
         response = await retry_openai_call(
             client.chat.completions.create,
-            model="gpt-4.1-mini",
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=100,
@@ -3593,7 +3601,7 @@ async def _parse_preventive_care(text: str) -> dict:
     try:
         response = await retry_openai_call(
             client.chat.completions.create,
-            model="gpt-4.1-mini",
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=500,
@@ -3968,7 +3976,7 @@ async def _parse_grooming_input(text: str) -> list[tuple[str, int, str]]:
     try:
         response = await retry_openai_call(
             client.chat.completions.create,
-            model="gpt-4.1-mini",
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=500,
@@ -4024,7 +4032,7 @@ async def _generate_doc_upload_reply(
     try:
         response = await retry_openai_call(
             client.chat.completions.create,
-            model="gpt-4.1-mini",
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
             max_tokens=150,
@@ -4418,13 +4426,12 @@ async def _ai_supplement_recommendation(
     conditions: list | None,
 ) -> str | None:
     """
-    Generate a personalised supplement recommendation via gpt-4.1-mini.
+    Generate a personalised supplement recommendation via GPT.
 
     Returns a single conversational sentence (no bullet points, no headers)
     or None on failure so the caller can use a deterministic fallback.
     """
     try:
-        from app.core.constants import OPENAI_QUERY_MODEL
         client = _get_openai_onboarding_client()
 
         # Build compact context from available data.
@@ -4745,7 +4752,7 @@ async def _ai_check_weight(
         if responses_api and hasattr(responses_api, "create"):
             async def _make_call():
                 return await responses_api.create(
-                    model="gpt-4.1-mini",
+                    model=OPENAI_QUERY_MODEL,
                     input=prompt,
                     temperature=0,
                     max_output_tokens=140,
@@ -4756,7 +4763,7 @@ async def _ai_check_weight(
         else:
             async def _make_call_chat():
                 return await client.chat.completions.create(
-                    model="gpt-4.1-mini",
+                    model=OPENAI_QUERY_MODEL,
                     messages=[
                         {
                             "role": "system",
@@ -4821,7 +4828,7 @@ async def _ai_identify_pet_from_photo(file_bytes: bytes, mime_type: str) -> dict
 
     async def _make_call() -> str:
         response = await client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model=OPENAI_QUERY_MODEL,
             temperature=0,
             max_tokens=80,
             response_format={"type": "json_object"},

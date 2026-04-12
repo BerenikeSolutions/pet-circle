@@ -138,7 +138,7 @@ RATE_LIMIT_WINDOW_SECONDS: int = 60
 OPENAI_EXTRACTION_MODEL: str = "gpt-4.1"
 
 # Query model for answering user questions grounded in pet records.
-OPENAI_QUERY_MODEL: str = "gpt-4.1-mini"
+OPENAI_QUERY_MODEL: str = "gpt-4.1"
 
 # Temperature for extraction — deterministic output required.
 OPENAI_EXTRACTION_TEMPERATURE: float = 0.0
@@ -158,7 +158,7 @@ OPENAI_QUERY_MAX_TOKENS: int = 1500
 OPENAI_RETRY_BACKOFFS: list[float] = [1.0, 2.0]
 
 # --- Weight Lookup (AI-powered ideal weight range) ---
-OPENAI_WEIGHT_LOOKUP_MODEL: str = OPENAI_QUERY_MODEL  # gpt-4.1-mini
+OPENAI_WEIGHT_LOOKUP_MODEL: str = OPENAI_QUERY_MODEL  # gpt-4.1
 OPENAI_WEIGHT_LOOKUP_TEMPERATURE: float = 0.0
 OPENAI_WEIGHT_LOOKUP_MAX_TOKENS: int = 200
 WEIGHT_CACHE_STALENESS_DAYS: int = 365
@@ -168,7 +168,7 @@ OPENAI_NUTRITION_LOOKUP_MAX_TOKENS: int = 500
 NUTRITION_CACHE_STALENESS_DAYS: int = 365
 
 # --- Food Nutrition Estimation (unknown foods) ---
-OPENAI_FOOD_ESTIMATION_MAX_TOKENS: int = 400
+OPENAI_FOOD_ESTIMATION_MAX_TOKENS: int = 800
 FOOD_CACHE_STALENESS_DAYS: int = 365
 
 # --- Personalized Nutrition Recommendations ---

@@ -15,8 +15,7 @@ Caching rules:
     - force=True bypasses the cache regardless of age (used by the regenerate
       endpoint triggered from the dashboard).
 
-Model: OPENAI_QUERY_MODEL (gpt-4.1-mini) — sufficient for structured text
-generation; cheaper than the extraction model.
+Model: OPENAI_QUERY_MODEL (gpt-4.1) — used for structured text generation.
 
 Failure behaviour: If GPT or the DB call fails, the error is logged and a
 sensible default payload is returned so the dashboard never crashes.
@@ -181,38 +180,67 @@ def _extract_main_food_items(*texts: str, apply_noise_filter: bool = True) -> li
 
 
 def _format_found_diet_summary(food_items: list[DietItem], supplement_items: list[DietItem]) -> str:
-    """Format the What We Found diet line with only main food items and supplements."""
-    supp_names: list[str] = []
-    if supplement_items:
-        for supp in supplement_items:
-            main = _sentence_case((supp.label or "").strip())
-            if main and main.lower() not in {x.lower() for x in supp_names}:
-                supp_names.append(main)
+    """Format the What We Found diet line as a natural sentence with quantities.
 
-    main_foods: list[str] = []
+    Example output: "Royal Canin hypoallergenic (280g x 2/day) and Fur+ along
+    with Vitamin D3 and Glucosamine supplements"
+    """
+    # Build food descriptions using label + detail (for quantity/portion info).
+    seen_foods: set[str] = set()
+    food_descriptions: list[str] = []
     for food in food_items:
-        # Keep primary labels intact (no noise filtering), then clean free-form detail.
-        main_foods.extend(_extract_main_food_items(food.label or "", apply_noise_filter=False))
-        main_foods.extend(_extract_main_food_items(food.detail or "", apply_noise_filter=True))
-
-    deduped_foods: list[str] = []
-    for item in main_foods:
-        if _is_food_item_covered_by_supplements(item, supp_names):
+        label = (food.label or "").strip()
+        if not label:
             continue
-        if item.lower() not in {x.lower() for x in deduped_foods}:
-            deduped_foods.append(item)
-
-    parts: list[str] = [f"{item}." for item in deduped_foods]
-
-    if supplement_items:
-        if supp_names:
-            parts.append(f"Supplements - {', '.join(supp_names)}.")
+        key = label.lower()
+        if key in seen_foods:
+            continue
+        seen_foods.add(key)
+        detail = (food.detail or "").strip()
+        if detail and detail.lower() != label.lower():
+            food_descriptions.append(f"{label} ({detail})")
         else:
-            parts.append("No supplements.")
-    else:
-        parts.append("No supplements.")
+            food_descriptions.append(label)
 
-    return " ".join(parts).strip()
+    # Build supplement descriptions.
+    seen_supps: set[str] = set()
+    supp_descriptions: list[str] = []
+    for supp in supplement_items:
+        label = (supp.label or "").strip()
+        if not label:
+            continue
+        key = label.lower()
+        if key in seen_supps:
+            continue
+        seen_supps.add(key)
+        # Skip supplements that are already covered by food item names.
+        supp_names_for_check = [s for s in supp_descriptions]
+        if _is_food_item_covered_by_supplements(label, supp_names_for_check):
+            continue
+        supp_descriptions.append(label)
+
+    # Join foods into a natural sentence.
+    if len(food_descriptions) == 0:
+        food_str = "No food items recorded"
+    elif len(food_descriptions) == 1:
+        food_str = food_descriptions[0]
+    elif len(food_descriptions) == 2:
+        food_str = f"{food_descriptions[0]} and {food_descriptions[1]}"
+    else:
+        food_str = ", ".join(food_descriptions[:-1]) + f" and {food_descriptions[-1]}"
+
+    # Append supplements.
+    if supp_descriptions:
+        if len(supp_descriptions) == 1:
+            supp_str = supp_descriptions[0]
+        elif len(supp_descriptions) == 2:
+            supp_str = f"{supp_descriptions[0]} and {supp_descriptions[1]}"
+        else:
+            supp_str = ", ".join(supp_descriptions[:-1]) + f" and {supp_descriptions[-1]}"
+        suffix = "supplement" if len(supp_descriptions) == 1 else "supplements"
+        return f"{food_str} along with {supp_str} {suffix}"
+
+    return food_str
 
 
 def _get_openai_client():

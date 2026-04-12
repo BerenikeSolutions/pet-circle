@@ -1307,6 +1307,27 @@ async def _handle_media(db: Session, user, message_data: dict) -> None:
         # deferred extractor doesn't accidentally sweep unrelated pending docs.
         _batch_document_ids.setdefault(pet_key, []).append(document.id)
 
+        # --- Immediate post-onboarding upload acknowledgement ---
+        # When a user sends documents AFTER onboarding, they wait through a
+        # 15s batch window + extraction time with no feedback.  Send a quick
+        # "Got it 🐾" on the FIRST document of a post-onboarding batch so the
+        # user knows their upload was received.  The detailed processing
+        # message still fires from the batch extractor once the window closes.
+        is_first_in_batch = len(_batch_document_ids[pet_key]) == 1
+        if is_first_in_batch and user.onboarding_state != "awaiting_documents":
+            try:
+                await send_text_message(
+                    db,
+                    from_number,
+                    f"Got it 🐾 I'll update {pet.name}'s records once I've gone through "
+                    "what you sent. Feel free to share more documents — I'll process "
+                    "them together.",
+                )
+            except Exception as ack_exc:
+                logger.warning(
+                    "Immediate upload ack failed for pet=%s: %s", str(pet.id), ack_exc
+                )
+
         # Persist onboarding intent for this batch at upload time. The
         # extraction pass later decides whether to finalize onboarding based
         # on this flag AND whether the user asked to keep uploading more

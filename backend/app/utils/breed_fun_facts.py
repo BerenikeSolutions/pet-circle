@@ -5,7 +5,7 @@ Returns a unique fun fact about a pet's breed to include in document
 acknowledgment messages. Tracks shown facts per user to avoid repeats.
 
 When a breed is not in the local database, generates facts via OpenAI
-(gpt-4.1-mini) and caches them in memory.
+(gpt-4.1) and caches them in memory.
 
 Falls back to generic species facts if both local DB and OpenAI fail.
 """
@@ -250,7 +250,7 @@ _GENERIC_CAT_FACTS = [
 
 async def _generate_breed_facts_with_ai(breed: str, species: str) -> list[str]:
     """
-    Generate 3 fun facts about a breed using OpenAI (gpt-4.1-mini).
+    Generate 3 fun facts about a breed using OpenAI (gpt-4.1).
 
     Results are cached in _AI_GENERATED_FACTS so subsequent calls
     for the same breed don't hit the API again.

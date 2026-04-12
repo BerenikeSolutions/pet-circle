@@ -1,0 +1,29 @@
+Hi, sharing feedback on changes from yesterday :
+
+Overall summary of all changes i have given above - essential for focus group testing 
+
+1. Msgs update 
+
+( Last msg we need to show #vaccines & #preventive care separately example we have logged 4 vaccines & 2 preventive care items) 
+
+
+1. End note for dashboard page - 
+
+Some UI changes need to be done. Shared in next msg 
+ 
+1. Order now - Add and cart are overlapping, few more corrections on pages 
+
+- card experience is correct & looking good 
+- ⁠same experience is not repeated for supplements. There no card opens it just gets added . Same card experience will be needed here too
+
+4. Parsing info from whatsapp msg - to be corrected
+
+- i think it’s happening. System took info on simparica correctly. However the home diet is not shown anywhere now so we do t know if it’s a parsing issue or change in dashboard rendering 
+
+
+5.  renaming the documents 
+- renaming done 
+
+6. Document assignment under correct tab
+- ⁠urine culture got assigned to vet tab - needs to be corrected
+- ⁠the UI inside vet tab is not well aligned  ( screenshot below for reference)

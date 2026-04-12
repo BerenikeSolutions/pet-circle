@@ -52,6 +52,7 @@ from app.models.preventive_record import PreventiveRecord
 from app.models.reminder import Reminder
 from app.models.user import User
 from app.services.ai_insights_service import (
+    AI_INSIGHT_CACHE_DAYS,
     generate_care_plan_reasons,
     generate_recognition_bullets,
 )
@@ -808,6 +809,29 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         "bullets": recognition_bullets,
     }
 
+    # --- Load cached AI insights (no GPT calls — DB lookup only) ---
+    # Include health_summary and vet_questions if they exist and are fresh.
+    # This lets the frontend render immediately without waiting for separate
+    # /health-summary and /vet-questions API calls.
+    cached_insights: dict[str, dict | None] = {"health_summary": None, "vet_questions": None}
+    try:
+        from app.models.pet_ai_insight import PetAiInsight
+        from datetime import timedelta
+        stale_cutoff = datetime.utcnow() - timedelta(days=AI_INSIGHT_CACHE_DAYS)
+        insight_rows = (
+            db.query(PetAiInsight)
+            .filter(
+                PetAiInsight.pet_id == pet_id,
+                PetAiInsight.insight_type.in_(["health_summary", "vet_questions"]),
+                PetAiInsight.generated_at >= stale_cutoff,
+            )
+            .all()
+        )
+        for row in insight_rows:
+            cached_insights[row.insight_type] = row.content_json
+    except Exception:
+        logger.warning("Failed to load cached AI insights for pet=%s", pet_id)
+
     # --- Build response (no internal IDs exposed) ---
     # photo_url: serve via dashboard endpoint if pet has a photo, else None.
     photo_url = f"/dashboard/{token}/pet-photo" if pet.photo_path else None
@@ -844,6 +868,8 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         "diet_summary": diet_summary,
         "recognition": recognition_payload,
         "is_first_visit": is_first_visit,
+        "cached_health_summary": cached_insights.get("health_summary"),
+        "cached_vet_questions": cached_insights.get("vet_questions"),
         # Internal pet_id exposed only for intra-service use (not sent to frontend).
         # Allows callers to avoid a second validate_dashboard_token() call.
         "_pet_id": str(pet_id),

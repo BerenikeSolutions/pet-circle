@@ -6,7 +6,7 @@ The model is strictly grounded in the pet's data — no external knowledge,
 no medical advice, no hallucinated information.
 
 Model configuration (from constants — never hardcoded):
-    - Model: OPENAI_QUERY_MODEL (gpt-4.1-mini)
+    - Model: OPENAI_QUERY_MODEL (gpt-4.1)
     - Temperature: 0 (deterministic responses)
     - Max tokens: 1500
 
@@ -102,6 +102,17 @@ QUERY_SYSTEM_PROMPT = (
     "- Do NOT help with scheduling vet visits or appointments. PetCircle does not "
     "provide vet visit scheduling. If asked, suggest the parent contact their vet directly.\n"
     "- Do NOT mention health score, scoring, or numeric wellness ratings in answers, even if asked.\n"
+    "- Users can always add more health records by sending documents (photos, PDFs) directly "
+    "in this WhatsApp chat at any time. If a user asks about adding records, uploading documents, "
+    "or sharing more information, confirm they can share documents right here.\n"
+    "- Distinguish between items the pet is actively tracking (items with a recorded last_done_date "
+    "and due dates) and items that have no history. Items without any last_done_date are NOT "
+    "'upcoming' — they are unstarted recommendations. Never describe unstarted recommendations as "
+    "'upcoming' or 'not been done yet'. Only items with recorded completion history should be "
+    "described as 'upcoming' or 'overdue'.\n"
+    "- When summarising what has been done vs what is upcoming, keep the two lists separate: "
+    "(1) completed/tracked items with dates, (2) recommended additions the parent may want to "
+    "consider. Do NOT lump them into one list.\n"
     "- Format responses for WhatsApp (use *bold* for emphasis, keep it readable)."
 )
 
@@ -189,12 +200,18 @@ def _build_pet_context(db: Session, pet_id: UUID) -> str:
     context_parts.append("\n=== Preventive Health Records ===")
     if records:
         for record, master in records:
-            context_parts.append(
-                f"- {master.item_name} ({master.category}): "
-                f"Last done: {record.last_done_date}, "
-                f"Next due: {record.next_due_date}, "
-                f"Status: {record.status}"
-            )
+            if record.last_done_date:
+                context_parts.append(
+                    f"- {master.item_name} ({master.category}): "
+                    f"Last done: {record.last_done_date}, "
+                    f"Next due: {record.next_due_date}, "
+                    f"Status: {record.status}"
+                )
+            else:
+                context_parts.append(
+                    f"- {master.item_name} ({master.category}): "
+                    f"(no history — recommendation only, not yet started by owner)"
+                )
     else:
         context_parts.append("No preventive records found.")
 
@@ -497,7 +514,7 @@ async def answer_pet_question(
 
     Pipeline:
         1. Build context from pet's DB records.
-        2. Send context + question to GPT (gpt-4.1-mini from constants).
+        2. Send context + question to GPT (gpt-4.1 from constants).
         3. Return the grounded answer.
 
     On GPT failure:

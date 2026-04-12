@@ -1,0 +1,1 @@
+10. Dashboard need to be populated from data not from AI call. AI will analyse and all info need to be stored in database. Same info need to go in dashboard everytime unless there is a user triggered data change like new prescriptions/tests uploaded

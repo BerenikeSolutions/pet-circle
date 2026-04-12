@@ -249,22 +249,41 @@ def _gap_in_weeks(previous: date, current: date) -> int:
 
 
 def _build_vaccine_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster]], today: date) -> dict[str, Any] | None:
-    """Build vaccine timeline card."""
+    """Build vaccine timeline card.
+
+    Vaccines on the same date are grouped into a single round so the
+    timeline shows one node per date with a vaccine count below it.
+    """
     vaccine_rows = [row for row in rows if _classify_preventive_item(row[1].item_name) == "vaccine"]
     if not vaccine_rows:
         return None
 
     vaccine_rows = sorted(vaccine_rows, key=lambda item: (item[0].last_done_date or item[0].next_due_date or today))
-    rounds = []
-    done_dates = [record.last_done_date for record, _ in vaccine_rows if record.last_done_date]
-    for idx, (record, master) in enumerate(vaccine_rows, start=1):
+
+    # Group vaccines by date → one round per unique date.
+    from collections import OrderedDict
+    date_groups: OrderedDict[date | None, list[tuple[PreventiveRecord, PreventiveMaster]]] = OrderedDict()
+    for record, master in vaccine_rows:
         node_date = record.last_done_date or record.next_due_date
+        date_groups.setdefault(node_date, []).append((record, master))
+
+    rounds = []
+    done_dates: list[date] = []
+    total_vaccines = len(vaccine_rows)
+    done_vaccine_count = 0
+
+    for idx, (node_date, group) in enumerate(date_groups.items(), start=1):
+        names = [m.item_name for _, m in group]
+        all_done = all(bool(r.last_done_date) for r, _ in group)
+        if all_done and node_date:
+            done_dates.append(node_date)
+            done_vaccine_count += len(group)
         rounds.append(
             {
                 "id": f"R{idx}",
                 "label": f"R{idx}",
-                "vaccines": master.item_name,
-                "done": bool(record.last_done_date),
+                "vaccines": " · ".join(names),
+                "done": all_done,
                 "date": node_date.isoformat() if node_date else None,
             }
         )
@@ -274,12 +293,11 @@ def _build_vaccine_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster]]
         if prev and cur:
             gaps.append(f"~{_gap_in_weeks(prev, cur) // 4} months")
 
-    done_count = len(done_dates)
-    all_done = done_count == len(vaccine_rows)
-    if all_done and done_count > 0:
-        headline = f"All {done_count} vaccines current. Annual cadence maintained."
-    elif done_count > 0:
-        headline = f"{done_count} of {len(vaccine_rows)} vaccine rounds completed."
+    all_complete = done_vaccine_count == total_vaccines and total_vaccines > 0
+    if all_complete:
+        headline = f"All {total_vaccines} vaccines current. Annual cadence maintained."
+    elif done_vaccine_count > 0:
+        headline = f"{len(done_dates)} of {len(date_groups)} vaccine rounds completed."
     else:
         headline = "No vaccines recorded yet."
 

@@ -4,7 +4,7 @@ PetCircle Phase 1 — Weight History Service
 Manages weight tracking for pets. Provides CRUD operations for
 weight measurements and breed-specific ideal weight ranges.
 
-Ideal weight ranges are looked up via OpenAI (gpt-4.1-mini) and
+Ideal weight ranges are looked up via OpenAI (gpt-4.1) and
 cached in the ideal_weight_cache table per (species, breed, gender,
 age_category) combo to minimize API costs.
 """

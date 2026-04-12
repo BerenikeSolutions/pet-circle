@@ -379,7 +379,7 @@ No bucket hardcoding.
 
 # MODULE 14 — STRICT QUERY ENGINE
 
-Model: gpt-4.1-mini
+Model: gpt-4.1
 
 System prompt:
 
