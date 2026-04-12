@@ -19,7 +19,7 @@ import logging
 import statistics
 from dataclasses import dataclass
 from datetime import date, timedelta
-from enum import Enum
+from enum import StrEnum
 from typing import NotRequired, TypedDict
 from uuid import UUID
 
@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class BreedSize(str, Enum):
+class BreedSize(StrEnum):
     """Five-category breed size classification by weight."""
 
     MINI_TOY = "mini_toy"
@@ -58,7 +58,7 @@ class BreedSize(str, Enum):
     EXTRA_LARGE = "extra_large"
 
 
-class LifeStage(str, Enum):
+class LifeStage(StrEnum):
     """Four life-stage classification for preventive baselines."""
 
     PUPPY = "puppy"
@@ -67,7 +67,7 @@ class LifeStage(str, Enum):
     SENIOR = "senior"
 
 
-class Classification(str, Enum):
+class Classification(StrEnum):
     """
     Result of the 7-step classification algorithm.
 

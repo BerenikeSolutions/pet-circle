@@ -38,9 +38,9 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from collections.abc import Iterable
 from datetime import date
-from enum import Enum
-from typing import Iterable
+from enum import StrEnum
 
 from sqlalchemy.orm import Session
 
@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-class SignalLevel(str, Enum):
+class SignalLevel(StrEnum):
     """How precisely the system can resolve a pet's diet item."""
 
     L5 = "L5"    # Exact SKU (brand + line + size)

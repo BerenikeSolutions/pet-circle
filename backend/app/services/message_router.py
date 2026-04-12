@@ -30,13 +30,11 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.core.constants import (
     ACKNOWLEDGMENTS,
-    APP_WELCOME_HEADING,
     CONFLICT_KEEP_EXISTING,
     CONFLICT_USE_NEW,
     FAREWELLS,
     GREETINGS,
     HELP_COMMANDS,
-    NOTHING_MORE_PHRASES,
     MAX_CONCURRENT_EXTRACTIONS,
     MAX_PENDING_DOCS_PER_PET,
     MAX_PETS_PER_USER,
@@ -55,17 +53,14 @@ from app.core.constants import (
     REMINDER_CANCEL,
     REMINDER_DONE,
     REMINDER_ORDER_NOW,
+    REMINDER_PAYLOADS as _REMINDER_PAYLOADS_CONST,
     REMINDER_RESCHEDULE,
     REMINDER_SCHEDULE,
     REMINDER_SNOOZE_7,
     REMINDER_STILL_PENDING,
 )
-from app.core.constants import (
-    REMINDER_PAYLOADS as _REMINDER_PAYLOADS_CONST,
-)
 from app.core.encryption import decrypt_field
 from app.core.log_sanitizer import mask_phone
-from app.utils.breed_fun_facts import get_breed_fun_fact
 
 # Semaphore to limit concurrent background extraction tasks.
 # Prevents DB connection pool exhaustion when many documents are uploaded.
@@ -422,9 +417,7 @@ def _should_use_agentic_order() -> bool:
     """
     flag = getattr(settings, "AGENTIC_ORDER_ENABLED", "false")
     has_key = bool(getattr(settings, "OPENAI_API_KEY", None))
-    if flag.lower() != "true" or not has_key:
-        return False
-    return True
+    return flag.lower() == "true" and has_key
 
 
 def _get_mobile(user) -> str:

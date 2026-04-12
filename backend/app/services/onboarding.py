@@ -61,13 +61,11 @@ from app.models.preventive_record import PreventiveRecord
 from app.models.reminder import Reminder
 from app.models.user import User
 from app.services.diet_service import HOMEMADE_KW, add_diet_item, split_diet_items_by_type
-from app.services.hygiene_service import add_hygiene_item
 from app.services.nutrition_service import get_diet_summary
 from app.services.preventive_seeder import seed_preventive_master
 from app.utils.breed_normalizer import normalize_breed, normalize_breed_with_ai
 from app.utils.date_utils import (
     get_today_ist,
-    is_ambiguous_date_input,
     parse_date,
     parse_date_with_ai,
 )
@@ -1355,20 +1353,6 @@ async def _step_gender_weight(db, user, text, send_fn):
         if neutered is not None:
             pet.neutered = bool(neutered)
 
-    # Compute and send life stage note.
-    age_years = None
-    if pet.dob:
-        today = date.today()
-        age_years = (today - pet.dob).days / 365.25
-    elif pet.age_text:
-        # Try to extract age_years from age_text.
-        nums = re.findall(r"[\d.]+", pet.age_text)
-        if nums:
-            try:
-                age_years = float(nums[0])
-            except ValueError:
-                pass
-
     # Advance to food type question.
     # Start at -1 so a queued message that arrives before the user sees the
     # question gets one free pass (increments to 0) instead of triggering
@@ -2097,21 +2081,10 @@ def _looks_like_vaccine_selection(text: str) -> bool:
     t = re.sub(r"[.!?,]+$", "", t)
 
     # Explicit numeric options.
-    if t in {"1", "2", "3", "4"}:
-        return True
-
-    # Never / skip variants.
     never_keywords = {
         "never", "never done", "not vaccinated", "no vaccine", "no vaccines",
         "none", "nope", "n/a", "na", "skip", "not done", "not sure",
     }
-    if t in never_keywords:
-        return True
-
-    # Pending intent ("should be given", "not yet", etc.).
-    if _is_pending_vaccine_intent(t):
-        return True
-
     # Named vaccine-selection phrases.
     vaccine_phrases = {
         "mandatory", "mandatory only", "only mandatory",
@@ -2120,14 +2093,16 @@ def _looks_like_vaccine_selection(text: str) -> bool:
         "mandatory + kennel cough", "kennel cough", "mandatory + kennel",
         "all", "all four", "all 4", "all vaccines", "all four vaccines",
     }
-    if t in vaccine_phrases:
-        return True
-
     # Vaccine-name keywords present in the text.
-    if any(kw in t for kw in ("kennel", "corona", "rabies", "dhppi", "bordetella")):
-        return True
+    vaccine_keywords = any(kw in t for kw in ("kennel", "corona", "rabies", "dhppi", "bordetella"))
 
-    return False
+    return (
+        t in {"1", "2", "3", "4"}
+        or t in never_keywords
+        or _is_pending_vaccine_intent(t)
+        or t in vaccine_phrases
+        or vaccine_keywords
+    )
 
 
 def _resolve_vaccine_type_selection(text: str) -> list[str]:
@@ -2474,15 +2449,9 @@ def _normalize_custom_vaccine_name(name: str | None) -> str:
 def _prefer_user_scoped_custom_vaccine(name: str | None) -> bool:
     """Return True when a vaccine should be stored as a user-scoped custom item."""
     normalized = (name or "").strip().lower()
-    if not normalized:
-        return True
-
     # Combo labels like 5-in-1/7-in-1 are user phrasing and should not fan out
     # into shared core masters unless explicitly mapped by product evidence.
-    if re.search(r"\b\d+\s*[- ]?in\s*[- ]?1\b", normalized):
-        return True
-
-    return False
+    return not normalized or bool(re.search(r"\b\d+\s*[- ]?in\s*[- ]?1\b", normalized))
 
 
 def _upsert_user_custom_vaccine_record(db: Session, pet: Pet, vaccine_name: str, parsed_date: date) -> None:
@@ -2995,12 +2964,8 @@ _SAME_AS_EXAMPLE_PHRASES = frozenset({
 def _is_same_as_example_intent(text_lower: str) -> bool:
     """Return True if the user is referencing the example shown to them."""
     normalized = re.sub(r"[.!?,]+$", "", text_lower.strip())
-    if normalized in _SAME_AS_EXAMPLE_PHRASES:
-        return True
     # Partial match for "same as ..." patterns.
-    if normalized.startswith("same") and len(normalized) < 30:
-        return True
-    return False
+    return normalized in _SAME_AS_EXAMPLE_PHRASES or (normalized.startswith("same") and len(normalized) < 30)
 
 
 async def _ai_resolve_example_confirmation(
@@ -3102,9 +3067,7 @@ async def _store_meal_items(db, pet, items: list, food_type: str):
 
         item_type = food_type if food_type != "mix" else "packaged"
         label_lower = label.lower()
-        if any(kw in label_lower for kw in HOMEMADE_KW):
-            item_type = "homemade"
-        elif food_type == "home":
+        if any(kw in label_lower for kw in HOMEMADE_KW) or food_type == "home":
             item_type = "homemade"
         try:
             await add_diet_item(db, pet.id, item_type, label, detail or None)
@@ -3675,10 +3638,7 @@ def _contains_all_preventive_categories_intent(text: str) -> bool:
         r"\bnot\s+(vaccines?|deworm(ing)?|worms?|flea|tick|"
         r"flea\s*(and|&)\s*tick|blood\s*tests?)\b"
     )
-    if re.search(negated_category_pattern, lowered):
-        return False
-
-    return True
+    return not re.search(negated_category_pattern, lowered)
 
 
 def _infer_preventive_timeframe_from_text(text: str) -> str | None:
@@ -3887,9 +3847,8 @@ def _normalize_preventive_medicine_categories(parsed: dict) -> dict:
                     deworming["date"] = source_date
                 if not _as_text(deworming.get("medicine")):
                     deworming["medicine"] = source_medicine
-                if before_date != deworming.get("date") or before_medicine != deworming.get("medicine"):
-                    source_rehomed = True
-                elif _absorbed_by_target(deworming, source_date, source_medicine):
+                if (before_date != deworming.get("date") or before_medicine != deworming.get("medicine")
+                    or _absorbed_by_target(deworming, source_date, source_medicine)):
                     source_rehomed = True
 
         if "flea_tick" in categories:
@@ -3907,9 +3866,8 @@ def _normalize_preventive_medicine_categories(parsed: dict) -> dict:
                     flea_tick["date"] = source_date
                 if not _as_text(flea_tick.get("medicine")):
                     flea_tick["medicine"] = source_medicine
-                if before_date != flea_tick.get("date") or before_medicine != flea_tick.get("medicine"):
-                    source_rehomed = True
-                elif _absorbed_by_target(flea_tick, source_date, source_medicine):
+                if (before_date != flea_tick.get("date") or before_medicine != flea_tick.get("medicine")
+                    or _absorbed_by_target(flea_tick, source_date, source_medicine)):
                     source_rehomed = True
 
         # Clear source bucket only when it was actually rehomed into compatible bucket(s).

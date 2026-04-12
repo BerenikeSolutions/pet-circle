@@ -8,15 +8,11 @@ All tests are pure-Python with no DB or external dependencies.
 
 import os
 from datetime import date, timedelta
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 os.environ.setdefault("APP_ENV", "test")
 
 from app.services.care_plan_engine import (
-    BASELINE_PROTOCOL,
-    BREED_SIZE_BOUNDARIES,
     BreedSize,
     CarePlanV2,
     Classification,

@@ -22,8 +22,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
 
-import pytest
-
 os.environ.setdefault("APP_ENV", "test")
 
 from app.services.vet_summary_service import VetSummary, get_vet_summary
