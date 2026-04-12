@@ -1,1 +1,0 @@
-In Dashboard - we discussed we need to add a last card at r the end of page 1 , as it’s looking incomplete right now to users . Sharing that below

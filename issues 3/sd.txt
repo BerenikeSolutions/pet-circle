@@ -1,5 +1,0 @@
-Age led hard coded msgs like below 
-
-Troy is a Senior — been around long enough to know exactly how to wrap you around their paw. 🐾
-
-Remove these. As they aren’t adding to the conversation
