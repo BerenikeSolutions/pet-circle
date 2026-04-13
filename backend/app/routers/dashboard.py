@@ -87,7 +87,11 @@ from app.services.diet_service import (
     get_diet_items,
     update_diet_item,
 )
-from app.services.signal_resolver import resolve_food_signal, resolve_supplement_signal
+from app.services.signal_resolver import (
+    SUPPLEMENT_TYPE_KEYWORDS,
+    resolve_food_signal,
+    resolve_supplement_signal,
+)
 from app.services.health_trends_service import get_health_trends as get_health_trends_v2
 from app.services.hygiene_service import (
     add_hygiene_item,
@@ -2300,6 +2304,106 @@ async def resolve_product_endpoint(
         "message": result.message,
         "vet_diet_warning": vet_diet_warning,
         "pack_size_suggestion": pack_size_suggestion,
+    }
+
+
+@router.get("/{token}/products/resolve-by-micronutrient")
+async def resolve_supplement_by_micronutrient(
+    token: str,
+    micronutrient: str = Query(..., description="Micronutrient name (e.g. 'glucosamine', 'vitamin d3')"),
+    db: Session = Depends(get_db),
+):
+    """
+    Resolve supplement products for a missing micronutrient.
+
+    Used by the Quick Fixes to Add section when the user clicks on a
+    micronutrient-based supplement recommendation (which has no diet_item_id).
+    Maps the micronutrient name to a canonical supplement type via the
+    SUPPLEMENT_TYPE_KEYWORDS map, then returns matching products from
+    product_supplement, sorted by popularity.
+
+    Returns the same shape as /products/resolve so the frontend ProductSelectorCard
+    can be reused unchanged.
+    """
+    try:
+        _get_pet_for_dashboard_token(db, token)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+
+    # Map micronutrient name to canonical supplement type using the same
+    # keyword map the signal resolver uses for diet items.
+    haystack = micronutrient.lower().strip()
+    sup_type: str | None = None
+    best_len = 0
+    for keyword, canonical in SUPPLEMENT_TYPE_KEYWORDS.items():
+        if keyword in haystack and len(keyword) > best_len:
+            sup_type = canonical
+            best_len = len(keyword)
+
+    if not sup_type:
+        # No keyword match — return empty product list so the selector
+        # shows a graceful empty state rather than crashing.
+        return {
+            "level": "L1",
+            "products": [],
+            "cta_label": None,
+            "highlight_sku": None,
+            "message": "Share the supplement name on WhatsApp so we can help you reorder.",
+            "vet_diet_warning": False,
+            "pack_size_suggestion": None,
+        }
+
+    # Fetch products matching this supplement type, ordered by popularity.
+    rows = (
+        db.query(ProductSupplement)
+        .filter(
+            ProductSupplement.active == True,
+            ProductSupplement.type == sup_type,
+        )
+        .order_by(ProductSupplement.popularity_rank)
+        .limit(3)
+        .all()
+    )
+
+    if not rows:
+        return {
+            "level": "L1",
+            "products": [],
+            "cta_label": None,
+            "highlight_sku": None,
+            "message": "No matching supplements found in our catalog.",
+            "vet_diet_warning": False,
+            "pack_size_suggestion": None,
+        }
+
+    highlight_sku = rows[0].sku_id
+    products = [
+        {
+            "sku_id": p.sku_id,
+            "category": "supplement",
+            "brand_name": p.brand_name,
+            "product_name": p.product_name,
+            "pack_size": p.pack_size,
+            "mrp": int(p.mrp),
+            "discounted_price": int(p.discounted_price),
+            "price_per_unit": int(p.price_per_unit or 0),
+            "unit_label": "per unit",
+            "in_stock": bool(p.in_stock),
+            "vet_diet_flag": False,
+            "is_highlighted": p.sku_id == highlight_sku,
+            "highlight_reason": "Most Popular" if p.sku_id == highlight_sku else None,
+        }
+        for p in rows
+    ]
+
+    return {
+        "level": "L3",
+        "products": products,
+        "cta_label": "Order Now",
+        "highlight_sku": highlight_sku,
+        "message": None,
+        "vet_diet_warning": False,
+        "pack_size_suggestion": None,
     }
 
 

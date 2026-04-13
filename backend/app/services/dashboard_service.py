@@ -234,9 +234,9 @@ def _inject_supplement_recommendations(care_plan: dict, diet_summary: dict) -> d
     for micro in missing_micros:
         nutrient_name = micro.get("name", "")
         cap_name = nutrient_name[0].upper() + nutrient_name[1:] if nutrient_name else nutrient_name
-        # Use LLM-recommended product name when available; fall back to generic label
-        llm_supplement = micro.get("supplement") or None
-        item_name = llm_supplement if llm_supplement else f"{cap_name} Supplement"
+        # Display the micronutrient name (not the LLM product name) as the item title.
+        # The LLM product name is used internally for product resolution but not shown.
+        item_name = f"{cap_name} Supplement" if cap_name else "Supplement"
         # Use LLM-provided reason as the one-liner shown below the supplement name
         reason = micro.get("reason") or None
         supplement_items.append({
@@ -249,6 +249,10 @@ def _inject_supplement_recommendations(care_plan: dict, diet_summary: dict) -> d
             "reason": reason,
             "orderable": True,
             "cta_label": "Order Now",
+            # Raw micronutrient name used by the frontend to fetch matching
+            # products from product_supplement via the resolve-by-micronutrient
+            # endpoint (instead of the diet_item_id path used for food items).
+            "micronutrient": nutrient_name,
         })
 
     if supplement_items:

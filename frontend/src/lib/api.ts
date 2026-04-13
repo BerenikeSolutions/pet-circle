@@ -283,6 +283,10 @@ export interface CarePlanItem {
   signal_level?: string | null;
   info_prompt?: string | null;
   diet_item_id?: string | null;
+  /** Raw micronutrient name (e.g. "glucosamine"). Present on supplement items
+   *  generated from missing-micronutrient analysis. Used to fetch matching
+   *  products via /products/resolve-by-micronutrient instead of diet_item_id. */
+  micronutrient?: string | null;
 }
 
 export interface CarePlanSection {

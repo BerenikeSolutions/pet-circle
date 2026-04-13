@@ -863,7 +863,9 @@ def _serialize_supplement_product(
         "price_per_unit": int(product.price_per_unit) if product.price_per_unit else None,
         "unit_label": "per unit",
         "in_stock": bool(product.in_stock),
+        "vet_diet_flag": False,  # Supplements do not require vet-diet warning
         "is_highlighted": is_highlighted,
+        "highlight_reason": "Most Popular" if is_highlighted else None,
     }
 
 

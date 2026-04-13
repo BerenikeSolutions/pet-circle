@@ -61,6 +61,32 @@ export default function ProductSelectorCard({
   const displayName = (p: ResolvedProduct) =>
     p.category === "food" ? p.product_line || p.brand_name : p.product_name || p.brand_name;
 
+  // ── No products in catalog ─────────────────────────────────────────────────
+  if (products.length === 0) {
+    return (
+      <BottomSheet open={open} onClose={onClose} title="Select Product">
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            textAlign: "center",
+            padding: "24px 16px 40px",
+            gap: 12,
+          }}
+        >
+          <div style={{ fontSize: 36 }}>📦</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "var(--t1)" }}>
+            Not available right now
+          </div>
+          <div style={{ fontSize: 13, color: "var(--t2)", lineHeight: 1.6, maxWidth: 260 }}>
+            This item isn&apos;t in our catalog yet. We&apos;ll have it in stock soon — check back shortly!
+          </div>
+        </div>
+      </BottomSheet>
+    );
+  }
+
   return (
     <BottomSheet open={open} onClose={onClose} title="Select Product">
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>

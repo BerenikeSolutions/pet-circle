@@ -91,13 +91,21 @@ export default function DashboardView({
   }, []);
 
   const handleAddToCart = useCallback(async (item: CarePlanItem, sectionTitle: string) => {
-    if (item.diet_item_id) {
+    // Resolve products from backend when we have a diet_item_id (food/existing supplement)
+    // or a micronutrient name (nutrition-gap supplement recommendations).
+    const resolveUrl = item.diet_item_id
+      ? `${API_BASE}/dashboard/${token}/products/resolve?diet_item_id=${encodeURIComponent(item.diet_item_id)}`
+      : item.micronutrient
+        ? `${API_BASE}/dashboard/${token}/products/resolve-by-micronutrient?micronutrient=${encodeURIComponent(item.micronutrient)}`
+        : null;
+
+    if (resolveUrl) {
       try {
-        const res = await fetch(
-          `${API_BASE}/dashboard/${token}/products/resolve?diet_item_id=${encodeURIComponent(item.diet_item_id)}`
-        );
+        const res = await fetch(resolveUrl);
         if (!res.ok) throw new Error("resolve failed");
         const result = await res.json();
+        // Open the selector regardless of whether products were found.
+        // ProductSelectorCard shows an "unavailable" state when the list is empty.
         setSelectorProducts(result.products || []);
         setSelectorSignalLevel(result.level || "");
         setSelectorVetDietWarning(!!result.vet_diet_warning);
@@ -105,24 +113,19 @@ export default function DashboardView({
         setPendingSectionTitle(sectionTitle);
         setSelectorOpen(true);
       } catch {
-        // Fallback: add directly to cart
-        const id = cartItemId(item, sectionTitle);
-        onAddToCart(item, sectionTitle);
-        setAddedIds((prev) => ({ ...prev, [id]: true }));
-        const timeoutId = window.setTimeout(() => {
-          setAddedIds((prev) => ({ ...prev, [id]: false }));
-        }, 1800);
-        timerIdsRef.current.push(timeoutId);
+        // Network / server error — do nothing; don't open selector or add to cart
       }
-    } else {
-      const id = cartItemId(item, sectionTitle);
-      onAddToCart(item, sectionTitle);
-      setAddedIds((prev) => ({ ...prev, [id]: true }));
-      const timeoutId = window.setTimeout(() => {
-        setAddedIds((prev) => ({ ...prev, [id]: false }));
-      }, 1800);
-      timerIdsRef.current.push(timeoutId);
+      return;
     }
+
+    // No resolve URL: items that are directly orderable without product lookup
+    const id = cartItemId(item, sectionTitle);
+    onAddToCart(item, sectionTitle);
+    setAddedIds((prev) => ({ ...prev, [id]: true }));
+    const timeoutId = window.setTimeout(() => {
+      setAddedIds((prev) => ({ ...prev, [id]: false }));
+    }, 1800);
+    timerIdsRef.current.push(timeoutId);
   }, [token, onAddToCart]);
 
   const handleSelectorAdd = useCallback(async (skuId: string, quantity: number) => {
@@ -130,7 +133,11 @@ export default function DashboardView({
 
     // Optimistic update — close popup and add to cart immediately using local product data
     const icon = product?.category === "food" ? "🥣" : "💊";
-    const name = product?.product_line || product?.brand_name || skuId;
+    // Food: product_line is the meaningful name (e.g. "Adult Large Breed").
+    // Supplement: product_name is the full name (e.g. "Petcare Joint Flex 90 Chews").
+    const name = product?.category === "food"
+      ? (product.product_line || product.brand_name || skuId)
+      : (product?.product_name || product?.brand_name || skuId);
     const price = product?.discounted_price ?? 0;
     const mrp = product?.mrp ?? price;
     onAddBySku(skuId, name, price, mrp, icon, pendingSectionTitle, quantity);
