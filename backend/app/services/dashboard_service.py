@@ -748,10 +748,10 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
             })
 
     # --- Dashboard Rebuild v2 enrichments ---
-    # Hard 10s timeout per enrichment. Lowered from 15s so that two sequential
-    # enrichment phases (gather + care_plan_reasons) cannot together exceed the
-    # 30s frontend request timeout (10s + 10s leaves 10s of headroom).
-    _ENRICHMENT_TIMEOUT_SECONDS = 10
+    # Hard timeout per enrichment. Increased to 15s to allow nutrition analysis
+    # (with multiple parallel AI calls) to complete. Two sequential phases
+    # (gather + care_plan_reasons) should still stay under 30s frontend limit.
+    _ENRICHMENT_TIMEOUT_SECONDS = 15
 
     async def _safe_async_call(label: str, default, coro):
         try:

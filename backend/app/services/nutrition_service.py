@@ -520,14 +520,38 @@ async def _call_openai_nutrition_targets(
     )
     raw = response.content[0].text
     logger.debug("OpenAI nutrition targets raw: %s", raw)
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError) as e:
-        logger.error("Failed to parse nutrition targets response: %s — raw: %s", e, raw)
-        return None
+    result = _parse_json_from_response(raw)
+    if result is None:
+        logger.error("Failed to parse nutrition targets response — raw: %s", raw)
+    return result
 
 
 # ─── Step 3b: AI Food Estimation ────────────────────────────────────
+
+def _parse_json_from_response(raw: str) -> dict | None:
+    """Parse JSON from AI response, stripping markdown code fences if present."""
+    if not raw or not isinstance(raw, str):
+        return None
+
+    # Strip markdown code fence wrappers: ```json ... ``` or ``` ... ```
+    text = raw.strip()
+    if text.startswith("```"):
+        # Remove opening fence (optionally with language tag like ```json)
+        lines = text.split("\n")
+        if len(lines) > 2:
+            text = "\n".join(lines[1:-1])  # Skip first and last line
+        else:
+            text = ""
+
+    text = text.strip()
+    if not text:
+        return None
+
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
 
 def _weight_bucket(weight_kg: float | None) -> str:
     """Bucket weight so similar-sized pets can share cache entries."""
@@ -693,10 +717,9 @@ async def _call_openai_food_estimation(
     )
     raw = response.content[0].text
     logger.debug("OpenAI food estimation raw: %s", raw)
-    try:
-        result = json.loads(raw)
-    except (json.JSONDecodeError, TypeError) as e:
-        logger.error("Failed to parse food estimation response: %s — raw: %s", e, raw)
+    result = _parse_json_from_response(raw)
+    if result is None:
+        logger.error("Failed to parse food estimation response — raw: %s", raw)
         return None
 
     # Fail-safe: reject low-confidence or error responses
