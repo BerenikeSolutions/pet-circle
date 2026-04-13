@@ -990,8 +990,7 @@ async def _step_welcome(db, user, text, send_fn, message_data: dict | None = Non
 
     await send_fn(
         db, mobile,
-        f"Love that name! 🐾 What breed is {pet_name} and how old are they? "
-        f"An approximate age is fine (e.g., golden retriever, 4)",
+        f"Love that name! 🐾 " + _get_question_for_state("awaiting_breed_age", pet),
     )
 
 
