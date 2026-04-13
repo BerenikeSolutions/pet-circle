@@ -1063,21 +1063,24 @@ def _status_from_gap(gaps: dict, name: str, default: str = "Adequate") -> str:
 def _build_macros(actual: dict, targets: dict, breed_key: str) -> list[dict]:
     """Build macronutrients array for the response.
 
-    Returns 4 macros showing LLM API percentages directly:
-    protein_pct, fat_pct, fibre_pct.
+    Returns 3 macros (Protein, Fat, Fibre) with actual percentages and targets.
+    Structure matches calories for consistency: {"name", "actual", "target"}.
     """
     return [
         {
-            "name": "Protein", "icon": "\U0001f969",
-            "value": actual["protein"], "unit": "%",
+            "name": "Protein",
+            "actual": actual["protein"],
+            "target": targets.get("protein", DEFAULT_TARGETS["protein"]),
         },
         {
-            "name": "Fat", "icon": "\U0001f9c8",
-            "value": actual["fat"], "unit": "%",
+            "name": "Fat",
+            "actual": actual["fat"],
+            "target": targets.get("fat", DEFAULT_TARGETS["fat"]),
         },
         {
-            "name": "Fibre", "icon": "\U0001f966",
-            "value": actual["fibre"], "unit": "%",
+            "name": "Fibre",
+            "actual": actual["fibre"],
+            "target": targets.get("fibre", DEFAULT_TARGETS["fibre"]),
         },
     ]
 
