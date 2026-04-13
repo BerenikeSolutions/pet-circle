@@ -8,10 +8,11 @@ import DietAnalysisCard from "./DietAnalysisCard";
 
 interface AnalysisSummaryCardProps {
   data: DashboardData;
+  token: string;
   onGoToTrends: () => void;
 }
 
-export default function AnalysisSummaryCard({ data, onGoToTrends }: AnalysisSummaryCardProps) {
+export default function AnalysisSummaryCard({ data, token, onGoToTrends }: AnalysisSummaryCardProps) {
   return (
     <CollapsibleCard title="Analysis" defaultOpen={false}>
       <div style={{ padding: "0 16px 16px", display: "flex", flexDirection: "column", gap: 16 }}>
@@ -22,7 +23,7 @@ export default function AnalysisSummaryCard({ data, onGoToTrends }: AnalysisSumm
           <HealthConditionsCard data={data} onGoToTrends={onGoToTrends} compact />
         </div>
         <div style={{ border: "1px solid var(--border)", borderRadius: 10, padding: "14px 12px" }}>
-          <DietAnalysisCard data={data} compact />
+          <DietAnalysisCard token={token} compact />
         </div>
       </div>
     </CollapsibleCard>
