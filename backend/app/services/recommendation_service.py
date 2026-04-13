@@ -48,11 +48,11 @@ _openai_recommendation_client = None
 
 
 def _get_openai_client():
-    """Return a cached AsyncOpenAI client for recommendations."""
+    """Return a cached AsyncAnthropic client for recommendations."""
     global _openai_recommendation_client
     if _openai_recommendation_client is None:
-        from openai import AsyncOpenAI
-        _openai_recommendation_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        from anthropic import AsyncAnthropic
+        _openai_recommendation_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
     return _openai_recommendation_client
 
 
@@ -238,19 +238,16 @@ async def _generate_recommendations_via_ai(
 
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
+            client.messages.create,
             model=OPENAI_QUERY_MODEL,
             temperature=0.7,  # Slightly higher for more varied recommendations
             max_tokens=1500,
+            system=(
+                "You are a veterinary expert recommending pet products. "
+                "Always respond with valid JSON. "
+                "Never include explanations outside the JSON."
+            ),
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a veterinary expert recommending pet products. "
-                        "Always respond with valid JSON. "
-                        "Never include explanations outside the JSON."
-                    ),
-                },
                 {
                     "role": "user",
                     "content": prompt,
@@ -259,7 +256,7 @@ async def _generate_recommendations_via_ai(
         )
 
         # Parse the response
-        response_text = response.choices[0].message.content.strip()
+        response_text = response.content[0].text.strip()
 
         # Try to extract JSON from response
         items = _extract_json_from_response(response_text)

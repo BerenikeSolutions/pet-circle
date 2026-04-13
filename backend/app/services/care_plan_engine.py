@@ -1254,22 +1254,9 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
                 tt = "supplement" if diet_item.type == "supplement" else "food"
                 item_key = f"diet_{diet_item.id}"
 
-                # Homemade food: skip signal resolution, no CTA.
+                # Homemade food: stored in DB and shown in WhatsApp but excluded from dashboard care plan.
+                # Only packaged food and supplements are shown in the care plan (orderable items).
                 if diet_item.type == "homemade":
-                    continue_items[item_key] = {
-                        "name": diet_item.label,
-                        "test_type": tt,
-                        "freq": "Daily",
-                        "next_due": None,
-                        "status_tag": _STATUS_ACTIVE,
-                        "classification": Classification.PERIODIC.value,
-                        "reason": None,
-                        "orderable": False,
-                        "cta_label": None,
-                        "signal_level": None,
-                        "info_prompt": None,
-                        "diet_item_id": None,
-                    }
                     continue
 
                 # Packaged food / supplements — resolve via signal resolver.

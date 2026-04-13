@@ -66,7 +66,7 @@ NUTRITION_IMPORTANCE_CACHE_DAYS = 30
 #  Lazy OpenAI client                                                           #
 # --------------------------------------------------------------------------- #
 
-_openai_client = None
+_openai_client = None  # Anthropic AsyncAnthropic client (lazy-initialised)
 
 
 class Bullet(TypedDict):
@@ -244,11 +244,11 @@ def _format_found_diet_summary(food_items: list[DietItem], supplement_items: lis
 
 
 def _get_openai_client():
-    """Lazy-initialise AsyncOpenAI client (avoids import-time errors)."""
+    """Lazy-initialise AsyncAnthropic client (avoids import-time errors)."""
     global _openai_client
     if _openai_client is None:
-        from openai import AsyncOpenAI
-        _openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        from anthropic import AsyncAnthropic
+        _openai_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
     return _openai_client
 
 
@@ -288,17 +288,16 @@ async def _generate_conditions_summary_gpt(pet_context: str) -> dict:
     user_prompt = f"Pet health context:\n{pet_context}"
 
     async def _call() -> str:
-        response = await client.chat.completions.create(
+        response = await client.messages.create(
             model=OPENAI_QUERY_MODEL,
             temperature=0,
             max_tokens=300,
-            response_format={"type": "json_object"},
+            system=system_prompt,
             messages=[
-                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         )
-        return response.choices[0].message.content or "{}"
+        return response.content[0].text or "{}"
 
     raw = await retry_openai_call(_call)
     try:
@@ -340,17 +339,16 @@ async def _generate_health_summary_gpt(pet_context: str) -> dict:
     user_prompt = f"Pet health context:\n{pet_context}"
 
     async def _call() -> str:
-        response = await client.chat.completions.create(
+        response = await client.messages.create(
             model=OPENAI_QUERY_MODEL,
             temperature=0,
             max_tokens=500,
-            response_format={"type": "json_object"},
+            system=system_prompt,
             messages=[
-                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         )
-        return response.choices[0].message.content or "{}"
+        return response.content[0].text or "{}"
 
     raw = await retry_openai_call(_call)
     try:
@@ -392,16 +390,16 @@ async def _generate_vet_questions_gpt(pet_context: str) -> list:
     user_prompt = f"Pet health context:\n{pet_context}"
 
     async def _call() -> str:
-        response = await client.chat.completions.create(
+        response = await client.messages.create(
             model=OPENAI_QUERY_MODEL,
             temperature=0,
             max_tokens=800,
+            system=system_prompt,
             messages=[
-                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         )
-        return response.choices[0].message.content or "[]"
+        return response.content[0].text or "[]"
 
     raw = await retry_openai_call(_call)
     try:
@@ -637,13 +635,14 @@ async def _generate_nutrition_importance_gpt(pet: Pet) -> dict:
     client = _get_openai_client()
 
     async def _call() -> str:
-        response = await client.chat.completions.create(
+        response = await client.messages.create(
             model=OPENAI_QUERY_MODEL,
             temperature=0.6,
             max_tokens=200,
-            messages=[{"role": "system", "content": system_prompt}],
+            system=system_prompt,
+            messages=[{"role": "user", "content": "Generate the nutrition importance note."}],
         )
-        return response.choices[0].message.content or ""
+        return response.content[0].text or ""
 
     try:
         note = await retry_openai_call(_call)

@@ -849,6 +849,16 @@ def _build_template_params(cand: ReminderCandidate, settings, db: Session) -> tu
     due_str = format_date_for_user(cand.due_date)
     today = get_today_ist()
 
+    # Birthday: only send the celebration template on the due date (the birthday itself).
+    # T-7, D+3, and overdue stages are not meaningful for a birthday celebration.
+    if cand.category == "birthday":
+        if cand.stage != STAGE_DUE:
+            return None, []
+        birthday_template = settings.WHATSAPP_TEMPLATE_BIRTHDAY
+        if not birthday_template:
+            return None, []
+        return birthday_template, [pet_name, due_str]
+
     # Prefer category-specific registry templates first.
     sub_type = cand.sub_type
     if cand.category == "vaccine":
@@ -1124,6 +1134,8 @@ def _classify_item(item_name: str) -> str:
         return "blood_checkup"
     if any(k in name_lower for k in DIAGNOSTICS_KEYWORDS):
         return "vet_diagnostics"
+    if "birthday" in name_lower:
+        return "birthday"
     return "checkup"
 
 

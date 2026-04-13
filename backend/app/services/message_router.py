@@ -1515,10 +1515,8 @@ async def _delayed_batch_extraction(
         # plan..." transition message, so we skip the ack there.
         if not should_finalize_onboarding and pet and user:
             unsupported_count = _unsupported_format_count.get(pet_key, 0)
-            doc_count = len(pending_docs)
             ack = (
-                f"Got it — we've received {doc_count} "
-                f"document{'s' if doc_count != 1 else ''} 🐾\n\n"
+                f"Got it — I've received your documents 🐾\n\n"
                 f"I'm starting to process them now to update {pet.name}'s records."
             )
             if unsupported_count > 0:
@@ -1527,12 +1525,9 @@ async def _delayed_batch_extraction(
                 _these = "these" if unsupported_count != 1 else "this"
                 _them = "them" if unsupported_count != 1 else "it"
                 ack += (
-                    f"\n\nJust a heads up: {unsupported_count} "
-                    f"document{_doc_s} couldn't be "
-                    f"read as {_they_re} in "
-                    f"an unsupported format (like .docx). You can share "
-                    f"{_these} as an image or "
-                    f"PDF and I'll pick {_them} "
+                    f"\n\nJust a heads up: Some documents couldn't be read as {_they_re} "
+                    f"in an unsupported format (like .docx). You can share "
+                    f"{_these} as an image or PDF and I'll pick {_them} "
                     f"up right away.\n\nGive me a few seconds while I go through the rest."
                 )
             else:

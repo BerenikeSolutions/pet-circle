@@ -884,21 +884,21 @@ EXTRACTION_SYSTEM_PROMPT = (
 )
 
 
-_openai_extraction_client = None
+_anthropic_extraction_client = None
 
 
-def _get_openai_extraction_client():
-    """Return a cached AsyncOpenAI client for extraction (created on first call)."""
-    global _openai_extraction_client
-    if _openai_extraction_client is None:
-        from openai import AsyncOpenAI
-        _openai_extraction_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-    return _openai_extraction_client
+def _get_anthropic_extraction_client():
+    """Return a cached AsyncAnthropic client for extraction (created on first call)."""
+    global _anthropic_extraction_client
+    if _anthropic_extraction_client is None:
+        from anthropic import AsyncAnthropic
+        _anthropic_extraction_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+    return _anthropic_extraction_client
 
 
 async def _call_openai_extraction(document_text: str) -> str:
     """
-    Call OpenAI GPT to extract structured data from document text.
+    Call Claude to extract structured data from document text.
 
     Used for PDF text content. For images, use _call_openai_extraction_vision().
 
@@ -906,55 +906,64 @@ async def _call_openai_extraction(document_text: str) -> str:
         document_text: The text content of the uploaded document.
 
     Returns:
-        Raw JSON string response from GPT.
+        Raw JSON string response from Claude.
 
     Raises:
         Exception: If all retry attempts fail (propagated from retry_openai_call).
     """
-    client = _get_openai_extraction_client()
+    client = _get_anthropic_extraction_client()
 
     async def _make_call() -> str:
-        response = await client.chat.completions.create(
+        response = await client.messages.create(
             model=OPENAI_EXTRACTION_MODEL,
             temperature=OPENAI_EXTRACTION_TEMPERATURE,
             max_tokens=OPENAI_EXTRACTION_MAX_TOKENS,
-            response_format={"type": "json_object"},
+            system=EXTRACTION_SYSTEM_PROMPT,
             messages=[
-                {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
                 {"role": "user", "content": document_text},
             ],
         )
-        return response.choices[0].message.content
+        return response.content[0].text
 
     return await retry_openai_call(_make_call)
 
 
 async def _call_openai_extraction_vision(image_data_uri: str) -> str:
     """
-    Call OpenAI GPT vision API to extract data from an image.
+    Call Claude vision API to extract data from an image.
 
-    Sends the image as a base64 data URI to GPT-4.1's vision capability.
+    Sends the image as a base64-encoded payload to Claude's vision capability.
     Used for JPEG/PNG uploads where text extraction is not possible.
 
     Args:
         image_data_uri: Base64 data URI (data:image/jpeg;base64,...).
 
     Returns:
-        Raw JSON string response from GPT.
+        Raw JSON string response from Claude.
 
     Raises:
         Exception: If all retry attempts fail.
     """
-    client = _get_openai_extraction_client()
+    client = _get_anthropic_extraction_client()
+
+    # Strip the data URI prefix to get raw base64 data and media type.
+    # Anthropic expects: {"type": "base64", "media_type": "image/jpeg", "data": "<base64>"}
+    media_type = "image/jpeg"
+    base64_data = image_data_uri
+    if image_data_uri.startswith("data:"):
+        header, _, base64_data = image_data_uri.partition(",")
+        # Extract media type from "data:image/jpeg;base64"
+        mime_part = header.split(";")[0].replace("data:", "")
+        if mime_part:
+            media_type = mime_part
 
     async def _make_call() -> str:
-        response = await client.chat.completions.create(
+        response = await client.messages.create(
             model=OPENAI_EXTRACTION_MODEL,
             temperature=OPENAI_EXTRACTION_TEMPERATURE,
             max_tokens=OPENAI_EXTRACTION_MAX_TOKENS,
-            response_format={"type": "json_object"},
+            system=EXTRACTION_SYSTEM_PROMPT,
             messages=[
-                {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": [
@@ -963,14 +972,18 @@ async def _call_openai_extraction_vision(image_data_uri: str) -> str:
                             "text": "Extract preventive health data from this veterinary document image.",
                         },
                         {
-                            "type": "image_url",
-                            "image_url": {"url": image_data_uri, "detail": "high"},
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": base64_data,
+                            },
                         },
                     ],
                 },
             ],
         )
-        return response.choices[0].message.content
+        return response.content[0].text
 
     return await retry_openai_call(_make_call)
 

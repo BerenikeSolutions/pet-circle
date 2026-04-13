@@ -74,16 +74,16 @@ REQUIRED_TARGET_KEYS = {
     "vitamin_d3", "glucosamine", "probiotics",
 }
 
-# --- OpenAI client singleton (lazy) ---
+# --- Anthropic client singleton (lazy) ---
 _openai_nutrition_client = None
 
 
 def _get_openai_client():
-    """Return a cached AsyncOpenAI client (created on first call)."""
+    """Return a cached AsyncAnthropic client (created on first call)."""
     global _openai_nutrition_client
     if _openai_nutrition_client is None:
-        from openai import AsyncOpenAI
-        _openai_nutrition_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        from anthropic import AsyncAnthropic
+        _openai_nutrition_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
     return _openai_nutrition_client
 
 
@@ -111,19 +111,39 @@ def _calculate_age_category(species: str | None, dob: date | None) -> str:
 
 
 def _calculate_age_description(dob: date | None) -> str:
-    """Human-readable age string for OpenAI prompts."""
+    """
+    Human-readable age string for OpenAI prompts.
+
+    Uses precise month-based calculation to match frontend age display:
+    - Calculate total months from birth to today
+    - Adjust for day-of-month if today is earlier in the month than birth day
+    """
     if not dob:
         return "unknown age"
-    total_days = (date.today() - dob).days
-    if total_days < 0:
+
+    today = date.today()
+    if dob > today:
         return "unknown age"
-    years = total_days // 365
-    months = (total_days % 365) // 30
+
+    # Calculate precise months from DOB to today
+    months = (today.year - dob.year) * 12 + (today.month - dob.month)
+
+    # Adjust if today's day is earlier than birth day
+    if today.day < dob.day:
+        months -= 1
+
+    if months < 0:
+        return "unknown age"
+
+    # Convert months to years and remaining months
+    years = months // 12
+    remaining_months = months % 12
+
     if years == 0:
         return f"{months} month{'s' if months != 1 else ''} old"
-    elif months == 0:
+    elif remaining_months == 0:
         return f"{years} year{'s' if years != 1 else ''} old"
-    return f"{years} year{'s' if years != 1 else ''} and {months} month{'s' if months != 1 else ''} old"
+    return f"{years} year{'s' if years != 1 else ''} and {remaining_months} month{'s' if remaining_months != 1 else ''} old"
 
 
 def _normalize_gender_for_lookup(gender: str | None) -> str | None:
@@ -461,17 +481,16 @@ async def _call_openai_nutrition_targets(
         prompt_lines.append(f"Gender: {gender}")
     user_prompt = "\n".join(prompt_lines)
 
-    response = await client.chat.completions.create(
+    response = await client.messages.create(
         model=OPENAI_QUERY_MODEL,
         temperature=0.0,
         max_tokens=OPENAI_NUTRITION_LOOKUP_MAX_TOKENS,
-        response_format={"type": "json_object"},
+        system=NUTRITION_TARGET_SYSTEM_PROMPT,
         messages=[
-            {"role": "system", "content": NUTRITION_TARGET_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
     )
-    raw = response.choices[0].message.content
+    raw = response.content[0].text
     logger.debug("OpenAI nutrition targets raw: %s", raw)
     try:
         return json.loads(raw)
@@ -611,17 +630,16 @@ async def _call_openai_food_estimation(
     if daily_portion_g and daily_portion_g > 0:
         user_prompt += f"\nUser-provided daily portion: {daily_portion_g}g"
 
-    response = await client.chat.completions.create(
+    response = await client.messages.create(
         model=OPENAI_QUERY_MODEL,
         temperature=0.0,
         max_tokens=OPENAI_FOOD_ESTIMATION_MAX_TOKENS,
-        response_format={"type": "json_object"},
+        system=system_prompt,
         messages=[
-            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
     )
-    raw = response.choices[0].message.content
+    raw = response.content[0].text
     logger.debug("OpenAI food estimation raw: %s", raw)
     try:
         result = json.loads(raw)
@@ -684,16 +702,16 @@ async def generate_recommendation(
                 "\nDo not suggest a supplement already listed under current supplements."
             )
 
-        response = await client.chat.completions.create(
+        response = await client.messages.create(
             model=OPENAI_QUERY_MODEL,
             temperature=OPENAI_NUTRITION_REC_TEMPERATURE,
             max_tokens=OPENAI_NUTRITION_REC_MAX_TOKENS,
+            system=RECOMMENDATION_SYSTEM_PROMPT,
             messages=[
-                {"role": "system", "content": RECOMMENDATION_SYSTEM_PROMPT},
                 {"role": "user", "content": context},
             ],
         )
-        text = response.choices[0].message.content.strip()
+        text = response.content[0].text.strip()
         if text:
             _REC_CACHE[cache_key] = (text, time.time())
             return text

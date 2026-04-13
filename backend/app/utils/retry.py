@@ -1,12 +1,12 @@
 """
 PetCircle Phase 1 — Retry Utilities (Module 17)
 
-Provides retry wrappers for external API calls (OpenAI, WhatsApp).
+Provides retry wrappers for external API calls (Claude/Anthropic, WhatsApp).
 Each wrapper has a specific retry policy tuned to the service's
 failure characteristics.
 
 Retry policies:
-    - OpenAI: 3 attempts with 1s, 2s backoff. Fail on 3rd attempt.
+    - Claude/Anthropic: 3 attempts with 1s, 2s backoff. Fail on 3rd attempt.
     - WhatsApp: 2 attempts (1 retry). Log failure, continue.
     - Database: No retry — failures indicate constraint violations
       or connection issues that should not be silently retried.
@@ -29,7 +29,7 @@ T = TypeVar("T")
 
 async def retry_openai_call(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     """
-    Retry wrapper for OpenAI API calls.
+    Retry wrapper for Claude/Anthropic API calls.
 
     Retry policy:
         - Attempt 1: immediate
@@ -37,12 +37,12 @@ async def retry_openai_call(func: Callable[..., Any], *args: Any, **kwargs: Any)
         - Attempt 3: after 2s backoff
         - If all 3 fail, raise the last exception
 
-    This policy handles transient OpenAI rate limits and timeouts.
+    This policy handles transient Claude/Anthropic rate limits and timeouts.
     Permanent errors (invalid API key, malformed request) will still
     fail on the first attempt — retries only help with transient issues.
 
     Args:
-        func: The async callable that makes the OpenAI API call.
+        func: The async callable that makes the Claude/Anthropic API call.
         *args: Positional arguments passed to func.
         **kwargs: Keyword arguments passed to func.
 
@@ -64,14 +64,14 @@ async def retry_openai_call(func: Callable[..., Any], *args: Any, **kwargs: Any)
             if attempt < len(OPENAI_RETRY_BACKOFFS):
                 backoff = OPENAI_RETRY_BACKOFFS[attempt]
                 logger.warning(
-                    "OpenAI call failed (attempt %d/%d), retrying in %ss: %s",
+                    "Claude/Anthropic call failed (attempt %d/%d), retrying in %ss: %s",
                     attempt + 1, total_attempts, backoff, str(e)
                 )
                 await asyncio.sleep(backoff)
             else:
                 # Final attempt failed — log and raise.
                 logger.error(
-                    "OpenAI call failed after %d attempts: %s",
+                    "Claude/Anthropic call failed after %d attempts: %s",
                     total_attempts, str(e)
                 )
 

@@ -1,0 +1,7 @@
+1. 100 documents not to be specified 
+2. ⁠all food to be shown
+3. ⁠check why age 9 years got changed to 8 year 11 months
+4. ⁠diet analysis to be updated - with new prompt 
+5. ⁠cart - razor pay integration 
+6. ⁠health trends - cadence charts  - tick & flea and deworming charts should also have the timeline and next due marked even if we have just one entry in beginning ( refer screenshot) . Also alignment for all charts should be first dot - in the beginning ( the way vaccine is showing) 
+7. ⁠health trends - the headline for vaccine is coming wrong

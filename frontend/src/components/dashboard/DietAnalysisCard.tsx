@@ -19,12 +19,25 @@ export default function DietAnalysisCard({ data, compact = false }: DietAnalysis
   const macros = normalizeMacros(data.diet_summary?.macros || []);
   const missingMicros = (data.diet_summary?.missing_micros || []).slice(0, 3);
 
+  // Check if any macro has actual data (pct_of_need > 0)
+  const hasData = macros.some((macro) => macro.pct_of_need > 0);
+
+  // Hide the entire section if no food data exists
+  if (!hasData) {
+    return null;
+  }
+
   return (
     <div className={compact ? undefined : "card"}>
       <div className="sec-lbl">Diet Analysis</div>
 
       <div className="donut-grid" style={{ marginBottom: 12 }}>
         {macros.map((macro) => {
+          // Skip rendering macros with 0% data
+          if (macro.pct_of_need === 0) {
+            return null;
+          }
+
           const status = macroStatus(macro.name, macro.pct_of_need);
           return (
             <div

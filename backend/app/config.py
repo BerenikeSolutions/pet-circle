@@ -44,8 +44,8 @@ class Settings(BaseSettings):
     # --- Environment ---
     APP_ENV: str = APP_ENV
 
-    # --- OpenAI ---
-    OPENAI_API_KEY: str
+    # --- Anthropic ---
+    ANTHROPIC_API_KEY: str
 
     # --- Supabase ---
     SUPABASE_URL: str
@@ -136,8 +136,8 @@ class Settings(BaseSettings):
 
     # --- Feature Flags ---
     # Set to 'true' to enable AI-driven conversational order flow.
-    # Requires OPENAI_API_KEY. Falls back to deterministic state machine if either
-    # is absent or if the OpenAI API health check fails.
+    # Requires ANTHROPIC_API_KEY. Falls back to deterministic state machine if either
+    # is absent or if the Anthropic API health check fails.
     AGENTIC_ORDER_ENABLED: str = "true"
 
     # --- Timezone ---

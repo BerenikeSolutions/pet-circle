@@ -1,8 +1,0 @@
-9.Non mandatory vaccines showing as top quick fixes if not given
-10.Dashboard takes time to load 
-11.In summary for food only brand name captured the food qty and home food missed now for mixed
-12.If next due is in past the item should show current date as due 
-13.The format need to be mmddyy not yymmdd 
-14.If someone send docs after the flow is over , no acknowledgement on whatsapp while processing delay
-15.responses to questions if user engages had lists of item like chronic conditions - not relevant 
-16. Cadence in ask your vet section need to match care plan ‎<This message was edited>

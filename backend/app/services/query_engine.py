@@ -66,16 +66,16 @@ from app.utils.retry import retry_openai_call
 
 logger = logging.getLogger(__name__)
 
-_openai_query_client = None
+_anthropic_query_client = None
 
 
 def _get_openai_query_client():
-    """Return a cached AsyncOpenAI client for queries (created on first call)."""
-    global _openai_query_client
-    if _openai_query_client is None:
-        from openai import AsyncOpenAI
-        _openai_query_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-    return _openai_query_client
+    """Return a cached AsyncAnthropic client for queries (created on first call)."""
+    global _anthropic_query_client
+    if _anthropic_query_client is None:
+        from anthropic import AsyncAnthropic
+        _anthropic_query_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+    return _anthropic_query_client
 
 
 # --- System prompt for strict query engine ---
@@ -546,16 +546,16 @@ async def answer_pet_question(
 
         async def _make_call() -> str:
             """Inner function wrapped by retry_openai_call."""
-            response = await client.chat.completions.create(
+            response = await client.messages.create(
                 model=OPENAI_QUERY_MODEL,
                 temperature=OPENAI_QUERY_TEMPERATURE,
                 max_tokens=OPENAI_QUERY_MAX_TOKENS,
+                system=QUERY_SYSTEM_PROMPT,
                 messages=[
-                    {"role": "system", "content": QUERY_SYSTEM_PROMPT},
                     {"role": "user", "content": user_message},
                 ],
             )
-            return response.choices[0].message.content
+            return response.content[0].text
 
         # Retry with backoff: 3 attempts (1s, 2s) — from constants.
         answer = await retry_openai_call(_make_call)

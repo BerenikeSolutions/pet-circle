@@ -30,7 +30,7 @@ import secrets
 from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
-from openai import AsyncOpenAI
+from anthropic import AsyncAnthropic
 from sqlalchemy import case, func, or_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -76,11 +76,11 @@ logger = logging.getLogger(__name__)
 
 _openai_onboarding_client = None
 
-def _get_openai_onboarding_client() -> AsyncOpenAI:
-    """Return a cached AsyncOpenAI client for onboarding checks."""
+def _get_openai_onboarding_client() -> AsyncAnthropic:
+    """Return a cached AsyncAnthropic client for onboarding checks."""
     global _openai_onboarding_client
     if _openai_onboarding_client is None:
-        _openai_onboarding_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        _openai_onboarding_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
     return _openai_onboarding_client
 
 def is_doc_upload_deadline_expired(deadline: datetime | None) -> bool:
@@ -762,13 +762,13 @@ async def _ai_extract_pet_name_correction(text: str, current_name: str | None = 
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
+            client.messages.create,
             model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=80,
         )
-        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        raw = _strip_json_fences(response.content[0].text.strip())
         data = json.loads(raw)
         corrected = str(data.get("corrected_name") or "").strip()
         if not corrected:
@@ -913,7 +913,7 @@ def _get_question_for_state(state: str, pet=None, onboarding_data: dict | None =
         "welcome": "What's your pet's name?",
         "awaiting_breed_age": (
             f"What breed is {pet_name} and how old are they? "
-            f"An approximate age is fine (e.g., golden retriever, 4)"
+            f"You can share their date of birth (e.g., 15/04/2020) or just their age (e.g., golden retriever, 4)"
         ),
         "awaiting_gender_weight": (
             f"What's {pet_name}'s gender and approximate weight? "
@@ -1112,6 +1112,8 @@ async def _step_breed_age(db, user, text, send_fn):
     if not explicit_dob and age_years is not None:
         pet.age_text = age_text_raw or f"{age_years} years"
         # Compute approximate DOB for scheduling.
+        # When only age is provided, use first day of current month in the birth year.
+        # This ensures consistent age calculation and avoids day-of-month edge cases.
         approx_dob = date_type(
             date_type.today().year - int(age_years),
             max(1, min(12, date_type.today().month)),
@@ -1886,13 +1888,13 @@ async def _extract_meal_supplement_items(text: str) -> list[tuple[str, str]]:
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
+            client.messages.create,
             model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=350,
         )
-        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        raw = _strip_json_fences(response.content[0].text.strip())
         data = json.loads(raw)
         items = data.get("supplements", [])
         return [
@@ -2933,13 +2935,13 @@ async def _ai_clarify_input(
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
+            client.messages.create,
             model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
             max_tokens=150,
         )
-        clarification = response.choices[0].message.content.strip()
+        clarification = response.content[0].text.strip()
         if clarification:
             return clarification
     except Exception as e:
@@ -3005,13 +3007,13 @@ async def _ai_resolve_example_confirmation(
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
+            client.messages.create,
             model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=300,
         )
-        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        raw = _strip_json_fences(response.content[0].text.strip())
         data = json.loads(raw)
         return data.get("result", example_text)
     except Exception as e:
@@ -3045,10 +3047,12 @@ async def _store_meal_items(db, pet, items: list, food_type: str):
     """
     Store parsed diet items for a pet.
 
-    Strict mode: only items classified as kind="brand" are persisted.
-    Ingredients (chicken, rice, carrots) and generic treats are dropped —
-    per product requirement, the diet list must only contain identifiable
-    commercial brands/products.
+    Rules by food_type:
+    - "packaged": Only brand items saved (non-brand ingredients dropped).
+    - "home": All items saved as homemade type, regardless of kind.
+    - "mix": All items saved — brands as packaged, home-cooked as homemade (by keyword).
+
+    This ensures all food the user describes is persisted to the DB.
     """
     for entry in items:
         # Support both new (label, detail, kind) triples and legacy (label, detail) tuples.
@@ -3058,17 +3062,24 @@ async def _store_meal_items(db, pet, items: list, food_type: str):
             label, detail = entry
             kind = "brand"  # Legacy callers — assume brand.
 
-        if kind != "brand":
+        label_lower = label.lower()
+
+        # Determine item type: packaged or homemade
+        is_homemade_keyword = any(kw in label_lower for kw in HOMEMADE_KW)
+        item_type = food_type if food_type != "mix" else "packaged"
+        if is_homemade_keyword or food_type == "home":
+            item_type = "homemade"
+
+        # Skip non-brand items only for pure packaged food (no home component).
+        # For "home" and "mix" food types, save all items — the user explicitly
+        # described what their pet eats, including home-cooked ingredients.
+        if kind != "brand" and food_type == "packaged":
             logger.debug(
-                "Dropping non-brand diet item for pet_id=%s: label=%r kind=%r",
+                "Dropping non-brand diet item for pet_id=%s: label=%r kind=%r (packaged food only allows brands)",
                 str(pet.id), label, kind,
             )
             continue
 
-        item_type = food_type if food_type != "mix" else "packaged"
-        label_lower = label.lower()
-        if any(kw in label_lower for kw in HOMEMADE_KW) or food_type == "home":
-            item_type = "homemade"
         try:
             await add_diet_item(db, pet.id, item_type, label, detail or None)
         except Exception as e:
@@ -3100,13 +3111,13 @@ async def _ai_is_food_not_supplement(text: str) -> bool:
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
+            client.messages.create,
             model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=50,
         )
-        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        raw = _strip_json_fences(response.content[0].text.strip())
         data = json.loads(raw)
         return bool(data.get("is_food", False))
     except Exception as e:
@@ -3166,13 +3177,13 @@ async def _classify_prior_step_input(text: str, current_step: str) -> str:
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
+            client.messages.create,
             model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=50,
         )
-        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        raw = _strip_json_fences(response.content[0].text.strip())
         data = json.loads(raw)
         classification = data.get("classification", "on_topic")
         if classification not in ("food", "supplement", "on_topic"):
@@ -3248,13 +3259,13 @@ async def _ai_check_diet_relevance(text: str, pet_name: str) -> bool:
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
+            client.messages.create,
             model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=50,
         )
-        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        raw = _strip_json_fences(response.content[0].text.strip())
         data = json.loads(raw)
         return bool(data.get("is_diet", True))
     except Exception as e:
@@ -3285,13 +3296,13 @@ async def _ai_parse_food_type(text: str, pet_name: str) -> str | None:
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
+            client.messages.create,
             model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=100,
         )
-        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        raw = _strip_json_fences(response.content[0].text.strip())
         data = json.loads(raw)
         result = data.get("food_type")
         if result in ("home", "packaged", "mix"):
@@ -3349,13 +3360,13 @@ async def _parse_diet_input(text: str) -> list[tuple[str, str, str]]:
 
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
+            client.messages.create,
             model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=500,
         )
-        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        raw = _strip_json_fences(response.content[0].text.strip())
         data = json.loads(raw)
         items = data.get("items", [])
         result: list[tuple[str, str, str]] = []
@@ -3440,13 +3451,13 @@ async def _parse_breed_age(text: str) -> dict:
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
+            client.messages.create,
             model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=200,
         )
-        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        raw = _strip_json_fences(response.content[0].text.strip())
         data = json.loads(raw)
         return {
             "breed": data.get("breed"),
@@ -3480,13 +3491,13 @@ async def _parse_gender_weight_neutered(text: str) -> dict:
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
+            client.messages.create,
             model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=100,
         )
-        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        raw = _strip_json_fences(response.content[0].text.strip())
         data = json.loads(raw)
         return {
             "gender": data.get("gender"),
@@ -3563,13 +3574,13 @@ async def _parse_preventive_care(text: str) -> dict:
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
+            client.messages.create,
             model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=500,
         )
-        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        raw = _strip_json_fences(response.content[0].text.strip())
         data = json.loads(raw)
         # Defensive parse: vaccine_specifics must be a list of dicts with name+date.
         raw_specifics = data.get("vaccine_specifics") or []
@@ -3933,13 +3944,13 @@ async def _parse_grooming_input(text: str) -> list[tuple[str, int, str]]:
 
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
+            client.messages.create,
             model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=500,
         )
-        raw = response.choices[0].message.content.strip()
+        raw = response.content[0].text.strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
             if raw.endswith("```"):
@@ -3989,13 +4000,13 @@ async def _generate_doc_upload_reply(
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
+            client.messages.create,
             model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
             max_tokens=150,
         )
-        return response.choices[0].message.content.strip()
+        return response.content[0].text.strip()
     except Exception as e:
         logger.warning("Doc upload reply GPT failed, using fallback: %s", str(e))
         if remaining > 0:
@@ -4479,8 +4490,9 @@ async def _generate_care_plan_message(
     """
     # Build flags for deterministic variation selection.
     split_items = split_diet_items_by_type(diet_items or [])
-    # Care plan only references packaged/commercial pet food products — not homemade meals.
-    has_food = bool(split_items["packaged"])
+    # "What's Found" (WhatsApp) references ALL food items — both packaged and homemade.
+    # Note: care plan dashboard only shows packaged items (handled by care_plan_engine).
+    has_food = bool(split_items["foods"])  # includes both packaged and homemade
     has_preventive = record_count > 0
     has_breed = bool(pet.breed)
     has_age = bool(pet.age_text or pet.dob)
@@ -4687,7 +4699,7 @@ async def _ai_check_weight(
         age_months = max(0, (today.year - dob.year) * 12 + (today.month - dob.month))
         age_years = round(age_months / 12, 2)
 
-    if not getattr(settings, "OPENAI_API_KEY", None):
+    if not getattr(settings, "ANTHROPIC_API_KEY", None):
         return None
 
     try:
@@ -4706,42 +4718,19 @@ async def _ai_check_weight(
             "If uncertain, prefer conservative veterinary ranges and explain briefly."
         )
 
-        responses_api = getattr(client, "responses", None)
-        if responses_api and hasattr(responses_api, "create"):
-            async def _make_call():
-                return await responses_api.create(
-                    model=OPENAI_QUERY_MODEL,
-                    input=prompt,
-                    temperature=0,
-                    max_output_tokens=140,
-                )
-
-            response = await retry_openai_call(_make_call)
-            raw = (getattr(response, "output_text", "") or "").strip()
-        else:
-            async def _make_call_chat():
-                return await client.chat.completions.create(
-                    model=OPENAI_QUERY_MODEL,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You validate pet weights and return strict JSON only."
-                            ),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0,
-                    max_tokens=140,
-                )
-
-            response = await retry_openai_call(_make_call_chat)
-            raw = (
-                response.choices[0].message.content
-                if response and getattr(response, "choices", None)
-                else ""
+        async def _make_call_chat():
+            return await client.messages.create(
+                model=OPENAI_QUERY_MODEL,
+                system="You validate pet weights and return strict JSON only.",
+                messages=[
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0,
+                max_tokens=140,
             )
-            raw = (raw or "").strip()
+
+        response = await retry_openai_call(_make_call_chat)
+        raw = response.content[0].text.strip()
 
         data = json.loads(raw)
 
@@ -4768,7 +4757,7 @@ async def _ai_identify_pet_from_photo(file_bytes: bytes, mime_type: str) -> dict
             - species: "dog", "cat", or None
             - breed: normalized breed string or None
     """
-    if not getattr(settings, "OPENAI_API_KEY", None):
+    if not getattr(settings, "ANTHROPIC_API_KEY", None):
         return {"species": None, "breed": None}
 
     if mime_type not in {"image/jpeg", "image/png"}:
@@ -4776,6 +4765,15 @@ async def _ai_identify_pet_from_photo(file_bytes: bytes, mime_type: str) -> dict
 
     client = _get_openai_onboarding_client()
     data_uri = encode_image_base64(file_bytes, mime_type)
+
+    # Strip data URI prefix to get raw base64 and media type for Anthropic vision API.
+    b64_data = data_uri
+    img_media_type = mime_type
+    if data_uri.startswith("data:"):
+        header, _, b64_data = data_uri.partition(",")
+        mime_part = header.split(";")[0].replace("data:", "")
+        if mime_part:
+            img_media_type = mime_part
 
     prompt = (
         "Identify the main pet in this photo. "
@@ -4785,26 +4783,29 @@ async def _ai_identify_pet_from_photo(file_bytes: bytes, mime_type: str) -> dict
     )
 
     async def _make_call() -> str:
-        response = await client.chat.completions.create(
+        response = await client.messages.create(
             model=OPENAI_QUERY_MODEL,
             temperature=0,
             max_tokens=80,
-            response_format={"type": "json_object"},
+            system="You classify pet photos and return strict JSON only.",
             messages=[
-                {
-                    "role": "system",
-                    "content": "You classify pet photos and return strict JSON only.",
-                },
                 {
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": data_uri, "detail": "high"}},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": img_media_type,
+                                "data": b64_data,
+                            },
+                        },
                     ],
                 },
             ],
         )
-        return response.choices[0].message.content
+        return response.content[0].text
 
     raw = await retry_openai_call(_make_call)
     try:
