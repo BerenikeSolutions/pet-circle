@@ -22,6 +22,7 @@ from collections import OrderedDict
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -166,6 +167,10 @@ async def _process_message_background(message_data: dict) -> None:
     Uses its own DB session since the request-scoped session is closed
     after the webhook returns 200. This ensures Meta never times out
     waiting for processing to complete, eliminating phantom retries.
+
+    Retries once with a fresh session on OperationalError (SSL drop) —
+    pool_pre_ping can't prevent the TOCTOU race where a connection dies
+    between checkout and the first query.
     """
     from app.database import get_fresh_session
 
@@ -175,6 +180,56 @@ async def _process_message_background(message_data: dict) -> None:
         from app.services.message_router import route_message
         # 120s timeout — generous since we're no longer blocking the webhook.
         await asyncio.wait_for(route_message(bg_db, message_data), timeout=120)
+    except OperationalError as e:
+        # SSL connection dropped on first DB hit — retry once with a fresh session.
+        logger.warning(
+            "Background routing SSL drop for %s — retrying with fresh session: %s",
+            mask_phone(from_number), str(e)[:200],
+        )
+        try:
+            bg_db.rollback()
+        except Exception:
+            pass
+        try:
+            bg_db.close()
+        except Exception:
+            pass
+        bg_db = get_fresh_session()
+        try:
+            from app.services.message_router import route_message
+            await asyncio.wait_for(route_message(bg_db, message_data), timeout=120)
+        except TimeoutError:
+            logger.error(
+                "Background message routing timed out for %s (retry)",
+                mask_phone(from_number),
+            )
+            try:
+                from app.services.whatsapp_sender import send_text_message
+                await send_text_message(
+                    bg_db, from_number,
+                    "Your request is taking longer than expected. "
+                    "Please try again in a moment.",
+                )
+            except Exception:
+                pass
+        except Exception as retry_e:
+            logger.error(
+                "Background routing error for %s (retry): %s",
+                mask_phone(from_number), str(retry_e), exc_info=True,
+            )
+            try:
+                bg_db.rollback()
+            except Exception:
+                pass
+            try:
+                from app.services.whatsapp_sender import send_text_message
+                await send_text_message(
+                    bg_db, from_number,
+                    "We're experiencing a temporary issue. "
+                    "Please try again in a few minutes.",
+                )
+            except Exception:
+                pass
     except TimeoutError:
         logger.error(
             "Background message routing timed out for %s",

@@ -48,6 +48,12 @@ MAX_PENDING_DOCS_PER_PET: int = 100
 # Each extraction holds a DB session for the GPT call duration (~5-15s).
 MAX_CONCURRENT_EXTRACTIONS: int = 5
 
+# Maximum number of concurrent document upload processing tasks system-wide.
+# Limits initial DB + media-download work when a user sends many files at once
+# (e.g. 20 documents). Without this, 20 tasks simultaneously hold DB connections
+# and hit Supabase hard enough to trigger SSL termination on the pooler side.
+MAX_CONCURRENT_UPLOAD_PROCESSING: int = 8
+
 # Allowed MIME types for uploaded documents.
 # Only images (JPEG, PNG) and PDF are accepted.
 ALLOWED_MIME_TYPES: set[str] = {
