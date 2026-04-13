@@ -105,8 +105,6 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
     })
     .map((entry) => entry.trait)
     .slice(0, 8);
-  const essentialCare = (lifeStage?.essential_care || []).slice(0, 2);
-
   if (!hasAge) {
     return (
       <div className={compact ? undefined : "card"} style={{ paddingBottom: 12 }}>
@@ -186,27 +184,6 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
         </div>
       )}
 
-      {essentialCare.length > 0 && (
-        <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
-          {essentialCare.map((care) => (
-            <div key={care.title} style={{ background: "var(--ta)", borderRadius: 8, padding: "8px 12px" }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: "#b85c00", marginBottom: 2 }}>
-                {care.title}
-              </div>
-              <div
-                style={{
-                  fontSize: 11,
-                  color: "var(--t2)",
-                  lineHeight: 1.4,
-                }}
-                title={care.detail}
-              >
-                {care.detail}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

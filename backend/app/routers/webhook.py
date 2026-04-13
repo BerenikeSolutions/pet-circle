@@ -368,6 +368,20 @@ async def handle_whatsapp_message(request: Request, db: Session = Depends(get_db
                     "DB dedup check unavailable (SSL/pool error) — continuing with in-memory dedup: %s",
                     str(e)[:200],
                 )
+                # Clear the broken transaction state so the session can be reused.
+                # rollback() alone can fail when the SSL connection is completely
+                # dead — so we also call close(), which discards the dead DBAPI
+                # connection and returns it to the pool. The next db.add() below
+                # will check out a fresh connection. Both calls are safe on a
+                # dead connection and must be called in this order.
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                try:
+                    db.close()
+                except Exception:
+                    pass
 
         # Log the incoming message AFTER dedup so duplicates aren't logged twice.
         # The wamid unique constraint acts as a final dedup safety net.
