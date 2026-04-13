@@ -2189,35 +2189,6 @@ async def dashboard_verify_payment(
         raise HTTPException(status_code=503, detail="Payment verification failed.")
 
 
-class AddToCartRequest(BaseModel):
-    product_id: str = Field(..., min_length=1)
-    name: str = Field(..., min_length=1, max_length=200)
-    price: int = Field(..., ge=0)
-    icon: str | None = None
-    sub: str | None = None
-    tag: str | None = None
-    tag_color: str | None = None
-
-
-@router.post("/{token}/cart/add")
-async def dashboard_add_to_cart(
-    token: str,
-    body: AddToCartRequest,
-    db: Session = Depends(get_db),
-):
-    """Add a product to the pet's cart."""
-    try:
-        dt = validate_dashboard_token(db, token)
-        return await add_to_cart(
-            db, dt.pet_id, body.product_id, body.name, body.price,
-            body.icon, body.sub, body.tag, body.tag_color,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error("Add to cart error: %s", str(e), exc_info=True)
-        raise HTTPException(status_code=503, detail="Could not add to cart.")
-
 
 @router.delete("/{token}/cart/{product_id}")
 async def dashboard_remove_from_cart(
