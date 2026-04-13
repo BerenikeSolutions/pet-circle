@@ -168,6 +168,16 @@ OPENAI_RATE_LIMIT_BACKOFFS: list[float] = [10.0, 20.0]
 # Max concurrent Claude/Anthropic API calls across the whole process.
 CLAUDE_API_CONCURRENCY: int = 5
 
+# --- Extraction Hardening ---
+# Maximum number of automatic replay attempts for a failed extraction.
+# After this many attempts the document stays 'failed' permanently.
+EXTRACTION_MAX_AUTO_RETRIES: int = 3
+
+# Confidence threshold below which a second-pass extraction is triggered.
+# The model rates its own confidence 0.0–1.0; values below this floor mean
+# the document was ambiguous and deserves a focused re-extraction.
+EXTRACTION_LOW_CONFIDENCE_THRESHOLD: float = 0.65
+
 # --- Weight Lookup (AI-powered ideal weight range) ---
 OPENAI_WEIGHT_LOOKUP_MODEL: str = OPENAI_QUERY_MODEL  # claude-sonnet-4-6
 OPENAI_WEIGHT_LOOKUP_TEMPERATURE: float = 0.0

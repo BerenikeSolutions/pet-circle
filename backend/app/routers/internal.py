@@ -6,8 +6,9 @@ These endpoints are NOT exposed to users — they are called by GitHub
 Actions cron jobs or admin scripts.
 
 Routes:
-    POST /internal/run-reminder-engine  — 4-stage reminder lifecycle + conflict expiry.
-    POST /internal/run-nudge-scheduler  — Level 0/1/2 nudge scheduler (Excel v5).
+    POST /internal/run-reminder-engine      — 4-stage reminder lifecycle + conflict expiry.
+    POST /internal/run-nudge-scheduler      — Level 0/1/2 nudge scheduler (Excel v5).
+    POST /internal/run-extraction-replay    — Retry failed document extractions (batch).
 
 Security:
     - Protected by the same X-ADMIN-KEY header as admin routes.
@@ -159,6 +160,105 @@ def execute_reminder_engine(db: Session = Depends(get_db)):
             "nudge_engine": nudge_error,
             "inactivity_nudges": inactivity_error,
         },
+    }
+
+
+@router.post("/run-extraction-replay")
+async def execute_extraction_replay(db: Session = Depends(get_db)):
+    """
+    Replay failed document extractions that are eligible for automatic retry.
+
+    Called by GitHub Actions cron every 6 hours.  Queries documents with:
+        - extraction_status = 'failed'
+        - retry_count < EXTRACTION_MAX_AUTO_RETRIES
+
+    Processes up to 20 documents per run to avoid long-running requests.
+    Each document is downloaded, status reset to 'pending', and extraction
+    re-attempted with the full pipeline.
+
+    Returns:
+        Dict with replayed, skipped, and per-document errors.
+    """
+    from app.core.constants import EXTRACTION_MAX_AUTO_RETRIES
+    from app.models.document import Document
+    from app.services.document_upload import download_from_supabase
+    from app.services.gpt_extraction import extract_and_process_document
+    from app.services.document_upload import get_extraction_semaphore
+
+    BATCH_LIMIT = 20
+
+    eligible = (
+        db.query(Document)
+        .filter(
+            Document.extraction_status == "failed",
+            Document.retry_count < EXTRACTION_MAX_AUTO_RETRIES,
+        )
+        .order_by(Document.created_at.asc())
+        .limit(BATCH_LIMIT)
+        .all()
+    )
+
+    replayed = 0
+    skipped = 0
+    errors: list[str] = []
+
+    for doc in eligible:
+        try:
+            # Download file bytes from storage.
+            file_bytes = await download_from_supabase(
+                doc.file_path,
+                backend=doc.storage_backend or "supabase",
+            )
+            if not file_bytes:
+                logger.warning(
+                    "Extraction replay: could not download file for document_id=%s, skipping",
+                    str(doc.id),
+                )
+                skipped += 1
+                continue
+
+            # Reset status to pending before re-extraction.
+            doc.extraction_status = "pending"
+            db.commit()
+
+            semaphore = get_extraction_semaphore()
+            async with semaphore:
+                result = await extract_and_process_document(
+                    db=db,
+                    document_id=doc.id,
+                    document_text="",
+                    file_bytes=file_bytes,
+                )
+
+            if result.get("status") == "success":
+                replayed += 1
+            else:
+                skipped += 1
+                if result.get("errors"):
+                    errors.append(f"doc {doc.id}: {result['errors']}")
+
+        except Exception as e:
+            skipped += 1
+            errors.append(f"doc {doc.id}: {str(e)}")
+            logger.error(
+                "Extraction replay failed for document_id=%s: %s",
+                str(doc.id), str(e),
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+    logger.info(
+        "Extraction replay completed: eligible=%d, replayed=%d, skipped=%d, errors=%d",
+        len(eligible), replayed, skipped, len(errors),
+    )
+
+    return {
+        "eligible": len(eligible),
+        "replayed": replayed,
+        "skipped": skipped,
+        "errors": errors,
     }
 
 

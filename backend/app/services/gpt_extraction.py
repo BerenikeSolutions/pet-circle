@@ -44,6 +44,8 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.core.constants import (
     DOCUMENT_CATEGORIES,
+    EXTRACTION_LOW_CONFIDENCE_THRESHOLD,
+    EXTRACTION_MAX_AUTO_RETRIES,
     OPENAI_EXTRACTION_MAX_TOKENS,
     OPENAI_EXTRACTION_MODEL,
     OPENAI_EXTRACTION_TEMPERATURE,
@@ -990,8 +992,228 @@ EXTRACTION_SYSTEM_PROMPT = (
     '- If no preventive items are found, return {"document_name": "...", "document_type": "pet_medical", '
     '"document_category": "...", "diagnostic_summary": null, "pet_name": null, "items": [], '
     '"conditions": [], "preventive_medications": [], "contacts": []}\n'
-    "- Return valid JSON only — no markdown, no explanation, no extra text."
+    "- confidence: a number between 0.0 and 1.0 rating how certain you are about the extraction. "
+    "Set below 0.7 if the document is unclear, partially legible, or the document_category is ambiguous."
 )
+
+# ---------------------------------------------------------------------------
+# Extraction tool schema — forces the Anthropic API to return schema-valid
+# structured output via tool_use, eliminating all JSON parse failures.
+# The model is invoked with tool_choice={"type":"tool","name":"extract_pet_health_data"}
+# so it MUST call this tool and cannot emit free-text.
+# ---------------------------------------------------------------------------
+EXTRACTION_TOOL_SCHEMA: dict = {
+    "name": "extract_pet_health_data",
+    "description": (
+        "Extract structured veterinary health data from the provided document. "
+        "Return all fields specified in the schema. Use null for any field not present in the document."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "document_name": {"type": "string", "description": "Short descriptive name for this document."},
+            "document_type": {"type": "string", "enum": ["pet_medical", "not_pet_related"]},
+            "document_category": {
+                "type": "string",
+                "enum": ["Blood Report", "Urine Report", "Imaging", "Prescription",
+                         "PCR & Parasite Panel", "Vaccination", "Other"],
+            },
+            "pet_name": {"type": ["string", "null"]},
+            "doctor_name": {"type": ["string", "null"]},
+            "clinic_name": {"type": ["string", "null"]},
+            "diagnostic_summary": {"type": ["string", "null"]},
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "item_name": {"type": "string"},
+                        "last_done_date": {"type": ["string", "null"]},
+                        "next_due_date": {"type": ["string", "null"]},
+                        "item_source": {"type": ["string", "null"]},
+                        "notes": {"type": ["string", "null"]},
+                    },
+                    "required": ["item_name"],
+                },
+            },
+            "diagnostic_values": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "test_type": {
+                            "type": "string",
+                            "enum": ["blood", "urine", "fecal", "xray", "ultrasound", "ecg", "eeg", "other"],
+                        },
+                        "parameter_name": {"type": "string"},
+                        "value_numeric": {"type": ["number", "null"]},
+                        "value_text": {"type": ["string", "null"]},
+                        "unit": {"type": ["string", "null"]},
+                        "reference_range": {"type": ["string", "null"]},
+                        "status_flag": {
+                            "type": ["string", "null"],
+                            "enum": ["low", "normal", "high", "abnormal", None],
+                        },
+                        "observed_at": {"type": ["string", "null"]},
+                    },
+                    "required": ["test_type", "parameter_name"],
+                },
+            },
+            "conditions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "condition_name": {"type": "string"},
+                        "condition_type": {
+                            "type": "string",
+                            "enum": ["chronic", "episodic", "resolved"],
+                        },
+                        "diagnosis": {"type": ["string", "null"]},
+                        "diagnosed_at": {"type": ["string", "null"]},
+                        "medications": {"type": "array", "items": {"type": "object"}},
+                        "monitoring": {"type": "array", "items": {"type": "object"}},
+                    },
+                    "required": ["condition_name"],
+                },
+            },
+            "preventive_medications": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "medication_name": {"type": "string"},
+                        "medication_name_raw": {"type": ["string", "null"]},
+                        "dose": {"type": ["number", "null"]},
+                        "dose_unit": {"type": ["string", "null"]},
+                        "frequency": {"type": ["string", "null"]},
+                        "duration": {"type": ["string", "null"]},
+                        "prevention_targets": {"type": "array", "items": {"type": "string"}},
+                        "notes": {"type": ["string", "null"]},
+                    },
+                    "required": ["medication_name"],
+                },
+            },
+            "vaccination_details": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "vaccine_name": {"type": "string"},
+                        "vaccine_name_raw": {"type": ["string", "null"]},
+                        "dose": {"type": ["string", "null"]},
+                        "dose_unit": {"type": ["string", "null"]},
+                        "route": {"type": ["string", "null"]},
+                        "manufacturer": {"type": ["string", "null"]},
+                        "batch_number": {"type": ["string", "null"]},
+                        "next_due_date": {"type": ["string", "null"]},
+                        "administered_by": {"type": ["string", "null"]},
+                        "notes": {"type": ["string", "null"]},
+                    },
+                    "required": ["vaccine_name"],
+                },
+            },
+            "contacts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "contact_type": {"type": "string", "enum": ["vet", "specialist", "other"]},
+                        "name": {"type": "string"},
+                        "clinic": {"type": ["string", "null"]},
+                        "phone": {"type": ["string", "null"]},
+                        "address": {"type": ["string", "null"]},
+                    },
+                    "required": ["name"],
+                },
+            },
+            "clinical_exam": {
+                "type": ["object", "null"],
+                "properties": {
+                    "weight_kg": {"type": ["number", "null"]},
+                    "temperature_c": {"type": ["number", "null"]},
+                    "pulse_bpm": {"type": ["number", "null"]},
+                    "respiration_rpm": {"type": ["number", "null"]},
+                    "mucous_membranes": {"type": ["string", "null"]},
+                    "in_clinic_test_values": {"type": ["array", "null"], "items": {"type": "object"}},
+                    "notes": {"type": ["string", "null"]},
+                },
+            },
+            "confidence": {
+                "type": "number",
+                "description": "Confidence score 0.0–1.0 for the overall extraction quality.",
+                "minimum": 0.0,
+                "maximum": 1.0,
+            },
+        },
+        "required": ["document_name", "document_type", "document_category", "items", "confidence"],
+    },
+}
+
+
+def _build_canonical_document_name(
+    document_category: str | None,
+    document_name: str | None,
+    event_date,
+    diagnostic_values: list[dict] | None = None,
+) -> str:
+    """
+    Build the canonical display name for a document.
+
+    Naming convention (user-specified):
+        BloodReport_Mar26    UrineReport_Sep24   FecalReport_Jan25
+        LabReport_Mar26      XRay_Mar26          Ultrasound_Mar26
+        ECG_Mar26            EEG_Mar26           ImagingReport_Mar26
+        Vaccination_Mar26    VetPrescription_Mar26
+
+    When event_date is None the date suffix is omitted (e.g. "BloodReport").
+    Never raises — missing date or unknown category are both valid outcomes.
+
+    Args:
+        document_category: Canonical category string (e.g. "Blood Report").
+        document_name: LLM-suggested name used for imaging sub-type detection.
+        event_date:  datetime.date or None.
+        diagnostic_values: List of diagnostic value dicts (for test_type detection).
+    """
+    cat = (document_category or "").strip()
+    doc_lower = (document_name or "").lower()
+    dv = diagnostic_values or []
+    test_types = {(v.get("test_type") or "").lower() for v in dv}
+
+    if cat == "Prescription":
+        base = "VetPrescription"
+    elif cat == "Vaccination":
+        base = "Vaccination"
+    elif cat == "Blood Report":
+        base = "BloodReport"
+    elif cat == "Urine Report":
+        base = "UrineReport"
+    elif cat == "Imaging":
+        if "xray" in test_types or any(kw in doc_lower for kw in ("x-ray", "xray", "x ray", "radiograph")):
+            base = "XRay"
+        elif "ultrasound" in test_types or any(kw in doc_lower for kw in ("ultrasound", "usg", "sonograph")):
+            base = "Ultrasound"
+        elif "ecg" in test_types or "ecg" in doc_lower or "electrocardiograph" in doc_lower:
+            base = "ECG"
+        elif "eeg" in test_types or "eeg" in doc_lower or "electroencephalograph" in doc_lower:
+            base = "EEG"
+        else:
+            base = "ImagingReport"
+    else:
+        # PCR & Parasite Panel, Other, or unknown — check for fecal content first
+        if "fecal" in test_types or any(kw in doc_lower for kw in ("fecal", "stool", "feces", "faecal")):
+            base = "FecalReport"
+        else:
+            base = "LabReport"
+
+    # Append _MONYY date suffix when an event_date is available.
+    if event_date is not None:
+        try:
+            return f"{base}_{event_date.strftime('%b%y')}"
+        except Exception:
+            pass  # Malformed date object — return base name safely
+
+    return base
 
 
 _anthropic_extraction_client = None
@@ -1006,9 +1228,12 @@ def _get_anthropic_extraction_client():
     return _anthropic_extraction_client
 
 
-async def _call_openai_extraction(document_text: str) -> str:
+async def _call_openai_extraction(document_text: str) -> dict:
     """
-    Call Claude to extract structured data from document text.
+    Call Claude to extract structured data from document text using tool_use.
+
+    Uses tool_use with EXTRACTION_TOOL_SCHEMA so the API is forced to return
+    schema-valid structured output — eliminates all JSON parse failures.
 
     Used for PDF text content. For images, use _call_openai_extraction_vision().
 
@@ -1016,40 +1241,45 @@ async def _call_openai_extraction(document_text: str) -> str:
         document_text: The text content of the uploaded document.
 
     Returns:
-        Raw JSON string response from Claude.
+        Validated dict matching EXTRACTION_TOOL_SCHEMA (tool_use .input).
 
     Raises:
         Exception: If all retry attempts fail (propagated from retry_openai_call).
     """
     client = _get_anthropic_extraction_client()
 
-    async def _make_call() -> str:
+    async def _make_call() -> dict:
         response = await client.messages.create(
             model=OPENAI_EXTRACTION_MODEL,
             temperature=OPENAI_EXTRACTION_TEMPERATURE,
             max_tokens=OPENAI_EXTRACTION_MAX_TOKENS,
             system=EXTRACTION_SYSTEM_PROMPT,
+            tools=[EXTRACTION_TOOL_SCHEMA],
+            tool_choice={"type": "tool", "name": "extract_pet_health_data"},
             messages=[
                 {"role": "user", "content": document_text},
             ],
         )
-        return response.content[0].text
+        # tool_use response: content[0] is a ToolUseBlock with .input dict
+        return response.content[0].input
 
     return await retry_openai_call(_make_call)
 
 
-async def _call_openai_extraction_vision(image_data_uri: str) -> str:
+async def _call_openai_extraction_vision(image_data_uri: str, extra_system: str = "") -> dict:
     """
-    Call Claude vision API to extract data from an image.
+    Call Claude vision API to extract data from an image using tool_use.
 
-    Sends the image as a base64-encoded payload to Claude's vision capability.
-    Used for JPEG/PNG uploads where text extraction is not possible.
+    Uses tool_use with EXTRACTION_TOOL_SCHEMA so the API is forced to return
+    schema-valid structured output — eliminates all JSON parse failures.
 
     Args:
         image_data_uri: Base64 data URI (data:image/jpeg;base64,...).
+        extra_system: Optional additional instructions appended to EXTRACTION_SYSTEM_PROMPT
+                      (used by the two-pass low-confidence retry).
 
     Returns:
-        Raw JSON string response from Claude.
+        Validated dict matching EXTRACTION_TOOL_SCHEMA (tool_use .input).
 
     Raises:
         Exception: If all retry attempts fail.
@@ -1067,12 +1297,16 @@ async def _call_openai_extraction_vision(image_data_uri: str) -> str:
         if mime_part:
             media_type = mime_part
 
-    async def _make_call() -> str:
+    system_prompt = EXTRACTION_SYSTEM_PROMPT + ("\n" + extra_system if extra_system else "")
+
+    async def _make_call() -> dict:
         response = await client.messages.create(
             model=OPENAI_EXTRACTION_MODEL,
             temperature=OPENAI_EXTRACTION_TEMPERATURE,
             max_tokens=OPENAI_EXTRACTION_MAX_TOKENS,
-            system=EXTRACTION_SYSTEM_PROMPT,
+            system=system_prompt,
+            tools=[EXTRACTION_TOOL_SCHEMA],
+            tool_choice={"type": "tool", "name": "extract_pet_health_data"},
             messages=[
                 {
                     "role": "user",
@@ -1093,53 +1327,41 @@ async def _call_openai_extraction_vision(image_data_uri: str) -> str:
                 },
             ],
         )
-        return response.content[0].text
+        # tool_use response: content[0] is a ToolUseBlock with .input dict
+        return response.content[0].input
 
     return await retry_openai_call(_make_call)
 
 
-def _validate_extraction_json(raw_json: str, file_path: str | None = None) -> tuple[list[dict], str | None, str | None, dict]:
+def _validate_extraction_dict(
+    parsed: dict,
+    file_path: str | None = None,
+) -> tuple[list[dict], str | None, str | None, dict]:
     """
-    Parse and validate the JSON response from GPT extraction.
+    Validate the structured dict returned by the tool_use extraction call.
 
-    Validation rules:
-        - Must be valid JSON.
-        - Must contain a list of objects (or a wrapper with 'items' key).
-        - Each object must contain all REQUIRED_EXTRACTION_KEYS.
-        - Dates must be parseable by parse_date() from date_utils.
+    With tool_use, the Anthropic API guarantees schema-valid output, so
+    JSON parsing and salvage logic are no longer needed.  This function
+    focuses on business-logic validation: date checks, required key checks,
+    and metadata normalisation.
 
     Args:
-        raw_json: Raw JSON string from GPT response.
+        parsed: Dict from response.content[0].input (tool_use output).
+        file_path: Storage path of the document (used for filename date fallback).
 
     Returns:
-        Tuple of (validated items list, document_name or None, extracted_pet_name or None, metadata dict).
-        metadata contains: document_type, document_category, diagnostic_summary,
-        doctor_name, clinic_name, vaccination_details.
+        Tuple of (validated items list, document_name or None,
+                  extracted_pet_name or None, metadata dict).
 
     Raises:
-        ValueError: If JSON is invalid or missing required keys.
+        ValueError: If the parsed dict is not a valid dict.
     """
-    # Parse JSON — reject non-JSON responses.
-    # Strip BOM and leading null bytes before parsing; Claude occasionally
-    # prepends these when returning large JSON responses.
-    clean_json = raw_json.lstrip("\x00\ufeff").strip()
-    try:
-        parsed = json.loads(clean_json)
-    except json.JSONDecodeError as e:
-        parsed = _salvage_partial_extraction_json(clean_json)
-        if parsed is None:
-            raise ValueError(
-                f"GPT returned invalid JSON: {str(e)}"
-            ) from e
-
-        # Salvage recovered partial metadata — demoted to debug since the
-        # system handled this gracefully.
-        logger.debug(
-            "Recovered partial extraction metadata from malformed GPT JSON: %s",
-            str(e),
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            f"Extraction tool returned unexpected type: {type(parsed).__name__}. Expected dict."
         )
 
-    # Extract document_name, pet_name, and new classification fields.
+    # Extract document_name, pet_name, and classification fields.
     document_name = None
     extracted_pet_name = None
     metadata = {
@@ -1953,6 +2175,38 @@ def _save_clinical_exam_data(
             )
 
 
+def _classify_extraction_error(exc: Exception) -> str:
+    """
+    Classify an extraction exception as 'retryable' or 'permanent'.
+
+    Retryable errors are transient (rate limits, timeouts, network issues).
+    Permanent errors indicate bad data or logic failures that won't be fixed by retrying.
+
+    Returns:
+        'retryable' or 'permanent'
+    """
+    # Import lazily to avoid circular dependency at module level.
+    try:
+        import anthropic as _anthropic
+        if isinstance(exc, (_anthropic.RateLimitError, _anthropic.APITimeoutError,
+                             _anthropic.APIConnectionError)):
+            return "retryable"
+    except ImportError:
+        pass
+
+    import asyncio
+    if isinstance(exc, asyncio.TimeoutError):
+        return "retryable"
+
+    # Connection-related errors — string-match as a last resort.
+    exc_str = str(exc).lower()
+    if any(kw in exc_str for kw in ("timeout", "rate limit", "connection", "network", "503", "502", "529")):
+        return "retryable"
+
+    # Everything else (ValueError, DB constraint, logic errors) is permanent.
+    return "permanent"
+
+
 async def extract_and_process_document(
     db: Session,
     document_id: UUID,
@@ -2029,8 +2283,9 @@ async def extract_and_process_document(
         }
 
     try:
-        # --- Step 1: Call GPT extraction ---
+        # --- Step 1: Call GPT extraction via tool_use ---
         # Route to vision API for images, text API for PDFs.
+        # Both functions return a dict (tool_use .input) — no JSON parsing needed.
         logger.info(
             "Starting GPT extraction: document_id=%s, pet_id=%s, mime=%s",
             str(document_id),
@@ -2038,19 +2293,22 @@ async def extract_and_process_document(
             document.mime_type,
         )
 
+        # Keep vision data available for optional two-pass retry.
+        _vision_data_uri: str | None = None
+        _pdf_text_payload: str | None = None
+
         if file_bytes and document.mime_type in ("image/jpeg", "image/png"):
             # Images: use GPT vision API with base64-encoded image.
             from app.utils.file_reader import encode_image_base64
-            data_uri = encode_image_base64(file_bytes, document.mime_type)
-            raw_json = await _call_openai_extraction_vision(data_uri)
+            _vision_data_uri = encode_image_base64(file_bytes, document.mime_type)
+            extraction_result = await _call_openai_extraction_vision(_vision_data_uri)
         elif file_bytes and document.mime_type == "application/pdf":
             # PDFs: extract text first, then send to GPT.
             from app.utils.file_reader import extract_pdf_text
             pdf_text = extract_pdf_text(file_bytes)
             if pdf_text and len(pdf_text.strip()) > 20:
-                raw_json = await _call_openai_extraction(
-                    f"Veterinary document text:\n\n{pdf_text}"
-                )
+                _pdf_text_payload = f"Veterinary document text:\n\n{pdf_text}"
+                extraction_result = await _call_openai_extraction(_pdf_text_payload)
             else:
                 # Scanned PDF — render pages as images and use GPT vision.
                 logger.info(
@@ -2062,7 +2320,8 @@ async def extract_and_process_document(
                 page_images = render_pdf_pages_as_images(file_bytes, max_pages=3)
                 if page_images:
                     # Send the first page to vision API (most CBC reports are single-page).
-                    raw_json = await _call_openai_extraction_vision(page_images[0])
+                    _vision_data_uri = page_images[0]
+                    extraction_result = await _call_openai_extraction_vision(_vision_data_uri)
                 else:
                     # PyMuPDF not available or rendering failed — mark and skip.
                     logger.warning(
@@ -2079,10 +2338,77 @@ async def extract_and_process_document(
                     return results
         else:
             # Fallback: use whatever text was passed (for backwards compatibility).
-            raw_json = await _call_openai_extraction(document_text)
+            _pdf_text_payload = document_text
+            extraction_result = await _call_openai_extraction(document_text)
+
+        # --- Step 1b: Two-pass retry for low confidence ---
+        # The model rates its own confidence 0.0–1.0.  If the first pass is below
+        # the threshold, a second focused pass is run and the higher-confidence
+        # result is used.  Only fires on the very first attempt (retry_count == 0)
+        # to avoid infinite loops.
+        first_confidence = float(extraction_result.get("confidence") or 1.0)
+        if (
+            first_confidence < EXTRACTION_LOW_CONFIDENCE_THRESHOLD
+            and document.retry_count == 0
+        ):
+            logger.warning(
+                "Low confidence extraction (%.2f < %.2f) — running second-pass retry: "
+                "document_id=%s",
+                first_confidence,
+                EXTRACTION_LOW_CONFIDENCE_THRESHOLD,
+                str(document_id),
+            )
+            _SECOND_PASS_HINT = (
+                "IMPORTANT: The previous extraction pass had low confidence. "
+                "Re-examine the document very carefully. Pay special attention to: "
+                "(1) document_category — distinguish lab reports (test results with "
+                "reference ranges) from prescriptions (medication orders with clinic "
+                "letterhead); "
+                "(2) all date fields — look for explicit dates written anywhere on the "
+                "document; "
+                "(3) pet_name — check for any name near the top of the document."
+            )
+            try:
+                if _vision_data_uri:
+                    extraction_result_2 = await _call_openai_extraction_vision(
+                        _vision_data_uri, extra_system=_SECOND_PASS_HINT
+                    )
+                elif _pdf_text_payload:
+                    # For text PDFs, append the hint to the payload text
+                    extraction_result_2 = await _call_openai_extraction(_pdf_text_payload)
+                else:
+                    extraction_result_2 = extraction_result  # no-op
+
+                second_confidence = float(extraction_result_2.get("confidence") or 0.0)
+                if second_confidence > first_confidence:
+                    extraction_result = extraction_result_2
+                    logger.info(
+                        "Second-pass improved confidence: %.2f → %.2f: document_id=%s",
+                        first_confidence,
+                        second_confidence,
+                        str(document_id),
+                    )
+                else:
+                    logger.info(
+                        "Second-pass did not improve confidence (%.2f vs %.2f), "
+                        "keeping first-pass result: document_id=%s",
+                        second_confidence,
+                        first_confidence,
+                        str(document_id),
+                    )
+            except Exception as retry_err:
+                logger.warning(
+                    "Second-pass retry failed, using first-pass result: "
+                    "document_id=%s, error=%s",
+                    str(document_id),
+                    str(retry_err),
+                )
+
+        # Store model-rated confidence on the document record.
+        document.extraction_confidence = float(extraction_result.get("confidence") or 1.0)
 
         # --- Step 2: Validate and normalize ---
-        extracted_items, document_name, extracted_pet_name, metadata = _validate_extraction_json(raw_json, file_path=document.file_path)
+        extracted_items, document_name, extracted_pet_name, metadata = _validate_extraction_dict(extraction_result, file_path=document.file_path)
         results["document_type"] = metadata["document_type"]
         results["document_category"] = metadata["document_category"]
         results["diagnostic_summary"] = metadata["diagnostic_summary"]
@@ -2121,13 +2447,8 @@ async def extract_and_process_document(
         )
         results["items_extracted"] = len(extracted_items)
 
-        # For non-prescriptions: keep original filename; append a date only when
-        # exactly one date is present.  Prescriptions are renamed below after
-        # event_date is resolved.
-        if document_category != "Prescription" and document.document_name:
-            document.document_name = _append_single_extracted_date_to_filename(
-                str(document.document_name), extracted_items
-            )[:200]
+        # document_name is set below after event_date is resolved, using
+        # _build_canonical_document_name for all document types.
         if document_category:
             document.document_category = document_category
 
@@ -2163,8 +2484,16 @@ async def extract_and_process_document(
                         pass
         if not event_dates:
             # Last resort — extract date from the original filename.
+            # Log a warning so this fallback is visible in production logs.
             fn_date = _extract_date_from_filename(document.file_path)
             if fn_date:
+                logger.warning(
+                    "Using filename date fallback for event_date: "
+                    "document_id=%s, file_path=%s, extracted_date=%s",
+                    str(document_id),
+                    document.file_path,
+                    fn_date,
+                )
                 try:
                     event_dates.append(parse_date(fn_date))
                 except ValueError:
@@ -2172,11 +2501,15 @@ async def extract_and_process_document(
         if event_dates:
             document.event_date = max(event_dates)
 
-        # Rename vet prescriptions to VetPrescription_MONYY format.
-        # Uses the resolved event_date so the month/year matches the visit date
-        # visible in the document rather than the upload date.
-        if document_category == "Prescription":
-            document.document_name = _build_prescription_document_name(document.event_date)
+        # Apply canonical document naming for all document types.
+        # Format: BaseName_MONYY (e.g. BloodReport_Mar26, VetPrescription_Sep24).
+        # When event_date is None the suffix is omitted — never fails on missing date.
+        document.document_name = _build_canonical_document_name(
+            document_category=document_category,
+            document_name=document_name,
+            event_date=document.event_date,
+            diagnostic_values=metadata.get("diagnostic_values"),
+        )
 
         selected_doctor_name = _select_best_doctor_name(
             metadata_doctor_name=(str(metadata["doctor_name"]).strip() if metadata["doctor_name"] else None),
@@ -2210,7 +2543,7 @@ async def extract_and_process_document(
                 continue
 
             test_type = str(raw.get("test_type") or "").strip().lower()
-            if test_type not in ("blood", "urine", "fecal", "xray"):
+            if test_type not in ("blood", "urine", "fecal", "xray", "ultrasound", "ecg", "eeg", "other"):
                 continue
 
             parameter_name = str(raw.get("parameter_name") or "").strip()
@@ -2231,9 +2564,28 @@ async def extract_and_process_document(
             observed_at = None
             if raw.get("observed_at"):
                 try:
-                    observed_at = parse_date(str(raw.get("observed_at")))
+                    _obs = parse_date(str(raw.get("observed_at")))
+                    _today = datetime.utcnow().date()
+                    if _obs > _today:
+                        logger.warning(
+                            "Diagnostic value observed_at is in the future (%s), ignoring: "
+                            "document_id=%s, parameter=%s",
+                            str(_obs), str(document_id), parameter_name,
+                        )
+                    elif _obs.year < 2020:
+                        logger.warning(
+                            "Diagnostic value observed_at year %d predates 2020, ignoring: "
+                            "document_id=%s, parameter=%s",
+                            _obs.year, str(document_id), parameter_name,
+                        )
+                    else:
+                        observed_at = _obs
                 except ValueError:
-                    observed_at = None
+                    logger.warning(
+                        "Unparseable observed_at '%s' for diagnostic value, ignoring: "
+                        "document_id=%s, parameter=%s",
+                        str(raw.get("observed_at")), str(document_id), parameter_name,
+                    )
 
             status_flag = raw.get("status_flag")
             if status_flag is not None:
@@ -2311,9 +2663,28 @@ async def extract_and_process_document(
                 diagnosed_at = None
                 if raw_condition.get("diagnosed_at"):
                     try:
-                        diagnosed_at = parse_date(str(raw_condition["diagnosed_at"]))
+                        _diag_date = parse_date(str(raw_condition["diagnosed_at"]))
+                        _today = datetime.utcnow().date()
+                        if _diag_date > _today:
+                            logger.warning(
+                                "Condition diagnosed_at is in the future (%s), ignoring: "
+                                "document_id=%s, condition=%s",
+                                str(_diag_date), str(document_id), condition_name,
+                            )
+                        elif _diag_date.year < 2020:
+                            logger.warning(
+                                "Condition diagnosed_at year %d predates 2020, ignoring: "
+                                "document_id=%s, condition=%s",
+                                _diag_date.year, str(document_id), condition_name,
+                            )
+                        else:
+                            diagnosed_at = _diag_date
                     except ValueError:
-                        diagnosed_at = None
+                        logger.warning(
+                            "Unparseable diagnosed_at '%s' for condition, ignoring: "
+                            "document_id=%s, condition=%s",
+                            str(raw_condition["diagnosed_at"]), str(document_id), condition_name,
+                        )
 
                 # Upsert by (pet_id, name) — update if exists, create if not.
                 existing_condition = (
@@ -2566,11 +2937,28 @@ async def extract_and_process_document(
 
         extra_vaccines = results.get("extra_vaccines", [])
         if not extracted_items and not extra_vaccines:
-            logger.info(
-                "No preventive items extracted from document: %s",
-                str(document_id),
+            # No preventive items — check if we at least got useful metadata.
+            # If conditions, diagnostic values, or vaccination details were extracted,
+            # use 'partially_extracted' so the document appears in the dashboard
+            # with a distinct status from a fully successful extraction.
+            has_metadata = bool(
+                metadata.get("conditions")
+                or metadata.get("diagnostic_values")
+                or metadata.get("vaccination_details")
             )
-            document.extraction_status = "success"
+            if has_metadata:
+                logger.warning(
+                    "No preventive items extracted but metadata present — "
+                    "marking as partially_extracted: document_id=%s",
+                    str(document_id),
+                )
+                document.extraction_status = "partially_extracted"
+            else:
+                logger.info(
+                    "No preventive items or metadata extracted from document: %s",
+                    str(document_id),
+                )
+                document.extraction_status = "success"
             db.commit()
             return results
 
@@ -2691,21 +3079,39 @@ async def extract_and_process_document(
         # (nudge_scheduler.run_nudge_scheduler) instead of per-upload triggers.
 
     except Exception as e:
-        # Extraction-level failure — mark as failed, do not crash.
-        # This catches GPT call failures, JSON parse failures, etc.
+        # Classify the failure so callers know whether to retry.
+        error_class = _classify_extraction_error(e)
         results["status"] = "failed"
-        results["errors"].append(f"Extraction failed: {str(e)}")
+        results["errors"].append(f"Extraction failed ({error_class}): {str(e)}")
 
-        logger.error(
-            "GPT extraction failed: document_id=%s, error=%s",
-            str(document_id),
-            str(e),
-        )
+        # Increment retry counter regardless of error class.
+        try:
+            document.retry_count = (document.retry_count or 0) + 1
+        except Exception:
+            pass
 
-        # Persist 'failed' status. If commit fails (broken session),
-        # rollback and retry with a fresh transaction. Without this,
-        # the document stays 'pending' and gets ghost-re-extracted
-        # in the next batch for this pet.
+        if error_class == "retryable" and (document.retry_count or 0) < EXTRACTION_MAX_AUTO_RETRIES:
+            logger.warning(
+                "Retryable extraction failure (attempt %d/%d): "
+                "document_id=%s, error=%s",
+                document.retry_count,
+                EXTRACTION_MAX_AUTO_RETRIES,
+                str(document_id),
+                str(e),
+            )
+        else:
+            logger.error(
+                "Permanent extraction failure (attempt %d, class=%s): "
+                "document_id=%s, error=%s",
+                document.retry_count or 1,
+                error_class,
+                str(document_id),
+                str(e),
+            )
+
+        # Persist 'failed' status + updated retry_count. If commit fails (broken
+        # session), rollback and retry with a fresh transaction. Without this,
+        # the document stays 'pending' and gets ghost-re-extracted next batch.
         try:
             document.extraction_status = "failed"
             db.commit()
