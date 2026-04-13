@@ -7,8 +7,9 @@ pet profile creation. State is tracked via user.onboarding_state.
 Conversation flow:
     1. New number → Create user (welcome) → ask pet name
     2. Pet name → state=awaiting_breed_age → ask breed + age (combined)
-    3. Breed+age → state=awaiting_gender_weight → ask gender + weight + neutered (combined)
-    4. Gender/weight/neutered → auto-send life stage note → state=awaiting_food_type
+    3. Breed+age → state=awaiting_gender_weight → ask gender + weight only
+    4. Gender/weight → AI decides neuter question → state=awaiting_neuter_spay
+    4b. Neuter/spay → state=awaiting_food_type
     5. Food type → state=awaiting_meal_details → ask meal details (contextual)
     6. Meal details → state=awaiting_supplements → ask supplements
     7. Supplements → auto-send progress note → state=awaiting_preventive
@@ -490,6 +491,9 @@ async def handle_onboarding_step(
     elif state == "awaiting_gender_weight":
         await _step_gender_weight(db, user, text, send_fn)
 
+    elif state == "awaiting_neuter_spay":
+        await _step_neuter_spay(db, user, text, send_fn)
+
     elif state == "awaiting_food_type":
         await _step_food_type(db, user, text, send_fn)
 
@@ -644,6 +648,12 @@ def _is_irrelevant_noise_for_state(
         return False
 
     normalized = re.sub(r"[.!?,]+$", "", text_lower.strip().lower())
+
+    # In neuter/spay step, yes/no are the expected answers.
+    if state == "awaiting_neuter_spay" and (
+        normalized in _YES_INPUTS or normalized in _NO_INPUTS
+    ):
+        return False
 
     # In supplements step, explicit negative replies are legitimate answers
     # to "Is <pet> on any supplements right now?" and must be processed.
@@ -917,7 +927,10 @@ def _get_question_for_state(state: str, pet=None, onboarding_data: dict | None =
         ),
         "awaiting_gender_weight": (
             f"What's {pet_name}'s gender and approximate weight? "
-            f"Are they neutered or spayed? (e.g., male, 22, neutered)"
+            f"(e.g., male, 22 kg)"
+        ),
+        "awaiting_neuter_spay": (
+            f"Is {pet_name} neutered or spayed?"
         ),
         "awaiting_food_type": (
             f"What does {pet_name} usually eat — home food, packaged, or a mix?"
@@ -1031,7 +1044,7 @@ async def _step_breed_age(db, user, text, send_fn):
             await send_fn(
                 db, mobile,
                 f"Got it. What's {pet.name}'s gender and approximate weight? "
-                f"Are they neutered or spayed? (e.g., male, 22, neutered)",
+                f"(e.g., male, 22 kg)",
             )
             return
         if detected_species and detected_species != "dog":
@@ -1054,7 +1067,7 @@ async def _step_breed_age(db, user, text, send_fn):
         await send_fn(
             db, mobile,
             f"No worries! What's {pet.name}'s gender and approximate weight? "
-            f"Are they neutered or spayed? (e.g., male, 22, neutered)",
+            f"(e.g., male, 22 kg)",
         )
         return
 
@@ -1182,15 +1195,17 @@ async def _step_breed_age(db, user, text, send_fn):
     await send_fn(
         db, mobile,
         f"Got it. What's {pet.name}'s gender and approximate weight? "
-        f"Are they neutered or spayed? (e.g., male, 22, neutered)",
+        f"(e.g., male, 22 kg)",
     )
 
 
 async def _step_gender_weight(db, user, text, send_fn):
     """
-    Step 3: Collect gender + weight + neutered (combined input, GPT-parsed).
-    Clarifies once via AI if nothing can be parsed, then accepts whatever is provided.
-    Auto-sends life stage note + food question.
+    Step 3: Collect gender + weight only (GPT-parsed).
+    Clarifies once via AI if nothing can be parsed.
+    After collecting, an AI agent decides whether/how to ask about
+    neutering or spaying based on gender, age, and breed, then transitions
+    to awaiting_neuter_spay.
     """
     mobile = user._plaintext_mobile
     pet = _get_pending_pet(db, user.id)
@@ -1201,129 +1216,22 @@ async def _step_gender_weight(db, user, text, send_fn):
         return
 
     text_lower = text.strip().lower()
-
     od = _get_onboarding_data(user)
     gw_attempts = od.get("gender_weight_attempts", 0)
-    skip_current_parse = False
 
-
-    if od.get("gender_neuter_confirm_pending"):
-        confirm_reply = _resolve_binary_confirmation_reply(text_lower)
-        confirm_mode = od.get("gender_neuter_confirm_mode") or "binary"
-        payload = od.get("gender_neuter_confirm_payload")
-
-        if confirm_mode == "gender_choice":
-            normalized = re.sub(r"[.!?,]+$", "", text_lower).strip().lower()
-            if normalized in {"male", "boy", "he", "him", "his"}:
-                pet.gender = "male"
-            elif normalized in {"female", "girl", "she", "her", "hers"}:
-                pet.gender = "female"
-            else:
-                db.commit()
-                await send_fn(
-                    db,
-                    mobile,
-                    f"Please reply with just *male* or *female* for {pet.name}.",
-                )
-                return
-
-            if isinstance(payload, dict):
-                try:
-                    if payload.get("weight_kg") is not None:
-                        weight_value = float(payload.get("weight_kg"))
-                        if 0 < weight_value <= MAX_PET_WEIGHT_KG:
-                            pet.weight = weight_value
-                except (TypeError, ValueError):
-                    pass
-                if payload.get("neutered") is not None:
-                    pet.neutered = bool(payload.get("neutered"))
-
-            _set_onboarding_data(user, "gender_neuter_confirm_pending", False)
-            _set_onboarding_data(user, "gender_neuter_confirm_mode", None)
-            _set_onboarding_data(user, "gender_neuter_confirm_payload", None)
-            skip_current_parse = True
-        elif confirm_reply == "yes":
-            _set_onboarding_data(user, "gender_neuter_confirm_pending", False)
-            _set_onboarding_data(user, "gender_neuter_confirm_mode", None)
-            _set_onboarding_data(user, "gender_neuter_confirm_payload", None)
-            if isinstance(payload, dict):
-                if payload.get("gender") in {"male", "female"}:
-                    pet.gender = payload["gender"]
-                if payload.get("neutered") is not None:
-                    pet.neutered = bool(payload.get("neutered"))
-                try:
-                    if payload.get("weight_kg") is not None:
-                        weight_value = float(payload.get("weight_kg"))
-                        if 0 < weight_value <= MAX_PET_WEIGHT_KG:
-                            pet.weight = weight_value
-                except (TypeError, ValueError):
-                    pass
-            skip_current_parse = True
-        elif confirm_reply == "no":
-            _set_onboarding_data(user, "gender_neuter_confirm_pending", False)
-            _set_onboarding_data(user, "gender_neuter_confirm_mode", None)
-            _set_onboarding_data(user, "gender_neuter_confirm_payload", None)
-            db.commit()
-            await send_fn(
-                db,
-                mobile,
-                f"Thanks for clarifying. Could you share {pet.name}'s gender, "
-                f"approximate weight, and neutered/spayed status again? "
-                f"(e.g., male, 22 kg, neutered)",
-            )
-            return
-        else:
-            db.commit()
-            await send_fn(
-                db,
-                mobile,
-                f"Just reply *yes* or *no* so I can confirm {pet.name}'s details.",
-            )
-            return
-
-    if text_lower not in _SKIP_INPUTS and not skip_current_parse:
-        parsed = await _parse_gender_weight_neutered(text)
+    if text_lower not in _SKIP_INPUTS:
+        parsed = await _parse_gender_weight(text)
         gender = parsed.get("gender")
         weight_kg = parsed.get("weight_kg")
-        neutered = parsed.get("neutered")
 
-        consistency_prompt = _build_gender_neuter_confirmation(
-            text=text,
-            parsed_gender=gender,
-            parsed_neutered=neutered,
-            pet_name=pet.name,
-        )
-        if consistency_prompt is not None:
-            confirm_payload = consistency_prompt.get("confirm_payload")
-            if isinstance(confirm_payload, dict):
-                confirm_payload = dict(confirm_payload)
-                if weight_kg is not None:
-                    confirm_payload["weight_kg"] = weight_kg
-            elif weight_kg is not None:
-                confirm_payload = {"weight_kg": weight_kg}
-            _set_onboarding_data(user, "gender_neuter_confirm_pending", True)
-            _set_onboarding_data(
-                user,
-                "gender_neuter_confirm_mode",
-                consistency_prompt.get("confirm_mode") or "binary",
-            )
-            _set_onboarding_data(
-                user,
-                "gender_neuter_confirm_payload",
-                confirm_payload,
-            )
-            db.commit()
-            await send_fn(db, mobile, consistency_prompt["prompt"])
-            return
-
-        # If nothing at all was parsed and this is the first attempt, clarify.
-        if gender is None and weight_kg is None and neutered is None and gw_attempts < 1:
+        # If nothing parsed on the first attempt, ask AI to clarify once.
+        if gender is None and weight_kg is None and gw_attempts < 1:
             _set_onboarding_data(user, "gender_weight_attempts", 1)
             db.commit()
             clarification = await _ai_clarify_input(
                 user_message=text,
-                step_context="the pet's gender, approximate weight, and neutered/spayed status",
-                expected_format="e.g., male, 22 kg, neutered",
+                step_context="the pet's gender and approximate weight",
+                expected_format="e.g., male, 22 kg",
                 pet_name=pet.name,
             )
             await send_fn(db, mobile, clarification)
@@ -1340,7 +1248,7 @@ async def _step_gender_weight(db, user, text, send_fn):
                 if 0 < w <= MAX_PET_WEIGHT_KG:
                     pet.weight = w
                     pet.weight_flagged = False
-                    # AI weight check — non-blocking, just flag if unusual.
+                    # AI weight check — non-blocking, flag if unusual.
                     ai_result = await _ai_check_weight(
                         species=pet.species, breed=pet.breed,
                         dob=pet.dob, weight_kg=w,
@@ -1350,14 +1258,73 @@ async def _step_gender_weight(db, user, text, send_fn):
             except (ValueError, TypeError):
                 pass
 
-        # Store neutered.
-        if neutered is not None:
-            pet.neutered = bool(neutered)
+    # AI agent decides whether to ask about neutering/spaying and crafts the
+    # gender-appropriate question (neutered for males, spayed for females).
+    _set_onboarding_data(user, "gender_weight_attempts", 0)
+    neuter_decision = await _ai_decide_neuter_question(
+        pet_name=pet.name,
+        gender=pet.gender,
+        species=pet.species,
+        breed=pet.breed,
+        age_text=pet.age_text,
+    )
+
+    if neuter_decision.get("should_ask", True):
+        _set_onboarding_data(user, "neuter_spay_attempts", 0)
+        user.onboarding_state = "awaiting_neuter_spay"
+        db.commit()
+        await send_fn(db, mobile, neuter_decision["question"])
+    else:
+        # Pet is too young or neuter status is not relevant — skip to food.
+        user.onboarding_state = "awaiting_food_type"
+        _set_onboarding_data(user, "food_type_attempts", 0)
+        db.commit()
+        await send_fn(
+            db, mobile,
+            f"What does {pet.name} usually eat — home food, packaged, or a mix?",
+        )
+
+
+async def _step_neuter_spay(db, user, text, send_fn):
+    """
+    Step 3b: Collect neutered/spayed status via a binary yes/no reply.
+    The question was already phrased correctly for the pet's gender
+    (neutered for males, spayed for females) by _ai_decide_neuter_question.
+    """
+    mobile = user._plaintext_mobile
+    pet = _get_pending_pet(db, user.id)
+    if not pet:
+        user.onboarding_state = "welcome"
+        db.commit()
+        await send_fn(db, mobile, "Something went wrong. Let's start — what's your pet's name?")
+        return
+
+    text_lower = text.strip().lower()
+    od = _get_onboarding_data(user)
+    attempts = od.get("neuter_spay_attempts", 0)
+
+    if text_lower not in _SKIP_INPUTS:
+        reply = _resolve_binary_confirmation_reply(text_lower)
+
+        if reply == "yes":
+            pet.neutered = True
+        elif reply == "no":
+            pet.neutered = False
+        else:
+            # Unclear answer — clarify once, then default to None on second miss.
+            if attempts < 1:
+                _set_onboarding_data(user, "neuter_spay_attempts", 1)
+                db.commit()
+                # Re-ask with the gender-appropriate term.
+                term = "neutered" if pet.gender == "male" else "spayed"
+                await send_fn(
+                    db, mobile,
+                    f"Just reply *yes* or *no* — is {pet.name} {term}?",
+                )
+                return
+            # Second miss — leave neutered as None and continue.
 
     # Advance to food type question.
-    # Start at -1 so a queued message that arrives before the user sees the
-    # question gets one free pass (increments to 0) instead of triggering
-    # an immediate clarification.
     user.onboarding_state = "awaiting_food_type"
     _set_onboarding_data(user, "food_type_attempts", 0)
     db.commit()
@@ -3470,6 +3437,111 @@ async def _parse_breed_age(text: str) -> dict:
     except Exception as e:
         logger.warning("Breed/age GPT parse failed: %s", str(e))
         return {"breed": None, "species": None, "age_years": None, "age_text": None, "dob": None, "confident": False}
+
+
+async def _parse_gender_weight(text: str) -> dict:
+    """
+    Use GPT to extract gender and weight (kg) from user input.
+
+    Returns dict with keys:
+        gender ("male"|"female"|None), weight_kg (float|None)
+    """
+    client = _get_openai_onboarding_client()
+    prompt = (
+        "Extract the pet's gender and weight in kg from this message. "
+        'Return ONLY valid JSON, no markdown: '
+        '{"gender": "male"|"female"|null, "weight_kg": number|null}. '
+        "Accept colloquial inputs: 'boy'/'he'/'him'='male', 'girl'/'she'/'her'='female'. "
+        "If weight is given without units, assume kg.\n\n"
+        f"User message: {text}"
+    )
+    try:
+        response = await retry_openai_call(
+            client.messages.create,
+            model=OPENAI_QUERY_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=80,
+        )
+        raw = _strip_json_fences(response.content[0].text.strip())
+        data = json.loads(raw)
+        return {
+            "gender": data.get("gender"),
+            "weight_kg": data.get("weight_kg"),
+        }
+    except Exception as e:
+        logger.warning("Gender/weight GPT parse failed: %s", str(e))
+        return {"gender": None, "weight_kg": None}
+
+
+async def _ai_decide_neuter_question(
+    pet_name: str,
+    gender: str | None,
+    species: str | None,
+    breed: str | None,
+    age_text: str | None,
+) -> dict:
+    """
+    AI agent that decides whether to ask about neutering/spaying and crafts the
+    gender-appropriate question.
+
+    Uses the pet's gender, species, breed, and age to:
+    - Ask "Is <name> neutered?" for males.
+    - Ask "Is <name> spayed?" for females.
+    - Ask "Is <name> neutered or spayed?" when gender is unknown.
+    - Set should_ask=False only if the pet is clearly under ~3 months old
+      (too young for the procedure to be relevant yet).
+
+    Returns dict: {"should_ask": bool, "question": str}
+    """
+    client = _get_openai_onboarding_client()
+    prompt = (
+        "You are helping onboard a pet on a health tracking app. "
+        "Decide whether to ask the owner about their pet's neutering or spaying status.\n\n"
+        f"Pet name: {pet_name}\n"
+        f"Gender: {gender or 'unknown'}\n"
+        f"Species: {species or 'unknown'}\n"
+        f"Breed: {breed or 'unknown'}\n"
+        f"Age/DOB: {age_text or 'unknown'}\n\n"
+        "Rules:\n"
+        "- Use the word 'neutered' for males and 'spayed' for females.\n"
+        "- If gender is unknown, use 'neutered or spayed'.\n"
+        "- Set should_ask to false ONLY if the pet is clearly under 3 months old "
+        "(too young for the procedure to be relevant). Otherwise always true.\n"
+        "- Keep the question short and conversational.\n\n"
+        'Return ONLY valid JSON, no markdown: {"should_ask": true|false, "question": "..."}'
+    )
+    try:
+        response = await retry_openai_call(
+            client.messages.create,
+            model=OPENAI_QUERY_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=120,
+        )
+        raw = _strip_json_fences(response.content[0].text.strip())
+        data = json.loads(raw)
+        should_ask = bool(data.get("should_ask", True))
+        question = data.get("question") or ""
+        # Fallback question if AI returned empty.
+        if should_ask and not question:
+            if gender == "male":
+                question = f"Is {pet_name} neutered?"
+            elif gender == "female":
+                question = f"Is {pet_name} spayed?"
+            else:
+                question = f"Is {pet_name} neutered or spayed?"
+        return {"should_ask": should_ask, "question": question}
+    except Exception as e:
+        logger.warning("Neuter question AI decision failed: %s", str(e))
+        # Safe fallback — always ask with a generic question.
+        if gender == "male":
+            question = f"Is {pet_name} neutered?"
+        elif gender == "female":
+            question = f"Is {pet_name} spayed?"
+        else:
+            question = f"Is {pet_name} neutered or spayed?"
+        return {"should_ask": True, "question": question}
 
 
 async def _parse_gender_weight_neutered(text: str) -> dict:

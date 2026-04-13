@@ -555,6 +555,7 @@ async def estimate_food_nutrition(
     gender: str | None = None,
     conditions: list[str] | None = None,
     daily_portion_g: int | None = None,
+    detail: str | None = None,
 ) -> dict | None:
     """
     Estimate nutrition for foods not matched in product_catalog.
@@ -574,10 +575,12 @@ async def estimate_food_nutrition(
         if conditions_sorted else "none"
     )
     # Encode pet context into the cache key (avoids a schema migration).
-    # v2 prefix invalidates old cache entries from the previous prompt version.
+    # v3 prefix invalidates v2 entries which lacked pet context in the user prompt.
     portion_key = str(daily_portion_g) if daily_portion_g and daily_portion_g > 0 else "unset"
+    # Include detail in cache key so different quantities for the same food are cached separately.
+    detail_key = hashlib.sha1((detail or "").lower().strip().encode()).hexdigest()[:8]
     label_normalized = (
-        f"v2|{species_norm}|{bucket}|{cond_hash}|{portion_key}|{food_label.lower().strip()}"
+        f"v3|{species_norm}|{bucket}|{cond_hash}|{portion_key}|{detail_key}|{food_label.lower().strip()}"
     )
 
     # 1. Check DB cache
@@ -607,7 +610,7 @@ async def estimate_food_nutrition(
             _call_openai_food_estimation,
             food_label, food_type,
             species, breed, weight_kg, age_description, gender, conditions_sorted,
-            daily_portion_g,
+            daily_portion_g, detail,
         )
     except Exception as e:
         logger.error("OpenAI food estimation failed: %s", e)
@@ -643,6 +646,7 @@ async def _call_openai_food_estimation(
     gender: str | None = None,
     conditions: list[str] | None = None,
     daily_portion_g: int | None = None,
+    detail: str | None = None,
 ) -> dict | None:
     """Call OpenAI to estimate nutritional content of a food item."""
     client = _get_openai_client()
@@ -654,9 +658,29 @@ async def _call_openai_food_estimation(
         gender=gender,
         conditions=conditions,
     )
-    user_prompt = f"Food name: {food_label}\nType: {food_type}"
+    # Build user prompt with full pet context so CASE B (brand feeding guidelines)
+    # can correctly select the right feeding range using pet weight and age.
+    prompt_parts = []
+    if species:
+        prompt_parts.append(f"Species: {species}")
+    if breed:
+        prompt_parts.append(f"Breed: {breed}")
+    if age_description:
+        prompt_parts.append(f"Age: {age_description}")
+    if isinstance(weight_kg, (int, float)) and weight_kg > 0:
+        prompt_parts.append(f"Weight: {float(weight_kg):g} kg")
+    if gender:
+        prompt_parts.append(f"Gender: {gender}")
+    if conditions:
+        prompt_parts.append(f"Conditions: {', '.join(conditions)}")
+    prompt_parts.append(f"Food name: {food_label}")
+    prompt_parts.append(f"Type: {food_type}")
     if daily_portion_g and daily_portion_g > 0:
-        user_prompt += f"\nUser-provided daily portion: {daily_portion_g}g"
+        prompt_parts.append(f"User-provided daily portion: {daily_portion_g}g")
+    elif detail and detail.strip():
+        # detail stores the user-provided quantity text (e.g. "2 cups . kibble /day", "1 cup")
+        prompt_parts.append(f"User-provided quantity: {detail.strip()}")
+    user_prompt = "\n".join(prompt_parts)
 
     response = await client.messages.create(
         model=OPENAI_QUERY_MODEL,
@@ -852,6 +876,7 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
                 gender=pet_gender,
                 conditions=condition_full_names,
                 daily_portion_g=getattr(item, "daily_portion_g", None),
+                detail=getattr(item, "detail", None),
             )
         except Exception as e:
             logger.error("Food estimation failed for %s: %s", item.label, e)
