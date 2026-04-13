@@ -13,6 +13,7 @@ Pipeline:
     4. Aggregate, compare against targets, generate recommendations
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -820,25 +821,27 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
     pet_gender = getattr(pet, "gender", None)
     condition_full_names = [c.name for c in conditions] if conditions else []
 
-    # Resolve target and item estimations in a serialized manner to avoid
-    # concurrent use of the same SQLAlchemy session across awaited tasks.
-    try:
-        targets = await get_nutrition_targets(
-            db,
-            pet.species,
-            pet.breed,
-            pet.dob,
-            pet_weight_kg,
-            pet_gender,
-        )
-    except Exception as e:
-        logger.error("Nutrition target lookup failed in analysis: %s", e)
-        targets = dict(DEFAULT_TARGETS)
-
-    estimations: list[dict | None] = []
-    for item in unmatched_items:
+    # Run targets lookup and all food estimations in parallel.
+    # All DB operations inside these coroutines are synchronous (SQLAlchemy sync
+    # session), so they only yield control during Claude API calls — no concurrent
+    # session mutations occur.
+    async def _safe_targets() -> dict:
         try:
-            estimated = await estimate_food_nutrition(
+            return await get_nutrition_targets(
+                db,
+                pet.species,
+                pet.breed,
+                pet.dob,
+                pet_weight_kg,
+                pet_gender,
+            )
+        except Exception as e:
+            logger.error("Nutrition target lookup failed in analysis: %s", e)
+            return dict(DEFAULT_TARGETS)
+
+    async def _safe_estimate(item: DietItem) -> dict | None:
+        try:
+            return await estimate_food_nutrition(
                 db,
                 item.label,
                 item.type,
@@ -852,8 +855,14 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
             )
         except Exception as e:
             logger.error("Food estimation failed for %s: %s", item.label, e)
-            estimated = None
-        estimations.append(estimated)
+            return None
+
+    parallel_results = await asyncio.gather(
+        _safe_targets(),
+        *(_safe_estimate(item) for item in unmatched_items),
+    )
+    targets: dict = parallel_results[0]
+    estimations: list[dict | None] = list(parallel_results[1:])
 
     # Aggregate nutritional values
     actual = {

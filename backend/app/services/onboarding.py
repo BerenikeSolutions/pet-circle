@@ -913,7 +913,7 @@ def _get_question_for_state(state: str, pet=None, onboarding_data: dict | None =
         "welcome": "What's your pet's name?",
         "awaiting_breed_age": (
             f"What breed is {pet_name} and how old are they? "
-            f"You can share their date of birth (e.g., 15/04/2020) or just their age (e.g., golden retriever, 4)"
+            f"DOB or approximate age is fine (e.g., golden retriever, Nov 2024 or 2 years)"
         ),
         "awaiting_gender_weight": (
             f"What's {pet_name}'s gender and approximate weight? "

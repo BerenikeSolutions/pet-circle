@@ -40,11 +40,11 @@ export default function DietAnalysisCard({ data, compact = false }: DietAnalysis
             >
               <Donut pct={macro.pct_of_need} status={status} size={64} />
               <div style={{ fontSize: 10, fontWeight: 700, color: "var(--t1)", textAlign: "center" }}>{macro.name}</div>
-              {hasValue && (
+              {hasValue && status !== "none" && (
                 <div
                   style={{
                     fontSize: 9,
-                    color: NOTE_COLOR[status as "green" | "amber" | "red"],
+                    color: NOTE_COLOR[status],
                     fontWeight: 600,
                     textAlign: "center",
                   }}
