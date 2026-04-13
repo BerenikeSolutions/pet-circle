@@ -51,8 +51,8 @@ _DEDUP_TTL_SECONDS = 3600  # 1 hour — Meta may retry webhooks for hours after 
 #
 # Only text messages are buffered. Buttons and media bypass the buffer and
 # process immediately — they represent discrete, deliberate actions.
-_DEBOUNCE_SECONDS = 2.5
-_DEBOUNCE_SECONDS_LONG = 5.0  # For multi-message steps: preventive history, meal details
+_DEBOUNCE_SECONDS = 1.5
+_DEBOUNCE_SECONDS_LONG = 3.0  # For multi-message steps: preventive history, meal details
 _USER_MSG_BUFFERS: dict[str, list[dict]] = {}   # mobile → ordered list of message_data
 _USER_DEBOUNCE_TASKS: dict[str, "asyncio.Task"] = {}  # mobile → pending flush task
 _USER_DEBOUNCE_DURATIONS: dict[str, float] = {}  # mobile → active debounce duration
