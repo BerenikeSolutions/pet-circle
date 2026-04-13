@@ -904,7 +904,9 @@ async def _call_openai_combined_meal_estimation(
         return None
     confidence = result.get("confidence", 1.0)
     if isinstance(confidence, (int, float)) and confidence < 0.4:
-        logger.warning("Very low confidence (%.2f) for combined meal estimation", confidence)
+        # Confidence below threshold — discard the estimate and fall back.
+        # This is expected for pets with sparse diet data; not an error.
+        logger.debug("Low confidence (%.2f) for combined meal estimation — skipping", confidence)
         return None
     return result
 

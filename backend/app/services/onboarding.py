@@ -1702,7 +1702,23 @@ async def _step_preventive(db, user, text, send_fn):
                 return
             # Parse the confirmed/modified preventive text.
             parsed = await _parse_preventive_care(final_preventive)
-            await _store_preventive_data(db, pet, parsed)
+            conf_ambiguous = await _store_preventive_data(db, pet, parsed)
+            # If confirmed text still had unparseable dates, treat as missing for retry.
+            conf_attempts = od.get("preventive_attempts", 0)
+            if conf_ambiguous and conf_attempts < 1:
+                _set_onboarding_data(user, "preventive_attempts", 1)
+                user.onboarding_state = "awaiting_prev_retry"
+                _set_onboarding_data(user, "preventive_missing", conf_ambiguous)
+                db.commit()
+                _CONF_AMB_NAMES = {
+                    "vaccines": "vaccines",
+                    "deworming": "deworming",
+                    "flea_tick": "flea & tick treatment",
+                    "blood_test": "blood tests",
+                }
+                amb_str = " and ".join(_CONF_AMB_NAMES.get(k, k) for k in conf_ambiguous)
+                await send_fn(db, mobile, f"Got it! What about {amb_str}?")
+                return
 
         await _transition_to_documents(db, user, pet, send_fn)
         return
@@ -1836,10 +1852,14 @@ async def _step_preventive(db, user, text, send_fn):
         await send_fn(db, mobile, _flea_brand_question(pet.name))
         return
 
-    # Store whatever was parsed.
-    await _store_preventive_data(db, pet, parsed)
+    # Store whatever was parsed; collect categories that had a value but unparseable date.
+    ambiguous = await _store_preventive_data(db, pet, parsed)
+    # Treat ambiguous like missing so they get re-asked in the retry step.
+    for key in ambiguous:
+        if key not in missing:
+            missing.append(key)
 
-    # If some fields are missing and this is the first attempt, re-ask once.
+    # If some fields are missing (or ambiguous) and this is the first attempt, re-ask once.
     if missing and attempts < 1:
         _set_onboarding_data(user, "preventive_attempts", 1)
         user.onboarding_state = "awaiting_prev_retry"
@@ -1952,6 +1972,9 @@ async def _step_prev_retry(db, user, text, send_fn):
     text_lower = text.strip().lower()
     normalized = re.sub(r"[.!?,]+$", "", text_lower)
 
+    # Read onboarding data once at the top — needed in both skip and non-skip paths.
+    od = _get_onboarding_data(user)
+
     # Even if skip / none, just proceed.
     if (
         normalized not in _SKIP_INPUTS
@@ -1959,7 +1982,6 @@ async def _step_prev_retry(db, user, text, send_fn):
         and normalized not in _NO_INPUTS
     ):
         # Guard against late-arriving diet/supplement messages from prior steps.
-        od = _get_onboarding_data(user)
         prior_classification = await _classify_prior_step_input(text, "awaiting_prev_retry")
         if prior_classification in ("food", "supplement"):
             missing = list(od.get("preventive_missing") or [])
@@ -1979,7 +2001,17 @@ async def _step_prev_retry(db, user, text, send_fn):
             )
             return
 
-        parsed = await _parse_preventive_care(text)
+        # Pass the missing categories as context so GPT can attribute an ambiguous
+        # positive reply (e.g. "done this month") to the right categories.
+        missing_context = list(od.get("preventive_missing") or [])
+        _CONTEXT_NAMES = {
+            "vaccines": "vaccines",
+            "deworming": "deworming",
+            "flea_tick": "flea & tick treatment",
+            "blood_test": "blood tests",
+        }
+        context_labels = [_CONTEXT_NAMES.get(m, m) for m in missing_context]
+        parsed = await _parse_preventive_care(text, context_categories=context_labels or None)
 
         # Apply the same generic vaccine / flea-without-brand detection as
         # in _step_preventive, but since this is the final retry step we
@@ -2007,7 +2039,26 @@ async def _step_prev_retry(db, user, text, send_fn):
             await send_fn(db, mobile, _flea_brand_question(pet.name))
             return
 
-        await _store_preventive_data(db, pet, parsed)
+        ambiguous = await _store_preventive_data(db, pet, parsed)
+
+        # If user mentioned categories but date was unparseable, ask once for a
+        # clearer date.  The `preventive_date_clarify_sent` flag prevents looping.
+        date_clarify_sent = od.get("preventive_date_clarify_sent", False)
+        if ambiguous and not date_clarify_sent:
+            _set_onboarding_data(user, "preventive_date_clarify_sent", True)
+            db.commit()
+            _AMB_NAMES = {
+                "deworming": "deworming",
+                "flea_tick": "flea & tick treatment",
+                "blood_test": "blood tests",
+            }
+            amb_str = " and ".join(_AMB_NAMES.get(k, k) for k in ambiguous)
+            await send_fn(
+                db, mobile,
+                f"Got it — just need a clearer date for {amb_str}. "
+                f"Could you share it as 'Month YYYY'? E.g., 'April 2026' or 'March 2026'.",
+            )
+            return  # stay in awaiting_prev_retry; next reply re-enters this handler
 
     await _transition_to_documents(db, user, pet, send_fn)
 
@@ -2285,7 +2336,11 @@ async def _step_vaccine_type(db, user, text, send_fn):
         return
 
     # No flea brand needed — store and proceed.
-    await _store_preventive_data(db, pet, parsed)
+    ambiguous = await _store_preventive_data(db, pet, parsed)
+    # Treat ambiguous like missing so they get re-asked in the retry step.
+    for key in ambiguous:
+        if key not in missing:
+            missing.append(key)
 
     if missing and attempts < 1:
         _set_onboarding_data(user, "preventive_attempts", 1)
@@ -2350,7 +2405,11 @@ async def _step_flea_brand(db, user, text, send_fn):
             # Convert plain-string date to dict form with medicine.
             parsed["flea_tick"] = {"date": flea_tick, "medicine": brand}
 
-    await _store_preventive_data(db, pet, parsed)
+    ambiguous = await _store_preventive_data(db, pet, parsed)
+    # Treat ambiguous like missing so they get re-asked in the retry step.
+    for key in ambiguous:
+        if key not in missing:
+            missing.append(key)
 
     if missing and attempts < 1:
         _set_onboarding_data(user, "preventive_attempts", 1)
@@ -2737,7 +2796,7 @@ def _ensure_preventive_master_seeded_for_store() -> None:
             logger.debug("Preventive seeding session close failed: %s", str(close_err))
 
 
-async def _store_preventive_data(db, pet, parsed: dict):
+async def _store_preventive_data(db, pet, parsed: dict) -> list[str]:
     """
     Store parsed preventive care data as preventive records.
 
@@ -2750,6 +2809,11 @@ async def _store_preventive_data(db, pet, parsed: dict):
 
     Other categories (deworming, flea_tick, blood_test) each have exactly
     one master per species, so they continue to use the single-match loop.
+
+    Returns a list of category keys (e.g. ["flea_tick", "blood_test"]) where
+    the user provided a non-null value but the date could not be parsed.
+    Callers can use this to ask a targeted clarification rather than silently
+    dropping the data.
     """
     # Self-heal before lookups if preventive_master was truncated or partly missing.
     # Runs in a separate session so onboarding transaction boundaries stay intact.
@@ -2767,9 +2831,12 @@ async def _store_preventive_data(db, pet, parsed: dict):
             pet.species,
             str(pet.id),
         )
-        return
+        return []
 
     parsed = _enrich_preventive_categories_from_catalog(db, parsed)
+
+    # Tracks categories where user provided a value but date could not be parsed.
+    ambiguous: list[str] = []
 
     # --- Generic vaccine mention → update all essential annual vaccines ---
     # If user provided specific vaccine name+date entries, do NOT fan out the
@@ -2863,6 +2930,9 @@ async def _store_preventive_data(db, pet, parsed: dict):
 
         parsed_date = await _parse_preventive_date_value(value, pet)
         if parsed_date is None:
+            # User mentioned this category but the date couldn't be parsed.
+            # Track it so callers can ask a targeted clarification.
+            ambiguous.append(key)
             continue
 
         master = (
@@ -2890,6 +2960,8 @@ async def _store_preventive_data(db, pet, parsed: dict):
             db.rollback()
         except Exception:
             pass
+
+    return ambiguous
 
 
 async def _transition_to_documents(db, user, pet, send_fn):
@@ -3727,9 +3799,20 @@ async def _parse_gender_weight_neutered(text: str) -> dict:
         return {"gender": None, "weight_kg": None, "neutered": None}
 
 
-async def _parse_preventive_care(text: str) -> dict:
+async def _parse_preventive_care(
+    text: str,
+    context_categories: list[str] | None = None,
+) -> dict:
     """
     Use GPT-4.1-mini to extract preventive care dates and medicine names from combined input.
+
+    Args:
+        text: The user's free-text message.
+        context_categories: Optional list of human-readable category names the user
+            is specifically responding about (e.g. ["flea & tick treatment", "blood tests"]).
+            When provided, a hint is injected into the GPT prompt so that an ambiguous
+            positive reply like "done this month" gets attributed to the right categories
+            rather than returning null.
 
     Returns dict with keys:
         vaccines (str|None)         — generic "vaccines done" date
@@ -3788,7 +3871,15 @@ async def _parse_preventive_care(text: str) -> dict:
         'set it to "none" (not null). '
         "Null means not mentioned at all. "
         "'missing' should list category names that were not mentioned.\n\n"
-        f"User message: {text}"
+        + (
+            f"NOTE: The user is specifically responding about: "
+            f"{', '.join(context_categories)}. "
+            f"If their response is ambiguous (e.g. 'done', 'done this month', 'yes, both'), "
+            f"attribute it to these categories and convert any relative timeframe to 'Month YYYY'.\n\n"
+            if context_categories
+            else ""
+        )
+        + f"User message: {text}"
     )
     try:
         response = await retry_openai_call(

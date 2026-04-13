@@ -1450,6 +1450,17 @@ async def _handle_media(db: Session, user, message_data: dict) -> None:
                 await send_text_message(db, from_number, error_str)
         except RuntimeError:
             _recent_uploads[pet_key].pop()
+            # Always schedule the extraction timer even when this individual doc
+            # failed — other docs in the batch may have already succeeded and
+            # still need extraction + summary. Without this call, a DB error on
+            # one doc would leave successfully-uploaded docs with no timer and
+            # no user feedback.
+            _schedule_batch_extraction(
+                pet_id=pet.id,
+                pet_name=pet.name,
+                user_id=user.id,
+                from_number=from_number,
+            )
             await send_text_message(db, from_number, "Upload failed. Please try again later.")
 
 
@@ -1611,7 +1622,16 @@ async def _delayed_batch_extraction(
                 )
             else:
                 ack += "\n\nGive me a few seconds while I go through the rest."
-            await send_text_message(bg_db, from_number, ack)
+            try:
+                await send_text_message(bg_db, from_number, ack)
+            except Exception as _ack_err:
+                # An SSL drop or pool error here must not abort extraction — the
+                # user will still get the batch summary at the end even if the
+                # pre-extraction acknowledgment failed to deliver.
+                logger.warning(
+                    "Pre-extraction ack failed for pet=%s, continuing extraction: %s",
+                    str(pet_id), _ack_err,
+                )
 
         success_count = 0
         fail_count = 0
@@ -1769,15 +1789,23 @@ async def _delayed_batch_extraction(
             bg_db.rollback()
         except Exception:
             pass
+        # bg_db may be in a broken/dead state after rollback — use a fresh session
+        # so the fallback error message always reaches the user even when the
+        # original session had an SSL drop or pool error.
         try:
-            await send_text_message(
-                bg_db, from_number,
-                f"Extraction encountered an issue for {pet_name}. "
-                f"Try uploading again.",
-            )
+            from app.database import get_fresh_session as _get_fresh_session
+            _err_db = _get_fresh_session()
+            try:
+                await send_text_message(
+                    _err_db, from_number,
+                    f"Extraction encountered an issue for {pet_name}. "
+                    f"Try uploading again.",
+                )
+            finally:
+                _err_db.close()
         except Exception:
             pass
-        # Clear batch counter even on failure so user isn't stuck.
+        # Clear batch counter even on failure so user is never stuck.
         _recent_uploads.pop(pet_key, None)
         _batch_document_ids.pop(pet_key, None)
         _batch_is_onboarding.pop(pet_key, None)

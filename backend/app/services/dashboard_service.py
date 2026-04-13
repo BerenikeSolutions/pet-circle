@@ -748,10 +748,12 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
             })
 
     # --- Dashboard Rebuild v2 enrichments ---
-    # Hard timeout per enrichment. Increased to 15s to allow nutrition analysis
-    # (with multiple parallel AI calls) to complete. Two sequential phases
-    # (gather + care_plan_reasons) should still stay under 30s frontend limit.
-    _ENRICHMENT_TIMEOUT_SECONDS = 15
+    # Hard timeout per enrichment.
+    # Set to 45s to survive worst-case Claude 429 retry backoffs (10s + 20s)
+    # plus actual API call time. The global concurrency semaphore in retry.py
+    # prevents simultaneous callers from saturating the TPM quota, so in
+    # practice this timeout should rarely be reached.
+    _ENRICHMENT_TIMEOUT_SECONDS = 45
 
     async def _safe_async_call(label: str, default, coro):
         try:

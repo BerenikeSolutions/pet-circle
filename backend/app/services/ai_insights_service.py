@@ -844,8 +844,10 @@ async def generate_care_plan_reasons(
     """
     Generate one-sentence reasons for orderable care plan items.
 
-    Reasons are generated fresh on every load and are never cached.
-    On GPT failure, return {} so the UI can render items without reasons.
+    Results are cached in pet_ai_insights with a 1-hour TTL.  Using a short
+    TTL (rather than the 7-day insight TTL) ensures reasons stay current when
+    care-plan items change, while preventing every dashboard load from hitting
+    the Claude API concurrently.
 
     Args:
         db: SQLAlchemy session.
@@ -859,6 +861,26 @@ async def generate_care_plan_reasons(
     """
     if not pet or not orderable_items:
         return {}
+
+    _CARE_PLAN_REASONS_CACHE_HOURS = 1
+    _CARE_PLAN_REASONS_INSIGHT_TYPE = "care_plan_reasons"
+
+    # --- Cache check (1-hour TTL) ---
+    stale_cutoff = datetime.utcnow() - timedelta(hours=_CARE_PLAN_REASONS_CACHE_HOURS)
+    try:
+        cached = (
+            db.query(PetAiInsight)
+            .filter(
+                PetAiInsight.pet_id == pet.id,
+                PetAiInsight.insight_type == _CARE_PLAN_REASONS_INSIGHT_TYPE,
+                PetAiInsight.generated_at >= stale_cutoff,
+            )
+            .first()
+        )
+        if cached and isinstance(cached.content_json, dict):
+            return cached.content_json.get("reasons", {})
+    except Exception as exc:
+        logger.warning("care_plan_reasons cache read failed for pet %s: %s", pet.id, exc)
 
     try:
         item_map: dict[str, str] = {}
@@ -955,6 +977,29 @@ async def generate_care_plan_reasons(
             if not one_line_reason.endswith((".", "!", "?")):
                 one_line_reason = f"{one_line_reason}."
             reasons[item_id] = one_line_reason
+
+        # --- Persist to cache (only if GPT returned usable reasons) ---
+        if reasons:
+            try:
+                db.execute(
+                    text("""
+                        INSERT INTO pet_ai_insights (pet_id, insight_type, content_json, generated_at)
+                        VALUES (:pet_id, :insight_type, CAST(:content_json AS jsonb), NOW())
+                        ON CONFLICT (pet_id, insight_type)
+                        DO UPDATE SET content_json = EXCLUDED.content_json,
+                                      generated_at = NOW()
+                    """),
+                    {
+                        "pet_id": str(pet.id),
+                        "insight_type": _CARE_PLAN_REASONS_INSIGHT_TYPE,
+                        "content_json": json.dumps({"reasons": reasons}),
+                    },
+                )
+                db.commit()
+            except Exception as cache_exc:
+                logger.warning("care_plan_reasons cache write failed for pet %s: %s", pet.id, cache_exc)
+                db.rollback()
+
         return reasons
     except Exception as exc:
         logger.warning("care_plan_reasons generation failed for pet %s: %s", pet.id, exc)

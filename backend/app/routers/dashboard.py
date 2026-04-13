@@ -29,7 +29,9 @@ import razorpay as razorpay_sdk
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from fastapi.responses import Response as FastAPIResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func as sqlfunc
+import re as _re
+
+from sqlalchemy import func as sqlfunc, or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -2334,6 +2336,66 @@ async def resolve_product_endpoint(
     }
 
 
+def _build_ingredient_conditions(term: str) -> list:
+    """
+    Return SQLAlchemy filter conditions for key_ingredients matching.
+
+    Expansion rules applied in order:
+
+    Fix A — "Vit X" abbreviation:
+        "vit d3" → also search "vitamin d3" and carry that expanded form forward.
+
+    Fix B — Vitamin singular ↔ plural:
+        "vitamin a"  → also "vitamins a"; "vitamins a" → also "vitamin a".
+
+    Fix C — Vitamin letter-list regex (covers plain and numbered suffixes):
+        "vitamin d3" → regex matches "Vitamins A D3 E B-complex" even though
+        "vitamins d3" is not a direct substring (the letters are space-separated).
+        Pattern: ``vitamins?\\s+(?:[a-z]\\d*\\s+)*<suffix>(\\s|$|,|-)``
+
+    Fix D — Hyphenated L-/N-/DL- amino-acid prefixes:
+        Normalization strips hyphens from the search term but the DB retains them.
+        "l carnitine" → also ILIKE "%l-carnitine%".
+
+    Returns a list of conditions suitable for ``or_(*conditions)``.
+    """
+    conditions: list = [ProductSupplement.key_ingredients.ilike(f"%{term}%")]
+
+    # Fix A: "vit X" → "vitamin X"
+    expanded = term
+    if _re.match(r"^vit\s+", term, _re.IGNORECASE) and not _re.match(r"^vita", term, _re.IGNORECASE):
+        expanded = "vitamin " + term[4:]
+        conditions.append(ProductSupplement.key_ingredients.ilike(f"%{expanded}%"))
+
+    # Fix B: vitamin singular ↔ plural
+    if expanded.startswith("vitamin ") and not expanded.startswith("vitamins "):
+        plural = "vitamins " + expanded[8:]
+        conditions.append(ProductSupplement.key_ingredients.ilike(f"%{plural}%"))
+    elif expanded.startswith("vitamins "):
+        singular = "vitamin " + expanded[9:]
+        conditions.append(ProductSupplement.key_ingredients.ilike(f"%{singular}%"))
+
+    # Fix C: vitamin letter-list regex — handles both single letters ("a", "e")
+    # and numbered suffixes ("d3", "b12", "k2") in space-separated lists.
+    m = _re.match(r"^vitamins?\s+([a-z]\d*)$", expanded, _re.IGNORECASE)
+    if m:
+        suffix = _re.escape(m.group(1))  # e.g. "d3", "b12", "a"
+        # Walk through the space-separated letter[+digit] entries in the list
+        # until the target suffix is found, terminated by space / comma / hyphen / end.
+        regex_pat = rf"vitamins?\s+(?:[a-z]\d*\s+)*{suffix}(\s|$|,|-)"
+        conditions.append(ProductSupplement.key_ingredients.op("~*")(regex_pat))
+
+    # Fix D: hyphenated L-/N-/DL- amino-acid prefixes
+    # e.g. "l carnitine" (hyphens stripped by normalizer) → also "%l-carnitine%"
+    for prefix in ("dl ", "l ", "n "):
+        if term.startswith(prefix):
+            hyphenated = prefix.rstrip() + "-" + term[len(prefix):]
+            conditions.append(ProductSupplement.key_ingredients.ilike(f"%{hyphenated}%"))
+            break
+
+    return conditions
+
+
 @router.get("/{token}/products/resolve-by-micronutrient")
 async def resolve_supplement_by_micronutrient(
     token: str,
@@ -2362,30 +2424,43 @@ async def resolve_supplement_by_micronutrient(
         raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
 
     # --- Step 1: type-based match via SUPPLEMENT_TYPE_KEYWORDS ---
-    # Longest-match keyword wins (e.g. "fish oil" > "oil").
+    # Longest whole-word match wins (word-boundary prevents "renal" matching
+    # inside "adrenal", and "milk" matching inside "milk thistle").
     haystack = micronutrient.lower().strip()
     sup_type: str | None = None
     best_len = 0
     for keyword, canonical in SUPPLEMENT_TYPE_KEYWORDS.items():
-        if keyword in haystack and len(keyword) > best_len:
+        if len(keyword) <= best_len:
+            continue
+        if _re.search(r"\b" + _re.escape(keyword) + r"\b", haystack):
             sup_type = canonical
             best_len = len(keyword)
 
     # Normalise the micronutrient for a key_ingredients ILIKE search:
-    # replace underscores with spaces so "vitamin_e" → "vitamin e".
-    ingredient_term = haystack.replace("_", " ")
+    # replace underscores and hyphens with spaces so "omega-3" → "omega 3",
+    # then strip generic trailing words ("supplement", "tablet", "capsule",
+    # "oil") that appear in item names but not in key_ingredients.
+    _STRIP_SUFFIXES = ("supplement", "tablet", "capsule", "capsules", "oil", "chew", "chews", "powder")
+    ingredient_term = haystack.replace("_", " ").replace("-", " ")
+    for _suffix in _STRIP_SUFFIXES:
+        if ingredient_term.endswith(f" {_suffix}"):
+            ingredient_term = ingredient_term[: -(len(_suffix) + 1)].strip()
+            break
 
     # --- Step 2: ingredient-level search ---
-    # Search key_ingredients for the exact micronutrient name regardless of
-    # whether a type match was found. This handles micronutrients like zinc,
-    # taurine, phosphorus that appear directly in ingredient lists.
+    # Uses OR conditions generated by _build_ingredient_conditions so that:
+    #   • "vitamin a"  matches both "Vitamin A capsule" and "Vitamins A D E B-complex"
+    #   • "vitamin b"  matches "Vitamin B-complex" and "Vitamins A D E B-complex"
+    #   • "omega 3"    matches "Omega 3 & 6, Vitamins A D E B-complex"
+    #   • "zinc"       matches any product whose key_ingredients contains "zinc"
     ingredient_rows: list = []
     if ingredient_term:
+        ingredient_conditions = _build_ingredient_conditions(ingredient_term)
         ingredient_rows = (
             db.query(ProductSupplement)
             .filter(
                 ProductSupplement.active == True,
-                ProductSupplement.key_ingredients.ilike(f"%{ingredient_term}%"),
+                or_(*ingredient_conditions),
             )
             .order_by(ProductSupplement.popularity_rank)
             .limit(5)

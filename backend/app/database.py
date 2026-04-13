@@ -52,8 +52,8 @@ engine = create_engine(
     settings.DATABASE_URL,
     poolclass=QueuePool,
     pool_pre_ping=True,
-    pool_size=10,       # Handles burst uploads (20 docs = 20 concurrent tasks)
-    max_overflow=10,    # Hard cap at 20 total — stays within Supabase limits
+    pool_size=15,       # Handles burst uploads (15 docs = 15 concurrent tasks)
+    max_overflow=10,    # Hard cap at 25 total — headroom for 15 uploads + 8 extractions + dashboard
     pool_recycle=120,   # Refresh well before Supabase/Supavisor idle-timeout
     pool_timeout=30,
     connect_args=connect_args,

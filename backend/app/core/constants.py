@@ -44,15 +44,16 @@ MAX_PENDING_DOCS_PER_PET: int = 100
 
 # Maximum number of concurrent background extraction tasks system-wide.
 # Sized to allow multiple pet batches to extract in parallel while
-# staying within DB pool limits (pool_size=10, max_overflow=10).
+# staying within DB pool limits (pool_size=15, max_overflow=10).
 # Each extraction holds a DB session for the GPT call duration (~5-15s).
-MAX_CONCURRENT_EXTRACTIONS: int = 5
+MAX_CONCURRENT_EXTRACTIONS: int = 8
 
 # Maximum number of concurrent document upload processing tasks system-wide.
 # Limits initial DB + media-download work when a user sends many files at once
-# (e.g. 20 documents). Without this, 20 tasks simultaneously hold DB connections
+# (e.g. 15 documents). Without this, 15 tasks simultaneously hold DB connections
 # and hit Supabase hard enough to trigger SSL termination on the pooler side.
-MAX_CONCURRENT_UPLOAD_PROCESSING: int = 8
+# Peak load: 15 uploads + 8 extractions = 23 sessions — within pool ceiling of 25.
+MAX_CONCURRENT_UPLOAD_PROCESSING: int = 15
 
 # Allowed MIME types for uploaded documents.
 # Only images (JPEG, PNG) and PDF are accepted.
@@ -160,8 +161,12 @@ OPENAI_QUERY_TEMPERATURE: float = 0.0
 OPENAI_QUERY_MAX_TOKENS: int = 1500
 
 # --- Retry Configuration ---
-# OpenAI retry backoff intervals in seconds.
+# OpenAI retry backoff intervals in seconds (transient errors).
 OPENAI_RETRY_BACKOFFS: list[float] = [1.0, 2.0]
+# Rate-limit (429) specific backoffs — much longer to allow TPM window recovery.
+OPENAI_RATE_LIMIT_BACKOFFS: list[float] = [10.0, 20.0]
+# Max concurrent Claude/Anthropic API calls across the whole process.
+CLAUDE_API_CONCURRENCY: int = 5
 
 # --- Weight Lookup (AI-powered ideal weight range) ---
 OPENAI_WEIGHT_LOOKUP_MODEL: str = OPENAI_QUERY_MODEL  # claude-sonnet-4-6

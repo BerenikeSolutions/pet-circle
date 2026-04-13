@@ -305,7 +305,14 @@ def _extract_partial_json_string_value(raw_json: str, key: str) -> str | None:
 
 
 def _salvage_partial_extraction_json(raw_json: str) -> dict | None:
-    """Recover minimal extraction metadata from malformed GPT JSON."""
+    """Recover minimal extraction metadata from malformed GPT JSON.
+
+    Returns None immediately for empty/whitespace responses — these come from
+    transient GPT failures and contain nothing recoverable.
+    """
+    if not raw_json or not raw_json.strip():
+        return None
+
     document_name = _extract_partial_json_string_value(raw_json, "document_name")
     document_type = _extract_partial_json_string_value(raw_json, "document_type")
     document_category = _extract_partial_json_string_value(raw_json, "document_category")
@@ -1089,16 +1096,21 @@ def _validate_extraction_json(raw_json: str, file_path: str | None = None) -> tu
         ValueError: If JSON is invalid or missing required keys.
     """
     # Parse JSON — reject non-JSON responses.
+    # Strip BOM and leading null bytes before parsing; Claude occasionally
+    # prepends these when returning large JSON responses.
+    clean_json = raw_json.lstrip("\x00\ufeff").strip()
     try:
-        parsed = json.loads(raw_json)
+        parsed = json.loads(clean_json)
     except json.JSONDecodeError as e:
-        parsed = _salvage_partial_extraction_json(raw_json)
+        parsed = _salvage_partial_extraction_json(clean_json)
         if parsed is None:
             raise ValueError(
                 f"GPT returned invalid JSON: {str(e)}"
             ) from e
 
-        logger.warning(
+        # Salvage recovered partial metadata — demoted to debug since the
+        # system handled this gracefully.
+        logger.debug(
             "Recovered partial extraction metadata from malformed GPT JSON: %s",
             str(e),
         )
