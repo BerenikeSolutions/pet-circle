@@ -178,7 +178,7 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
             <span
               key={trait.label}
               className={`trait-pill ${TRAIT_CLASS[trait.color]}`}
-              style={{ fontSize: 10, padding: "3px 8px", whiteSpace: "nowrap" }}
+              style={{ fontSize: 10, padding: "3px 8px", whiteSpace: "normal", maxWidth: "100%", wordBreak: "break-word" }}
             >
               {trait.label}
             </span>

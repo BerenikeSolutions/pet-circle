@@ -4429,6 +4429,9 @@ async def _ai_supplement_recommendation(
             )
 
         prompt = (
+            f"STRICT RULE: Never mention any supplement brand or product name "
+            f"(e.g. do NOT say 'Nordic Naturals', 'Zesty Paws', 'Nutramax', or any brand). "
+            f"Only use the micronutrient name (e.g. Omega-3, Vitamin D3, probiotics).\n\n"
             f"Pet profile:\n"
             f"Name: {name}\n"
             f"Species: {species}\n"
@@ -4440,9 +4443,10 @@ async def _ai_supplement_recommendation(
             f"Current supplements: {supplements_summary}\n"
             f"Health conditions: {condition_names}\n\n"
             f"{already_taking_clause}"
-            f"Write ONE short, warm WhatsApp message sentence (max 25 words) "
-            f"recommending 1-2 specific supplements for this pet based on their "
-            f"profile. Be specific to their breed, age, and diet. "
+            f"Write ONE short, warm WhatsApp message sentence (max 30 words) "
+            f"identifying 1-2 micronutrients that are likely missing from this pet's diet "
+            f"based on their breed, age, and health conditions, and briefly explain why those "
+            f"micronutrients matter for this specific pet. "
             f"No bullet points. No headers. No asterisks. No markdown. "
             f"Start with 'We'd suggest' or 'Based on [name]'s profile, we'd recommend'."
         )
@@ -4554,19 +4558,22 @@ async def _generate_care_plan_message(
                 for existing in existing_supp_labels
             )
 
-        top_names = [
-            str(m.get("name", "")).strip()
-            for m in missing_micros
+        top_micros = [
+            m for m in missing_micros
             if m.get("name") and not _already_covered_by_existing_supplements(str(m.get("name", "")).strip())
         ][:2]
+        top_names = [str(m.get("name", "")).strip() for m in top_micros]
         if top_names:
+            age_basis = f"{name}'s age & conditions" if has_conditions else f"{name}'s age"
             if len(top_names) == 1:
                 supplement_rec = (
-                    f"{name}'s current diet is wholesome, based on {name}'s age & conditions we recommend adding {top_names[0]}"
+                    f"{name}'s current diet is wholesome. Based on {age_basis}, "
+                    f"{top_names[0]} may be missing."
                 )
             else:
                 supplement_rec = (
-                    f"{name}'s current diet is wholesome, based on {name}'s age & conditions we recommend adding {top_names[0]} & {top_names[1]}"
+                    f"{name}'s current diet is wholesome. Based on {age_basis}, "
+                    f"{top_names[0]} and {top_names[1]} may be missing."
                 )
         elif missing_micros and existing_supp_labels:
             supplement_rec = (

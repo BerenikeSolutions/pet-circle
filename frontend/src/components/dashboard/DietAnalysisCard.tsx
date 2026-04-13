@@ -19,26 +19,15 @@ export default function DietAnalysisCard({ data, compact = false }: DietAnalysis
   const macros = normalizeMacros(data.diet_summary?.macros || []);
   const missingMicros = (data.diet_summary?.missing_micros || []).slice(0, 3);
 
-  // Check if any macro has actual data (pct_of_need > 0)
-  const hasData = macros.some((macro) => macro.pct_of_need > 0);
-
-  // Hide the entire section if no food data exists
-  if (!hasData) {
-    return null;
-  }
-
   return (
     <div className={compact ? undefined : "card"}>
       <div className="sec-lbl">Diet Analysis</div>
 
       <div className="donut-grid" style={{ marginBottom: 12 }}>
         {macros.map((macro) => {
-          // Skip rendering macros with 0% data
-          if (macro.pct_of_need === 0) {
-            return null;
-          }
-
-          const status = macroStatus(macro.name, macro.pct_of_need);
+          const hasValue = macro.pct_of_need > 0;
+          // Use neutral grey status when no data so the donut ring renders greyed out
+          const status = hasValue ? macroStatus(macro.name, macro.pct_of_need) : ("none" as const);
           return (
             <div
               key={macro.name}
@@ -51,16 +40,18 @@ export default function DietAnalysisCard({ data, compact = false }: DietAnalysis
             >
               <Donut pct={macro.pct_of_need} status={status} size={64} />
               <div style={{ fontSize: 10, fontWeight: 700, color: "var(--t1)", textAlign: "center" }}>{macro.name}</div>
-              <div
-                style={{
-                  fontSize: 9,
-                  color: NOTE_COLOR[status],
-                  fontWeight: 600,
-                  textAlign: "center",
-                }}
-              >
-                {macro.note}
-              </div>
+              {hasValue && (
+                <div
+                  style={{
+                    fontSize: 9,
+                    color: NOTE_COLOR[status as "green" | "amber" | "red"],
+                    fontWeight: 600,
+                    textAlign: "center",
+                  }}
+                >
+                  {macro.note}
+                </div>
+              )}
             </div>
           );
         })}
