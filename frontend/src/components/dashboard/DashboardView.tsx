@@ -27,7 +27,7 @@ export interface DashboardViewProps {
   onGoToRecords: () => void;
   onGoToCart: () => void;
   onAddToCart: (item: CarePlanItem, sectionTitle: string) => void;
-  onAddBySku: (skuId: string, name: string, price: number, mrp: number, icon: string, section: string, quantity?: number) => void;
+  onAddBySku: (skuId: string, name: string, price: number, mrp: number, icon: string, section: string, quantity?: number, medicine_type?: string) => void;
 }
 
 function cartItemId(item: CarePlanItem, sectionTitle: string): string {
@@ -96,11 +96,15 @@ export default function DashboardView({
     // Supplement items without an explicit micronutrient field (e.g. from preventive-master)
     // are resolved by the item name so they also open the product selector.
     const supplementResolveKey = item.micronutrient || (item.test_type === "supplement" ? item.name : null);
+    const medicineResolveKey =
+      item.test_type === "tick_flea" || item.test_type === "deworming" ? item.name : null;
     const resolveUrl = item.diet_item_id
       ? `${API_BASE}/dashboard/${token}/products/resolve?diet_item_id=${encodeURIComponent(item.diet_item_id)}`
       : supplementResolveKey
         ? `${API_BASE}/dashboard/${token}/products/resolve-by-micronutrient?micronutrient=${encodeURIComponent(supplementResolveKey)}`
-        : null;
+        : medicineResolveKey
+          ? `${API_BASE}/dashboard/${token}/medicines/resolve?item_name=${encodeURIComponent(medicineResolveKey)}`
+          : null;
 
     if (resolveUrl) {
       try {
@@ -137,13 +141,13 @@ export default function DashboardView({
     // Optimistic update — close popup and add to cart immediately using local product data
     const icon = product?.category === "food" ? "🥣" : "💊";
     // Food: product_line is the meaningful name (e.g. "Adult Large Breed").
-    // Supplement: product_name is the full name (e.g. "Petcare Joint Flex 90 Chews").
+    // Supplement/medicine: product_name is the full name.
     const name = product?.category === "food"
       ? (product.product_line || product.brand_name || skuId)
       : (product?.product_name || product?.brand_name || skuId);
     const price = product?.discounted_price ?? 0;
     const mrp = product?.mrp ?? price;
-    onAddBySku(skuId, name, price, mrp, icon, pendingSectionTitle, quantity);
+    onAddBySku(skuId, name, price, mrp, icon, pendingSectionTitle, quantity, product?.medicine_type);
     setSelectorOpen(false);
 
     // Sync with backend in background (best-effort)

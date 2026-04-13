@@ -155,6 +155,7 @@ function DashboardInner({ token }: { token: string }) {
     icon: string,
     section: string,
     quantity = 1,
+    medicine_type?: string,
   ) => {
     setCart((prev) => {
       const existing = prev.find((entry) => entry.id === skuId);
@@ -163,10 +164,63 @@ function DashboardInner({ token }: { token: string }) {
           entry.id === skuId ? { ...entry, quantity: entry.quantity + quantity } : entry
         );
       }
-      return [
-        ...prev,
-        { id: skuId, name, quantity, price, mrp: mrp > price ? mrp : undefined, icon, section },
-      ];
+      // Add the new item first
+      const newItem = { id: skuId, name, quantity, price, mrp: mrp > price ? mrp : undefined, icon, section, medicine_type };
+      const updated = [...prev, newItem];
+
+      // Combined-medicine overlap detection:
+      // If adding a combined medicine that covers deworming, annotate any existing
+      // single-purpose deworming item in the cart — and vice versa.
+      if (!medicine_type) return updated;
+
+      const isCombined = (mt: string) => mt.includes("Combined");
+      const coversDeworming = (mt: string) => mt.toLowerCase().includes("deworm");
+
+      return updated.map((item) => {
+        if (item.id === skuId || !item.medicine_type) return item;
+
+        // Newly added is combined + covers deworming, existing is single deworming
+        if (
+          isCombined(medicine_type) &&
+          coversDeworming(medicine_type) &&
+          !isCombined(item.medicine_type) &&
+          coversDeworming(item.medicine_type)
+        ) {
+          return { ...item, note: `${name} also covers deworming — consider removing this` };
+        }
+
+        // Newly added is single deworming, existing is combined covering deworming
+        if (
+          !isCombined(medicine_type) &&
+          coversDeworming(medicine_type) &&
+          isCombined(item.medicine_type) &&
+          coversDeworming(item.medicine_type)
+        ) {
+          // Annotate the just-added item (skuId) not the existing combined one
+          return item;
+        }
+
+        return item;
+      }).map((item) => {
+        // Annotate the newly added single deworming if a combined is already present
+        if (
+          item.id === skuId &&
+          medicine_type &&
+          !isCombined(medicine_type) &&
+          coversDeworming(medicine_type)
+        ) {
+          const hasCombined = prev.some(
+            (e) => e.medicine_type && isCombined(e.medicine_type) && coversDeworming(e.medicine_type)
+          );
+          if (hasCombined) {
+            const combinedItem = prev.find(
+              (e) => e.medicine_type && isCombined(e.medicine_type) && coversDeworming(e.medicine_type)
+            );
+            return { ...item, note: `${combinedItem?.name || "Your combined medicine"} already covers deworming` };
+          }
+        }
+        return item;
+      });
     });
   }, []);
 

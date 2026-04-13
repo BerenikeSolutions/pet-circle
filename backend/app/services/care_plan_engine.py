@@ -1265,6 +1265,21 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
                 if item_key not in attend_items and item_key not in continue_items:
                     add_items[item_key] = item
 
+        # ── Make tick_flea / deworming items in Quick Fixes orderable ────────
+        # These items land in add_items with orderable=False and reason=None by
+        # default. Enabling orderable here (after conflict resolution is settled)
+        # causes the dashboard to show an "Order Now" button that opens the
+        # medicine ProductSelectorCard — matching the UX for food/supplements.
+        _MEDICINE_REASONS: dict[str, str] = {
+            "tick_flea": "Monthly prevention protects against ticks, fleas, and related infections.",
+            "deworming": "Regular deworming maintains gut health and prevents parasite transmission.",
+        }
+        for it in add_items.values():
+            tt = it.get("test_type", "")
+            if tt in _MEDICINE_REASONS and not it.get("orderable"):
+                it["orderable"] = True
+                it["reason"] = _MEDICINE_REASONS[tt]
+
         # ── Add orderable food / supplements to Continue bucket ──────────────
         # Requirement 9.12: place ongoing food and supplements in Continue.
         try:

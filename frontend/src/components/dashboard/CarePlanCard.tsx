@@ -130,11 +130,12 @@ export default function CarePlanCard({
                       </div>
 
                       <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5, flexShrink: 0 }}>
-                        {item.test_type !== "food" && item.test_type !== "supplement" && (
-                          bucketKey === "add"
-                            ? <span className="s-tag s-tag-rec">Recommended</span>
-                            : <span className={`s-tag ${itemStatusClass(item)}`}>{normalizeStatusTag(item.status_tag)}</span>
-                        )}
+                        {bucketKey === "add"
+                          ? <span className="s-tag s-tag-rec">Recommended</span>
+                          : item.test_type !== "food" && item.test_type !== "supplement"
+                            ? <span className={`s-tag ${itemStatusClass(item)}`}>{normalizeStatusTag(item.status_tag)}</span>
+                            : null
+                        }
 
                         {canOrder && (
                           <button

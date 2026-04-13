@@ -1298,6 +1298,162 @@ def dashboard_update_frequency(
         raise HTTPException(status_code=503, detail="Could not update frequency.")
 
 
+# --- Medicine Resolve for Cart (ProductSelectorCard) ---
+
+def _medicine_suitable_for_pet(medicine, pet, today) -> bool:
+    """
+    Return False when the medicine's notes or product_name explicitly disqualify
+    this pet based on species, minimum weight, weight range, or minimum age.
+
+    Filtering rules (all skipped when the relevant pet field is None):
+    - Species exclusion: "not for cats" / "toxic to cats" in notes
+    - Min weight:        "min weight Xkg" in notes
+    - Weight range:      "X–Y kg" in product_name (only when pet.weight is known)
+    - Min age:           "min age X weeks" / "from X weeks of age" in notes
+    """
+    import re
+    notes_lower = (medicine.notes or "").lower()
+
+    # Species exclusion (life_stage_tags already pre-filters, but some notes
+    # contain explicit cross-species toxicity warnings, e.g. Advantix)
+    if pet.species == "cat" and ("not for cats" in notes_lower or "toxic to cats" in notes_lower):
+        return False
+    if pet.species == "dog" and "not for dogs" in notes_lower:
+        return False
+
+    if pet.weight is not None:
+        pet_weight = float(pet.weight)
+
+        # Minimum weight floor from notes: "min weight 2kg", "min weight 1.5kg"
+        m = re.search(r"min(?:imum)?\s*weight\s*(\d+(?:\.\d+)?)\s*kg", notes_lower)
+        if m and pet_weight < float(m.group(1)):
+            return False
+
+        # Weight range from product_name: "NexGard 2–4 kg", "Frontline Plus 2–10 kg"
+        # Unicode en-dash (–) and ASCII hyphen (-) both matched
+        r = re.search(
+            r"(\d+(?:\.\d+)?)\s*[–\-]\s*(\d+(?:\.\d+)?)\s*kg",
+            medicine.product_name.lower(),
+        )
+        if r:
+            rmin, rmax = float(r.group(1)), float(r.group(2))
+            if not (rmin <= pet_weight <= rmax):
+                return False
+
+    if pet.dob is not None:
+        age_weeks = (today - pet.dob).days // 7
+
+        # "min age 8 weeks", "minimum age 7 weeks"
+        m = re.search(r"min(?:imum)?\s*age\s*(\d+)\s*weeks?", notes_lower)
+        if m and age_weeks < int(m.group(1)):
+            return False
+
+        # "for puppies from 2 weeks of age"
+        m2 = re.search(r"from\s*(\d+)\s*weeks?\s*of\s*age", notes_lower)
+        if m2 and age_weeks < int(m2.group(1)):
+            return False
+
+    return True
+
+
+@router.get("/{token}/medicines/resolve")
+def dashboard_resolve_medicines(
+    token: str,
+    item_name: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Return medicine products (from product_medicines) for a Flea & Tick or
+    Deworming Quick Fix item.  Products are filtered by:
+      1. item type  (tick_flea or deworming — combined medicines appear in both)
+      2. pet species via life_stage_tags
+      3. pet details via notes-based suitability filter (_medicine_suitable_for_pet)
+
+    Response shape matches products/resolve-by-micronutrient so ProductSelectorCard
+    can be reused without changes.
+    """
+    from app.models.product_medicines import ProductMedicines
+    from datetime import date as _date
+    from sqlalchemy import or_
+
+    try:
+        pet = _get_pet_for_dashboard_token(db, token)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+
+    item_name_norm = (item_name or "").strip().lower()
+    is_tick_flea = "tick" in item_name_norm or "flea" in item_name_norm
+    is_deworming = "deworm" in item_name_norm
+
+    if not is_tick_flea and not is_deworming:
+        return {"products": []}
+
+    query = db.query(ProductMedicines).filter(ProductMedicines.active.is_(True))
+
+    if is_tick_flea:
+        # Include pure tick/flea AND combined products (Flea+Deworming, Tick+Flea+Deworming)
+        query = query.filter(
+            or_(
+                ProductMedicines.type.ilike("%Tick%"),
+                ProductMedicines.type.ilike("%Flea%"),
+            )
+        )
+    else:
+        # Include pure deworming AND all combined products that cover deworming
+        query = query.filter(ProductMedicines.type.ilike("%Deworming%"))
+
+    # Filter by pet species via life_stage_tags
+    query = query.filter(ProductMedicines.life_stage_tags.ilike(f"%{pet.species}%"))
+
+    medicines = query.order_by(ProductMedicines.popularity_rank.asc()).all()
+
+    # Apply notes + weight-range suitability filter
+    today = _date.today()
+    suitable = [m for m in medicines if _medicine_suitable_for_pet(m, pet, today)]
+
+    if not suitable:
+        return {"products": []}
+
+    min_rank = min(m.popularity_rank for m in suitable if m.popularity_rank is not None) if any(
+        m.popularity_rank is not None for m in suitable
+    ) else None
+
+    products = []
+    for m in suitable:
+        discounted = m.discounted_paise // 100
+        mrp = m.mrp_paise // 100
+        ppu_paise = m.price_per_unit_paise if m.price_per_unit_paise else m.discounted_paise
+        price_per_unit = ppu_paise // 100
+
+        is_highlighted = (
+            m.popularity_rank is not None and m.popularity_rank == min_rank
+        )
+
+        products.append({
+            "sku_id": m.sku_id,
+            "category": "medicine",
+            "brand_name": m.brand_name,
+            "product_name": m.product_name,
+            "pack_size": m.pack_size or "",
+            "mrp": mrp,
+            "discounted_price": discounted,
+            "price_per_unit": price_per_unit,
+            "unit_label": "tablet",
+            "in_stock": bool(m.in_stock),
+            "vet_diet_flag": False,
+            "is_highlighted": is_highlighted,
+            "highlight_reason": "Most Popular" if is_highlighted else None,
+            "medicine_type": m.type,
+            "notes": m.notes or None,
+        })
+
+    logger.info(
+        "medicines/resolve item_name=%r pet_species=%s -> %d products",
+        item_name, pet.species, len(products),
+    )
+    return {"products": products}
+
+
 # --- Medicine Name Update (AI-based due date) ---
 
 class MedicineNameRequest(BaseModel):
@@ -2542,11 +2698,12 @@ async def search_products_endpoint(
     db: Session = Depends(get_db),
 ):
     """
-    Search food and supplement products by brand or product name.
+    Search food, supplement, and medicine products by brand or product name.
     Returns up to 10 results, in-stock items first.
+    Medicines are filtered by pet species and exclude prescription-only antibiotics.
     """
     try:
-        _get_pet_for_dashboard_token(db, token)
+        pet = _get_pet_for_dashboard_token(db, token)
     except ValueError:
         raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
 
@@ -2568,6 +2725,22 @@ async def search_products_endpoint(
         .filter(
             ProductSupplement.active == True,
             (ProductSupplement.brand_name.ilike(pattern) | ProductSupplement.product_name.ilike(pattern)),
+        )
+        .all()
+    )
+
+    # Search medicine products — filter by species and exclude antibiotics
+    from app.models.product_medicines import ProductMedicines
+    medicine_rows = (
+        db.query(ProductMedicines)
+        .filter(
+            ProductMedicines.active.is_(True),
+            ~ProductMedicines.type.ilike("%Antibiotic%"),
+            ProductMedicines.life_stage_tags.ilike(f"%{pet.species}%"),
+            (
+                ProductMedicines.brand_name.ilike(pattern)
+                | ProductMedicines.product_name.ilike(pattern)
+            ),
         )
         .all()
     )
@@ -2595,6 +2768,19 @@ async def search_products_endpoint(
             "mrp": int(p.mrp),
             "discounted_price": int(p.discounted_price),
             "in_stock": bool(p.in_stock),
+        })
+    for p in medicine_rows:
+        results.append({
+            "sku_id": p.sku_id,
+            "category": "medicine",
+            "brand_name": p.brand_name,
+            "name": f"{p.brand_name} {p.product_name}".strip(),
+            "pack_size": p.pack_size or "",
+            "mrp": p.mrp_paise // 100,
+            "discounted_price": p.discounted_paise // 100,
+            "in_stock": bool(p.in_stock),
+            "medicine_type": p.type,
+            "notes": p.notes or None,
         })
 
     # Sort: in_stock first, then by name
@@ -2635,6 +2821,15 @@ async def cart_add_endpoint(
         if not product:
             raise HTTPException(status_code=404, detail="Product not found.")
         price = int(product.discounted_price)
+        name = f"{product.brand_name} {product.product_name}".strip()
+        sub = product.pack_size or ""
+        icon = "💊"
+    elif sku_id.startswith("SKU-"):
+        from app.models.product_medicines import ProductMedicines
+        product = db.query(ProductMedicines).filter(ProductMedicines.sku_id == sku_id).first()
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found.")
+        price = product.discounted_paise // 100
         name = f"{product.brand_name} {product.product_name}".strip()
         sub = product.pack_size or ""
         icon = "💊"

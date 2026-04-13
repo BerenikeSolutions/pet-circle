@@ -5,7 +5,7 @@ import BottomSheet from "@/components/ui/BottomSheet";
 
 export interface ResolvedProduct {
   sku_id: string;
-  category: "food" | "supplement";
+  category: "food" | "supplement" | "medicine";
   brand_name: string;
   product_line?: string;
   product_name?: string;
@@ -18,6 +18,8 @@ export interface ResolvedProduct {
   vet_diet_flag: boolean;
   is_highlighted: boolean;
   highlight_reason?: string;
+  medicine_type?: string;
+  notes?: string;
 }
 
 interface ProductSelectorCardProps {
@@ -161,6 +163,12 @@ export default function ProductSelectorCard({
                 <div style={{ fontSize: 11, color: "var(--t3)", marginTop: 1 }}>
                   {p.pack_size}
                 </div>
+
+                {p.notes && (
+                  <div style={{ fontSize: 11, color: "var(--t3)", marginTop: 2, fontStyle: "italic", lineHeight: 1.4 }}>
+                    {p.notes}
+                  </div>
+                )}
 
                 <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 4 }}>
                   {hasDiscount && (

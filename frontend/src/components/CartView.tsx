@@ -12,7 +12,7 @@ interface CartViewProps {
   onUpdateQuantity: (id: string, quantity: number) => void;
   onRemoveItem: (id: string) => void;
   onProceedToCheckout: () => void;
-  onAddBySku: (skuId: string, name: string, price: number, mrp: number, icon: string, section: string, quantity?: number) => void;
+  onAddBySku: (skuId: string, name: string, price: number, mrp: number, icon: string, section: string, quantity?: number, medicine_type?: string) => void;
 }
 
 export interface CartItem {
@@ -23,17 +23,21 @@ export interface CartItem {
   quantity: number;
   icon?: string;
   section?: string;
+  note?: string;
+  medicine_type?: string;
 }
 
 interface SearchResult {
   sku_id: string;
-  category: "food" | "supplement";
+  category: "food" | "supplement" | "medicine";
   brand_name: string;
   name: string;
   pack_size: string;
   mrp: number;
   discounted_price: number;
   in_stock: boolean;
+  medicine_type?: string;
+  notes?: string;
 }
 
 const DELIVERY_FEE = 49;
@@ -114,7 +118,9 @@ export default function CartView({
       sku_id: r.sku_id,
       category: r.category,
       brand_name: r.brand_name,
-      product_line: r.name,
+      // food uses product_line for display; supplement/medicine use product_name
+      product_line: r.category === "food" ? r.name : undefined,
+      product_name: r.category !== "food" ? r.name : undefined,
       pack_size: r.pack_size,
       mrp: r.mrp,
       discounted_price: r.discounted_price,
@@ -123,6 +129,8 @@ export default function CartView({
       in_stock: r.in_stock,
       vet_diet_flag: false,
       is_highlighted: false,
+      medicine_type: r.medicine_type,
+      notes: r.notes,
     }));
     setSelectorProducts(products);
     setSelectorOpen(true);
@@ -134,10 +142,12 @@ export default function CartView({
 
     // Optimistic update — close popup and add to cart immediately using local product data
     const icon = product?.category === "food" ? "🥣" : "💊";
-    const name = product?.brand_name || product?.product_line || skuId;
+    const name = product?.category === "food"
+      ? (product.product_line || product.brand_name || skuId)
+      : (product?.product_name || product?.brand_name || skuId);
     const price = product?.discounted_price ?? 0;
     const mrp = product?.mrp ?? price;
-    onAddBySku(skuId, name, price, mrp, icon, "Search", quantity);
+    onAddBySku(skuId, name, price, mrp, icon, "Search", quantity, product?.medicine_type);
     setSelectorOpen(false);
     setSearchQuery("");
     setSearchResults([]);
@@ -330,6 +340,11 @@ export default function CartView({
               <div className="cart-row" key={item.id}>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 14, fontWeight: 700, color: "var(--t1)" }}>{item.name}</div>
+                  {item.note && (
+                    <div style={{ fontSize: 11, color: "#E65100", marginTop: 2, fontStyle: "italic", lineHeight: 1.4 }}>
+                      ⚠ {item.note}
+                    </div>
+                  )}
                   <div style={{ fontSize: 11, color: "var(--t3)" }}>Section: {section}</div>
                   <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 4 }}>
                     {hasDiscount && (
