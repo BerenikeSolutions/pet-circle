@@ -1862,6 +1862,7 @@ async def _step_preventive(db, user, text, send_fn):
     # If some fields are missing (or ambiguous) and this is the first attempt, re-ask once.
     if missing and attempts < 1:
         _set_onboarding_data(user, "preventive_attempts", 1)
+        _set_onboarding_data(user, "preventive_missing", missing)
         user.onboarding_state = "awaiting_prev_retry"
         db.commit()
 
@@ -2048,6 +2049,7 @@ async def _step_prev_retry(db, user, text, send_fn):
             _set_onboarding_data(user, "preventive_date_clarify_sent", True)
             db.commit()
             _AMB_NAMES = {
+                "vaccines": "vaccines",
                 "deworming": "deworming",
                 "flea_tick": "flea & tick treatment",
                 "blood_test": "blood tests",
@@ -2891,6 +2893,9 @@ async def _store_preventive_data(db, pet, parsed: dict) -> list[str]:
                         "No master for selected vaccine '%s' species=%s",
                         vname, pet.species,
                     )
+        else:
+            # User mentioned vaccines but the date couldn't be parsed — flag for clarification.
+            ambiguous.append("vaccines")
 
     # --- Specific vaccines → update only the named master(s) ---
     for spec in parsed.get("vaccine_specifics") or []:

@@ -35,7 +35,6 @@ from app.core.constants import (
     FAREWELLS,
     GREETINGS,
     HELP_COMMANDS,
-    MAX_CONCURRENT_EXTRACTIONS,
     MAX_CONCURRENT_UPLOAD_PROCESSING,
     MAX_PENDING_DOCS_PER_PET,
     MAX_PETS_PER_USER,
@@ -65,9 +64,9 @@ from app.core.constants import (
 from app.core.encryption import decrypt_field
 from app.core.log_sanitizer import mask_phone
 
-# Semaphore to limit concurrent background extraction tasks.
-# Prevents DB connection pool exhaustion when many documents are uploaded.
-_extraction_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EXTRACTIONS)
+# Extraction semaphore — shared across ALL upload paths (WhatsApp + dashboard).
+# Imported from document_upload so any tuning change applies everywhere at once.
+from app.services.document_upload import get_extraction_semaphore as _get_extraction_semaphore  # noqa: E402
 
 # Semaphore to limit concurrent document upload *processing* tasks system-wide.
 # When a user sends 20 files at once, 20 background tasks would simultaneously
@@ -1648,7 +1647,7 @@ async def _delayed_batch_extraction(
         # Each extraction is given a 120s timeout to prevent one stuck GPT
         # call from blocking the entire pipeline for all other users.
         for idx, doc in enumerate(pending_docs, 1):
-            async with _extraction_semaphore:
+            async with _get_extraction_semaphore():
                 try:
                     # Download file content from storage (GCP or Supabase) for GPT processing.
                     from app.services.document_upload import download_from_supabase

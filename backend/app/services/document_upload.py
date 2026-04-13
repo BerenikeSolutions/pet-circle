@@ -31,6 +31,7 @@ Note on pet photos:
       are intentionally not routed through GCP.
 """
 
+import asyncio
 import logging
 from datetime import datetime
 from uuid import UUID
@@ -42,6 +43,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.core.constants import (
     ALLOWED_MIME_TYPES,
+    MAX_CONCURRENT_EXTRACTIONS,
     MAX_UPLOAD_BYTES,
     MAX_UPLOAD_MB,
     MAX_UPLOADS_PER_PET_PER_DAY,
@@ -51,6 +53,36 @@ from app.models.document import Document
 from app.utils.date_utils import IST
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Shared extraction semaphore — single source of truth for all upload paths.
+#
+# Both WhatsApp batch extraction (message_router) and dashboard immediate
+# extraction (dashboard router) acquire this semaphore before opening a DB
+# session for GPT processing.  A single shared semaphore means:
+#   - Any change to MAX_CONCURRENT_EXTRACTIONS applies everywhere at once.
+#   - WhatsApp and dashboard uploads compete fairly for the same pool budget
+#     instead of each path having its own independent limit that together
+#     could still exhaust the pool.
+#   - Total concurrent DB sessions from extraction ≤ MAX_CONCURRENT_EXTRACTIONS
+#     regardless of which path triggered the upload.
+# ---------------------------------------------------------------------------
+_extraction_semaphore: asyncio.Semaphore | None = None
+
+
+def get_extraction_semaphore() -> asyncio.Semaphore:
+    """
+    Return the process-wide document extraction concurrency semaphore.
+
+    Lazily created on first call so it always belongs to the running event
+    loop.  Both WhatsApp batch extraction and dashboard uploads must acquire
+    this semaphore before starting a GPT extraction task.
+    """
+    global _extraction_semaphore
+    if _extraction_semaphore is None:
+        _extraction_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EXTRACTIONS)
+    return _extraction_semaphore
+
 
 # Cached Supabase client — created once, reused across uploads.
 _supabase_client = None

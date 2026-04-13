@@ -22,6 +22,7 @@ Rules:
     - Pending reminders invalidated when dates change.
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -115,6 +116,10 @@ from app.utils.date_utils import parse_date
 
 logger = logging.getLogger(__name__)
 
+# Extraction semaphore — shared with the WhatsApp upload path.
+# Imported from document_upload (single source of truth) so tuning
+# MAX_CONCURRENT_EXTRACTIONS in constants.py applies to both paths at once.
+from app.services.document_upload import get_extraction_semaphore as _get_extraction_semaphore  # noqa: E402
 
 router = APIRouter(
     prefix="/dashboard",
@@ -643,15 +648,7 @@ async def dashboard_upload_document(
     db: Session = Depends(get_db),
 ):
     """Upload a document from the dashboard and trigger GPT extraction."""
-    import asyncio
-
-    from app.services.document_upload import (
-        build_storage_path,
-        check_daily_upload_limit,
-        create_document_record,
-        validate_file_upload,
-    )
-    from app.services.storage_service import upload_file as storage_upload
+    from app.services.document_upload import process_document_upload
 
     try:
         dt = validate_dashboard_token(db, token)
@@ -669,43 +666,45 @@ async def dashboard_upload_document(
     mime_type = file.content_type or "application/octet-stream"
     filename = file.filename or "upload"
 
-    # Validate
+    # Validate, upload to storage, and create the DB record — all via the
+    # shared pipeline in document_upload.py.  Any fix there applies to both
+    # WhatsApp and dashboard uploads automatically.
     try:
-        validate_file_upload(len(file_content), mime_type)
-        check_daily_upload_limit(db, pet.id, pet.name)
+        document = await process_document_upload(
+            db=db,
+            pet_id=pet.id,
+            user_id=pet.user_id,
+            filename=filename,
+            file_content=file_content,
+            mime_type=mime_type,
+            pet_name=pet.name,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-    # Upload to GCP (primary) or Supabase (fallback)
-    try:
-        storage_path = build_storage_path(pet.user_id, pet.id, filename)
-        _, backend = await storage_upload(file_content, storage_path, mime_type)
     except RuntimeError:
         raise HTTPException(status_code=503, detail="File upload failed. Please try again.")
 
-    # Create DB record
-    document = create_document_record(
-        db, pet.id, storage_path, mime_type,
-        original_filename=filename,
-        storage_backend=backend,
-    )
-
-    # Trigger extraction in background
+    # Trigger GPT extraction in background, gated by the shared extraction
+    # semaphore (document_upload.get_extraction_semaphore).  The same semaphore
+    # is used by the WhatsApp batch extractor, so WhatsApp and dashboard uploads
+    # compete fairly for the DB pool budget — no separate per-path limits that
+    # could together still exhaust the pool.
     async def _run_extraction():
         from app.database import SessionLocal
         from app.services.gpt_extraction import extract_and_process_document
-        extraction_db = SessionLocal()
-        try:
-            await extract_and_process_document(
-                db=extraction_db,
-                document_id=document.id,
-                document_text="",
-                file_bytes=file_content,
-            )
-        except Exception as exc:
-            logger.error("Dashboard upload extraction failed: doc=%s, error=%s", document.id, exc)
-        finally:
-            extraction_db.close()
+        async with _get_extraction_semaphore():
+            extraction_db = SessionLocal()
+            try:
+                await extract_and_process_document(
+                    db=extraction_db,
+                    document_id=document.id,
+                    document_text="",
+                    file_bytes=file_content,
+                )
+            except Exception as exc:
+                logger.error("Dashboard upload extraction failed: doc=%s, error=%s", document.id, exc)
+            finally:
+                extraction_db.close()
 
     asyncio.create_task(_run_extraction())
 
