@@ -1621,12 +1621,22 @@ async def _step_supplements_v2(db, user, text, send_fn):
     _set_onboarding_data(user, "preventive_attempts", 0)
     _set_onboarding_data(user, "preventive_confirm_pending", False)
     _set_onboarding_data(user, "preventive_example_shown", _PREVENTIVE_EXAMPLE)
+    # Flag flea/tick as excluded from expectations when the puppy is under 8 weeks —
+    # most products are not safe at that age so we should not prompt for it.
+    _age_wks = _get_age_in_weeks(pet)
+    _set_onboarding_data(
+        user, "preventive_flea_excluded",
+        bool(_age_wks is not None and _age_wks < 8),
+    )
     db.commit()
 
+    _puppy_q = _age_appropriate_preventive_question(pet)
     await send_fn(
         db, mobile,
-        f"What do you remember about {pet.name}'s vaccines, deworming, flea & tick, "
-        f"and blood tests? (e.g., {_PREVENTIVE_EXAMPLE} — rough is fine).",
+        _puppy_q if _puppy_q else (
+            f"What do you remember about {pet.name}'s vaccines, deworming, flea & tick, "
+            f"and blood tests? (e.g., {_PREVENTIVE_EXAMPLE} — rough is fine)."
+        ),
     )
 
 
@@ -1649,6 +1659,7 @@ async def _step_preventive(db, user, text, send_fn):
     od = _get_onboarding_data(user)
     confirm_pending = od.get("preventive_confirm_pending", False)
     example_shown = od.get("preventive_example_shown", "")
+    flea_excluded = od.get("preventive_flea_excluded", False)
 
     # --- Handle confirmation reply (user was asked "Is this your pet's history?") ---
     if confirm_pending:
@@ -1657,10 +1668,15 @@ async def _step_preventive(db, user, text, send_fn):
             binary_reply = _resolve_binary_confirmation_reply(text_lower)
             if binary_reply == "no":
                 db.commit()
+                _preventive_items = (
+                    "vaccines, deworming, and blood tests"
+                    if flea_excluded
+                    else "vaccines, deworming, flea & tick, and blood tests"
+                )
                 await send_fn(
                     db, mobile,
                     f"No problem! Could you share what you remember about {pet.name}'s "
-                    f"vaccines, deworming, flea & tick, and blood tests?",
+                    f"{_preventive_items}?",
                 )
                 return
 
@@ -1673,10 +1689,15 @@ async def _step_preventive(db, user, text, send_fn):
             )
             if final_preventive == "__reject__":
                 db.commit()
+                _reject_items = (
+                    "vaccines, deworming, and blood tests"
+                    if flea_excluded
+                    else "vaccines, deworming, flea & tick, and blood tests"
+                )
                 await send_fn(
                     db, mobile,
                     f"No problem! Could you share what you remember about {pet.name}'s "
-                    f"vaccines, deworming, flea & tick, and blood tests?",
+                    f"{_reject_items}?",
                 )
                 return
             # Parse the confirmed/modified preventive text.
@@ -1700,11 +1721,15 @@ async def _step_preventive(db, user, text, send_fn):
     # Run before the grace pass so that food/supplement data is saved rather than discarded.
     prior_classification = await _classify_prior_step_input(text, "awaiting_preventive")
     if prior_classification in ("food", "supplement"):
+        _reask_preventive_items = (
+            "vaccines, deworming, and blood tests"
+            if flea_excluded
+            else "vaccines, deworming, flea & tick, and blood tests"
+        )
         reask = (
             f"Got it, added that to {pet.name}'s "
             f"{'diet' if prior_classification == 'food' else 'supplements'}. "
-            f"What do you remember about {pet.name}'s vaccines, deworming, "
-            f"flea & tick, and blood tests? (rough is fine)."
+            f"What do you remember about {pet.name}'s {_reask_preventive_items}? (rough is fine)."
         )
         await _save_prior_step_dietary_input(
             db, user, pet, text, prior_classification, send_fn, reask
@@ -1737,7 +1762,12 @@ async def _step_preventive(db, user, text, send_fn):
             if k != "missing" and v and not parsed.get(k):
                 parsed[k] = v
         # Recalculate missing after merge.
-        all_fields_check = {"vaccines", "deworming", "flea_tick", "blood_test"}
+        # Exclude flea_tick for puppies under 8 weeks (products not safe yet).
+        all_fields_check = (
+            {"vaccines", "deworming", "blood_test"}
+            if flea_excluded
+            else {"vaccines", "deworming", "flea_tick", "blood_test"}
+        )
         parsed["missing"] = [
             f for f in all_fields_check if not parsed.get(f) or parsed.get(f) == "none"
         ]
@@ -1746,14 +1776,28 @@ async def _step_preventive(db, user, text, send_fn):
     missing = parsed.get("missing", [])
 
     # If ALL fields are missing (nothing parsed at all), clarify with AI first.
-    all_fields = {"vaccines", "deworming", "flea_tick", "blood_test"}
+    all_fields = (
+        {"vaccines", "deworming", "blood_test"}
+        if flea_excluded
+        else {"vaccines", "deworming", "flea_tick", "blood_test"}
+    )
     if set(missing) == all_fields and attempts < 1:
         _set_onboarding_data(user, "preventive_attempts", 1)
         db.commit()
+        _clarify_context = (
+            "the pet's preventive care history — vaccines, deworming, and blood tests"
+            if flea_excluded
+            else "the pet's preventive care history — vaccines, deworming, flea & tick treatment, and blood tests"
+        )
+        _default_fmt = (
+            "e.g., vaccines last Dec, deworming Jan, no blood test yet"
+            if flea_excluded
+            else "e.g., vaccines last Dec, deworming Jan, flea 2 months ago, no blood test yet"
+        )
         clarification = await _ai_clarify_input(
             user_message=text,
-            step_context="the pet's preventive care history — vaccines, deworming, flea & tick treatment, and blood tests",
-            expected_format=f"e.g., {example_shown}" if example_shown else "e.g., vaccines last Dec, deworming Jan, flea 2 months ago, no blood test yet",
+            step_context=_clarify_context,
+            expected_format=f"e.g., {example_shown}" if example_shown else _default_fmt,
             pet_name=pet.name,
         )
         await send_fn(db, mobile, clarification)
@@ -1771,7 +1815,14 @@ async def _step_preventive(db, user, text, send_fn):
         _set_onboarding_data(user, "preventive_missing", missing)
         user.onboarding_state = "awaiting_vaccine_type"
         db.commit()
-        await send_fn(db, mobile, _vaccine_type_question(pet.name))
+        # Use a puppy-series question for dogs under 1 year; adults get the standard question.
+        _vax_age_wks = _get_age_in_weeks(pet)
+        _vax_q = (
+            _puppy_vaccine_question(pet.name, _vax_age_wks)
+            if _vax_age_wks is not None and _vax_age_wks < 52
+            else _vaccine_type_question(pet.name)
+        )
+        await send_fn(db, mobile, _vax_q)
         return
 
     if needs_flea_brand_q:
@@ -2010,6 +2061,35 @@ def _vaccine_type_question(pet_name: str) -> str:
         f"3️⃣ Mandatory + Kennel Cough\n"
         f"4️⃣ All four (Rabies, DHPPi, Corona, Kennel Cough)"
     )
+
+
+def _puppy_vaccine_question(pet_name: str, age_weeks: float) -> str:
+    """Build a vaccine question tuned for the puppy dose-series stage (< 52 weeks)."""
+    if age_weeks < 10:
+        return (
+            f"Which DHPP dose has {pet_name} received so far?\n\n"
+            f"The typical puppy vaccine schedule:\n"
+            f"• 1st dose: 6–8 weeks\n"
+            f"• 2nd booster: 10 weeks\n"
+            f"• 3rd dose + Rabies: 14–16 weeks\n\n"
+            f"Reply with:\n"
+            f"1️⃣ 1st dose given\n"
+            f"2️⃣ 1st + 2nd doses given\n"
+            f"3️⃣ All three doses + Rabies completed\n"
+            f"4️⃣ Not started yet"
+        )
+    if age_weeks < 16:
+        return (
+            f"Which vaccines has {pet_name} received?\n\n"
+            f"At this age, the 3rd DHPP dose and first Rabies are typically due.\n\n"
+            f"Reply with:\n"
+            f"1️⃣ 1st dose only\n"
+            f"2️⃣ 1st + 2nd doses\n"
+            f"3️⃣ All three DHPP doses + Rabies completed\n"
+            f"4️⃣ Not started yet"
+        )
+    # 16 weeks to < 1 year — series likely complete; use the standard question.
+    return _vaccine_type_question(pet_name)
 
 
 def _flea_brand_question(pet_name: str) -> str:
@@ -3385,6 +3465,72 @@ def _age_text_from_dob(dob: date) -> str:
     if months == 0:
         return f"{years} year{'s' if years != 1 else ''}"
     return f"{years} year{'s' if years != 1 else ''} {months} month{'s' if months != 1 else ''}"
+
+
+def _get_age_in_weeks(pet) -> float | None:
+    """Return pet's age in weeks from pet.dob. Returns None if DOB is unknown."""
+    if not pet.dob:
+        return None
+    return max(0.0, (date.today() - pet.dob).days / 7)
+
+
+def _age_appropriate_preventive_question(pet) -> str | None:
+    """
+    Return an age-contextualised initial preventive question for puppies (< 52 weeks).
+
+    Returns None for adults (>= 52 weeks) or unknown age so the caller falls
+    through to the existing generic question unchanged.
+    """
+    age_weeks = _get_age_in_weeks(pet)
+    if age_weeks is None or age_weeks >= 52:
+        return None  # Adult / unknown — use existing question
+
+    name = pet.name
+    age_label = pet.age_text or "at this age"
+
+    if age_weeks < 2:
+        return (
+            f"{name} is very young, so most preventive care hasn't started yet. "
+            f"Has any deworming or vaccination been given so far? "
+            f"(Most vets begin deworming from 2 weeks.)"
+        )
+    if age_weeks < 6:
+        # 2–6 weeks: deworming only; vaccines and flea/tick not yet due
+        return (
+            f"At {age_label}, deworming is the key priority — typically every 2 weeks until "
+            f"8 weeks. Has {name}'s deworming been started?\n\n"
+            f"(Vaccination and flea & tick prevention are not yet due at this stage.)"
+        )
+    if age_weeks < 8:
+        # 6–8 weeks: first DHPP due + deworming ongoing; flea/tick not yet safe
+        return (
+            f"At {age_label}, the first DHPP vaccination is typically started, and deworming "
+            f"continues every 2 weeks.\n\n"
+            f"Has {name}'s first DHPP dose been given? Is deworming ongoing?\n\n"
+            f"_(Flea & tick prevention is not yet safe — safe options start from 8 weeks.)_"
+        )
+    if age_weeks < 10:
+        # 8–10 weeks: first DHPP if not done + monthly deworming + flea/tick now safe
+        return (
+            f"At {age_label}, {name} should have the first DHPP dose (if not already done), "
+            f"be on monthly deworming, and flea & tick prevention can now start safely.\n\n"
+            f"What do you remember? (e.g., DHPP 1st dose done, deworming ongoing, "
+            f"no flea product yet — rough is fine.)"
+        )
+    if age_weeks < 14:
+        # 10–14 weeks: 2nd DHPP booster due
+        return (
+            f"At {age_label}, the 2nd DHPP booster is typically due.\n\n"
+            f"Has it been given? Also, is {name} on monthly deworming and flea & tick prevention? "
+            f"(e.g., 2nd DHPP given, deworming last month, Bravecto started — rough is fine.)"
+        )
+    # 14 weeks – 1 year: 3rd DHPP + first Rabies due
+    return (
+        f"At {age_label}, the 3rd DHPP dose and first Rabies vaccine are typically due "
+        f"(if not already given).\n\n"
+        f"Has {name} received these? Also note deworming and flea & tick status. "
+        f"(e.g., 3rd DHPP + Rabies done, deworming monthly, Nexgard ongoing — rough is fine.)"
+    )
 
 
 async def _parse_breed_age(text: str) -> dict:
@@ -5132,9 +5278,24 @@ def seed_preventive_records_for_pet(db: Session, pet: Pet) -> int:
         if row[0] is not None
     }
 
+    # Compute pet age for age-gated seeding decisions.
+    _seed_age_weeks = (
+        (date.today() - pet.dob).days / 7 if pet.dob else None
+    )
+
     count = 0
     for master in masters:
         if master.id in existing_master_ids:
+            continue
+        # Tick/Flea products are not safe for dogs younger than 8 weeks.
+        # Skip seeding the record so the care plan does not surface it.
+        # It will be seeded on the next seed run once the pet reaches 8 weeks.
+        if (
+            master.item_name == "Tick/Flea"
+            and pet.species == "dog"
+            and _seed_age_weeks is not None
+            and _seed_age_weeks < 8
+        ):
             continue
         try:
             # Use a savepoint so individual failures only roll back this insert,

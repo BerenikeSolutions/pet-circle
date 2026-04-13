@@ -977,8 +977,20 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
         # non-puppy pets.  Adults should only see the annual DHPPi + Rabies.
         _skip_puppy_series = life_stage != LifeStage.PUPPY
 
+        # Tick/Flea prevention is not safe for dogs younger than 8 weeks.
+        # Hide it from the care plan so we do not prompt owners to apply
+        # products that are contraindicated at this age.
+        _pet_age_days = (date.today() - pet.dob).days if pet.dob else None
+        _skip_flea_tick = (
+            getattr(pet, "species", None) == "dog"
+            and _pet_age_days is not None
+            and _pet_age_days < 56  # 8 weeks × 7 days
+        )
+
         for record, master, custom_item in record_rows:
             if master and _skip_puppy_series and master.recurrence_days and master.recurrence_days >= 36500:
+                continue
+            if _skip_flea_tick and master and master.item_name == "Tick/Flea":
                 continue
 
             item_name = (
@@ -1106,6 +1118,9 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
         _mandatory_phantom_types: set[str] = {"vaccine", "deworming", "tick_flea"}
         for master in mandatory_masters:
             if _skip_puppy_series and master.recurrence_days and master.recurrence_days >= 36500:
+                continue
+            # Do not surface Tick/Flea as a mandatory "Quick Fix" for dogs < 8 weeks.
+            if _skip_flea_tick and master.item_name == "Tick/Flea":
                 continue
             test_type = _normalize_item_name(master.item_name)
             if test_type not in _mandatory_phantom_types:
