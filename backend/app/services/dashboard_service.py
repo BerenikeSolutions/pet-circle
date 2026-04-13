@@ -860,6 +860,10 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         "owner": {
             "full_name": user.full_name if user else None,
             "pincode": decrypt_field(user.pincode) if (user and user.pincode) else None,
+            "mobile_display": user.mobile_display if user else None,
+            "delivery_address": user.delivery_address if user else None,
+            "payment_method_pref": user.payment_method_pref if user else None,
+            "saved_upi_id": decrypt_field(user.saved_upi_id) if (user and user.saved_upi_id) else None,
         },
         "preventive_records": preventive_records,
         "reminders": reminder_data,

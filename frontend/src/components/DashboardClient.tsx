@@ -250,6 +250,10 @@ function DashboardInner({ token }: { token: string }) {
 
     await loadRazorpayScript();
 
+    // Pre-fill saved UPI VPA so the user doesn't retype it.
+    // Razorpay's modal will still show and the user can change it.
+    const savedVpa = data?.owner.saved_upi_id ?? "";
+
     await new Promise<void>((resolve, reject) => {
       const options = {
         key: key_id,
@@ -261,9 +265,7 @@ function DashboardInner({ token }: { token: string }) {
         prefill: {
           name: details.name,
           contact: details.phone,
-          ...(details.paymentMethod === "upi" && details.upiId
-            ? { vpa: details.upiId }
-            : {}),
+          ...(details.paymentMethod === "upi" && savedVpa ? { vpa: savedVpa } : {}),
         },
         method:
           details.paymentMethod === "upi"
@@ -302,7 +304,7 @@ function DashboardInner({ token }: { token: string }) {
       const rzp = new (window as any).Razorpay(options);
       rzp.open();
     });
-  }, [token, cart, cartTotal]);
+  }, [token, cart, cartTotal, data]);
 
   if (!isOnline && !data && !loading) {
     return (
@@ -421,6 +423,10 @@ function DashboardInner({ token }: { token: string }) {
           <CheckoutView
             total={cartTotal}
             initialName={data.owner.full_name || ""}
+            initialPhone={data.owner.mobile_display || ""}
+            initialPincode={data.owner.pincode || ""}
+            initialAddress={data.owner.delivery_address || ""}
+            initialPaymentMethod={data.owner.payment_method_pref || undefined}
             onBack={() => setView("cart")}
             onPlaceOrder={handlePlaceOrder}
           />

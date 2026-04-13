@@ -31,10 +31,15 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
 
+import razorpay as razorpay_sdk
+
+from app.config import settings
 from app.core.constants import CARE_PLAN_DUE_SOON_DAYS
+from app.core.encryption import encrypt_field
 from app.core.rate_limiter import check_dashboard_rate_limit
 from app.database import get_db
 from app.models.cart_item import CartItem
+from app.models.user import User
 from app.models.condition import Condition
 from app.models.diet_item import DietItem
 from app.models.product_food import ProductFood
@@ -2045,7 +2050,19 @@ async def dashboard_place_order(
     """Place a COD order. For UPI/card/netbanking use /create-payment instead."""
     try:
         dt = validate_dashboard_token(db, token)
-        return await place_order(db, dt.pet_id, dt.user_id, body.payment_method, body.address, body.coupon)
+        result = await place_order(db, dt.pet_id, dt.user_id, body.payment_method, body.address, body.coupon)
+        # Save checkout preferences so next checkout can prefill these fields.
+        # Best-effort — never blocks the order response.
+        try:
+            user = db.query(User).filter(User.id == dt.user_id).first()
+            if user:
+                if body.address and body.address.get("address"):
+                    user.delivery_address = body.address["address"]
+                user.payment_method_pref = "cod"
+                db.commit()
+        except Exception as pref_err:
+            logger.warning("Failed to save COD checkout preferences: %s", str(pref_err))
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -2082,7 +2099,7 @@ async def dashboard_create_payment(
     """
     try:
         dt = validate_dashboard_token(db, token)
-        return await create_razorpay_payment(
+        result = await create_razorpay_payment(
             db,
             pet_id=dt.pet_id,
             user_id=dt.user_id,
@@ -2091,6 +2108,19 @@ async def dashboard_create_payment(
             coupon=body.coupon,
             coupon_discount_percent=body.coupon_discount_percent,
         )
+        # Save address and payment method preference eagerly so the next
+        # checkout can prefill them even if payment is abandoned.
+        # Best-effort — never blocks the response.
+        try:
+            user = db.query(User).filter(User.id == dt.user_id).first()
+            if user:
+                if body.address and body.address.get("address"):
+                    user.delivery_address = body.address["address"]
+                user.payment_method_pref = body.payment_method
+                db.commit()
+        except Exception as pref_err:
+            logger.warning("Failed to save payment method preference: %s", str(pref_err))
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
@@ -2112,10 +2142,12 @@ async def dashboard_verify_payment(
 
     Called by frontend after Razorpay checkout succeeds.
     Verifies the HMAC-SHA256 signature, marks order as paid, clears cart.
+    After verification, fetches UPI VPA from Razorpay API and saves it
+    encrypted so the next UPI checkout can prefill the VPA.
     """
     try:
         dt = validate_dashboard_token(db, token)
-        return await verify_razorpay_payment(
+        result = await verify_razorpay_payment(
             db,
             pet_id=dt.pet_id,
             order_db_id=body.order_db_id,
@@ -2123,6 +2155,22 @@ async def dashboard_verify_payment(
             razorpay_payment_id=body.razorpay_payment_id,
             razorpay_signature=body.razorpay_signature,
         )
+        # Fetch payment details from Razorpay to get the UPI VPA and save
+        # it encrypted for next-checkout prefill. Best-effort — never blocks.
+        try:
+            if settings.RAZORPAY_KEY_ID and settings.RAZORPAY_KEY_SECRET:
+                rzp_client = razorpay_sdk.Client(
+                    auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
+                )
+                payment_details = rzp_client.payment.fetch(body.razorpay_payment_id)
+                if payment_details.get("method") == "upi" and payment_details.get("vpa"):
+                    user = db.query(User).filter(User.id == dt.user_id).first()
+                    if user:
+                        user.saved_upi_id = encrypt_field(payment_details["vpa"])
+                        db.commit()
+        except Exception as pref_err:
+            logger.warning("Failed to save UPI VPA preference: %s", str(pref_err))
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:

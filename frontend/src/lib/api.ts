@@ -26,6 +26,10 @@ export interface PetProfile {
 export interface OwnerInfo {
   full_name: string | null;
   pincode: string | null;
+  mobile_display: string | null;
+  delivery_address: string | null;
+  payment_method_pref: "cod" | "upi" | "card" | null;
+  saved_upi_id: string | null;
 }
 
 export interface PreventiveRecord {
