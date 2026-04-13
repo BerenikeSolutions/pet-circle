@@ -436,8 +436,8 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         if _is_adult_dog and master.recurrence_days and master.recurrence_days >= 36500:
             continue
 
-        # Hide non-core vaccines unless the user has a logged completion date.
-        if _is_vaccine_item_name(master.item_name) and not _is_core_vaccine(master) and not record.last_done_date:
+        # Hide non-mandatory vaccines unless the user has a logged completion date.
+        if _is_vaccine_item_name(master.item_name) and not master.is_mandatory and not record.last_done_date:
             continue
 
         if _is_vaccine_item_name(master.item_name):
@@ -511,9 +511,9 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         if _is_adult_dog and master.recurrence_days and master.recurrence_days >= 36500:
             continue
 
-        # Inject only core vaccines by default. Non-core vaccines should
+        # Inject only mandatory vaccines by default. Non-mandatory vaccines should
         # appear only after a logged completion date exists.
-        if _is_vaccine_item_name(master.item_name) and not _is_core_vaccine(master):
+        if _is_vaccine_item_name(master.item_name) and not master.is_mandatory:
             continue
 
         if master.item_name not in existing_names:
