@@ -113,7 +113,23 @@ QUERY_SYSTEM_PROMPT = (
     "- When summarising what has been done vs what is upcoming, keep the two lists separate: "
     "(1) completed/tracked items with dates, (2) recommended additions the parent may want to "
     "consider. Do NOT lump them into one list.\n"
-    "- Format responses for WhatsApp (use *bold* for emphasis, keep it readable)."
+    "- Format responses for WhatsApp (use *bold* for emphasis, keep it readable).\n"
+    "- CONVERSATION CONTEXT: You may be given previous messages from this conversation. "
+    "Use them to understand what the user is referring to. Short follow-up messages like "
+    "'what about X?', 'and the next one?', 'is that normal?', or 'tell me more' refer to "
+    "the topic just discussed — resolve them using the prior exchange before answering. "
+    "Always interpret ambiguous or incomplete messages in light of the conversation history. "
+    "Never ask the user to repeat themselves if the context makes their intent clear.\n"
+    "- COLLOQUIAL RESPONSES: When the user sends a short casual message like 'cool', 'great', "
+    "'ok', 'awesome', 'perfect', 'thanks', 'got it', or similar, treat it as an acknowledgment "
+    "of what was just discussed. Respond warmly and briefly in context — for example, if you "
+    "just told them about their pet's upcoming vaccination, a reply of 'great' should get a "
+    "response like 'Glad that's helpful! Let me know if you have any other questions about "
+    "[pet name].' Do NOT re-summarise the previous answer. Keep the reply short and warm.\n"
+    "- FAREWELLS: When the user says goodbye ('bye', 'see you', 'cya', etc.), close the "
+    "conversation warmly and in context. Reference what was just discussed if relevant — "
+    "e.g. if you just reminded them about Max's deworming, say something like 'Bye! Hope "
+    "Max's deworming goes smoothly! 🐾 I'm always here when you need me.' Keep it brief."
 )
 
 
@@ -505,6 +521,7 @@ async def answer_pet_question(
     db: Session,
     pet_id: UUID,
     question: str,
+    conversation_history: list[dict] | None = None,
 ) -> dict:
     """
     Answer a user's question about their pet using GPT.
@@ -514,8 +531,9 @@ async def answer_pet_question(
 
     Pipeline:
         1. Build context from pet's DB records.
-        2. Send context + question to GPT (gpt-4.1 from constants).
-        3. Return the grounded answer.
+        2. Build multi-turn messages array from conversation history (if any).
+        3. Send combined system prompt (rules + pet data) + messages to GPT.
+        4. Return the grounded answer.
 
     On GPT failure:
         - Return a user-friendly error message.
@@ -524,7 +542,11 @@ async def answer_pet_question(
     Args:
         db: SQLAlchemy database session.
         pet_id: UUID of the pet being queried.
-        question: The user's question text.
+        question: The user's current question text.
+        conversation_history: Optional list of prior turns as
+            [{"role": "user"|"assistant", "content": str}, ...].
+            Used so the model can resolve follow-up questions and
+            short references without the user repeating context.
 
     Returns:
         Dictionary with:
@@ -534,11 +556,28 @@ async def answer_pet_question(
     # Build context from pet's database records.
     context = _build_pet_context(db, pet_id)
 
-    # Construct the user message with context and question.
-    user_message = (
-        f"Here is the pet's data:\n\n{context}\n\n"
-        f"User question: {question}"
+    # Embed pet data directly in the system prompt so it is available
+    # across all conversation turns without repeating it per message.
+    system_with_context = (
+        QUERY_SYSTEM_PROMPT
+        + "\n\n=== Pet Data ===\n"
+        + context
     )
+
+    # Build messages array: prior turns (if any) + current question.
+    # The Anthropic API requires the first message to have role "user".
+    # Filter out any leading assistant turns defensively before appending.
+    messages: list[dict] = []
+    if conversation_history:
+        for turn in conversation_history:
+            role = turn.get("role", "")
+            content = turn.get("content", "")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+        # Strip any leading assistant turns so the array always starts with "user".
+        while messages and messages[0]["role"] == "assistant":
+            messages.pop(0)
+    messages.append({"role": "user", "content": question})
 
     try:
         # Reuse cached client — avoids recreating on every query.
@@ -550,10 +589,8 @@ async def answer_pet_question(
                 model=OPENAI_QUERY_MODEL,
                 temperature=OPENAI_QUERY_TEMPERATURE,
                 max_tokens=OPENAI_QUERY_MAX_TOKENS,
-                system=QUERY_SYSTEM_PROMPT,
-                messages=[
-                    {"role": "user", "content": user_message},
-                ],
+                system=system_with_context,
+                messages=messages,
             )
             return response.content[0].text
 

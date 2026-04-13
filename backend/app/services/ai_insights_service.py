@@ -927,17 +927,16 @@ async def generate_care_plan_reasons(
     client = _get_openai_client()
 
     async def _call() -> str:
-        response = await client.chat.completions.create(
+        response = await client.messages.create(
             model=OPENAI_QUERY_MODEL,
             temperature=0,
             max_tokens=500,
-            response_format={"type": "json_object"},
+            system=system_prompt,
             messages=[
-                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         )
-        return response.choices[0].message.content or "{}"
+        return response.content[0].text or "{}"
 
     try:
         raw = await retry_openai_call(_call)

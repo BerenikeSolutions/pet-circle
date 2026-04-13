@@ -33,11 +33,11 @@ _openai_fun_fact_client = None
 
 
 def _get_openai_client():
-    """Return a cached AsyncOpenAI client for fun fact generation."""
+    """Return a cached AsyncAnthropic client for fun fact generation."""
     global _openai_fun_fact_client
     if _openai_fun_fact_client is None:
-        from openai import AsyncOpenAI
-        _openai_fun_fact_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        from anthropic import AsyncAnthropic
+        _openai_fun_fact_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
     return _openai_fun_fact_client
 
 
@@ -268,24 +268,22 @@ async def _generate_breed_facts_with_ai(breed: str, species: str) -> list[str]:
 
     try:
         client = _get_openai_client()
-        response = await client.chat.completions.create(
+        response = await client.messages.create(
             model=OPENAI_QUERY_MODEL,
             temperature=0.8,
+            max_tokens=512,
+            system=(
+                "You generate short, fun, surprising facts about pet breeds. "
+                "Return a JSON array of exactly 3 strings. No markdown, no extra text."
+            ),
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You generate short, fun, surprising facts about pet breeds. "
-                        "Return a JSON array of exactly 3 strings. No markdown, no extra text."
-                    ),
-                },
                 {
                     "role": "user",
                     "content": f"Generate 3 short, fun, surprising facts about {breed} {species}s.",
                 },
             ],
         )
-        raw = response.choices[0].message.content.strip()
+        raw = response.content[0].text.strip()
         facts = json.loads(raw)
         if isinstance(facts, list) and len(facts) >= 1:
             facts = _dedupe_facts([str(f) for f in facts[:3]])
@@ -314,18 +312,16 @@ async def _generate_additional_fun_facts_with_ai(
         client = _get_openai_client()
         subject = f"the {breed} breed" if breed else f"{species}s"
         excluded_list = "\n".join(f"- {fact}" for fact in excluded_facts)
-        response = await client.chat.completions.create(
+        response = await client.messages.create(
             model=OPENAI_QUERY_MODEL,
             temperature=0.9,
+            max_tokens=1024,
+            system=(
+                "You generate short, fun, surprising facts about pets. "
+                f"Return a JSON array of exactly {count} unique strings. "
+                "No markdown and no extra text. Do not repeat or closely paraphrase excluded facts."
+            ),
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You generate short, fun, surprising facts about pets. "
-                        f"Return a JSON array of exactly {count} unique strings. "
-                        "No markdown and no extra text. Do not repeat or closely paraphrase excluded facts."
-                    ),
-                },
                 {
                     "role": "user",
                     "content": (
@@ -336,7 +332,7 @@ async def _generate_additional_fun_facts_with_ai(
                 },
             ],
         )
-        raw = response.choices[0].message.content.strip()
+        raw = response.content[0].text.strip()
         facts = json.loads(raw)
         if isinstance(facts, list) and facts:
             excluded_set = {fact.strip() for fact in excluded_facts}

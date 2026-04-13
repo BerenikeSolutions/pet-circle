@@ -292,7 +292,7 @@ async def normalize_breed_with_ai(breed: str, species: str | None = None) -> str
     """
     import logging
 
-    from openai import AsyncOpenAI
+    from anthropic import AsyncAnthropic
 
     from app.config import settings
     from app.core.constants import OPENAI_QUERY_MODEL
@@ -300,29 +300,26 @@ async def normalize_breed_with_ai(breed: str, species: str | None = None) -> str
     logger = logging.getLogger(__name__)
 
     animal = species or "pet"
-    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
 
     try:
-        response = await client.chat.completions.create(
+        response = await client.messages.create(
             model=OPENAI_QUERY_MODEL,
             temperature=0.0,
             max_tokens=30,
+            system=(
+                f"You are a {animal} breed identifier. The user will provide text "
+                f"that may be a breed name, abbreviation, misspelling, or local name. "
+                f"Identify the standardized {animal} breed name and return ONLY the "
+                f"breed name. If it's clearly a mixed breed, return 'Mixed Breed'. "
+                f"If you cannot identify any breed, return 'UNKNOWN'."
+            ),
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        f"You are a {animal} breed identifier. The user will provide text "
-                        f"that may be a breed name, abbreviation, misspelling, or local name. "
-                        f"Identify the standardized {animal} breed name and return ONLY the "
-                        f"breed name. If it's clearly a mixed breed, return 'Mixed Breed'. "
-                        f"If you cannot identify any breed, return 'UNKNOWN'."
-                    ),
-                },
                 {"role": "user", "content": breed},
             ],
         )
 
-        result = response.choices[0].message.content.strip()
+        result = response.content[0].text.strip()
 
         if result == "UNKNOWN":
             return breed.strip().title()

@@ -23,16 +23,16 @@ from app.core.constants import OPENAI_QUERY_MODEL
 
 logger = logging.getLogger(__name__)
 
-# --- OpenAI client singleton (lazy) ---
+# --- Anthropic client singleton (lazy) ---
 _openai_medicine_client = None
 
 
 def _get_openai_client():
-    """Return a cached OpenAI client (created on first call)."""
+    """Return a cached Anthropic client (created on first call)."""
     global _openai_medicine_client
     if _openai_medicine_client is None:
-        from openai import OpenAI
-        _openai_medicine_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        import anthropic
+        _openai_medicine_client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
     return _openai_medicine_client
 
 
@@ -164,17 +164,17 @@ def _gpt_recurrence(
             "\n\nWhat is the recommended interval between doses/applications in days?"
         )
 
-        response = client.chat.completions.create(
+        response = client.messages.create(
             model=OPENAI_QUERY_MODEL,
             temperature=0.0,
             max_tokens=100,
+            system=MEDICINE_RECURRENCE_SYSTEM_PROMPT,
             messages=[
-                {"role": "system", "content": MEDICINE_RECURRENCE_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
         )
 
-        raw = response.choices[0].message.content.strip()
+        raw = response.content[0].text.strip()
         data = json.loads(raw)
         days = data.get("recurrence_days")
 

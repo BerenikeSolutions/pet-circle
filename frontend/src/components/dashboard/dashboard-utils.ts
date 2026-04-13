@@ -243,7 +243,7 @@ export function normalizeMacros(macros: DietMacroSummary[] = []): DietMacroSumma
     return byName.get(name.toLowerCase()) || fallback;
   };
 
-  return [pick("Calories"), pick("Protein"), pick("Omega-3"), pick("Fat")];
+  return [pick("Calories"), pick("Protein"), pick("Fat"), pick("Fibre")];
 }
 
 export function macroStatus(name: string, pct: number): "green" | "amber" | "red" {
@@ -252,7 +252,7 @@ export function macroStatus(name: string, pct: number): "green" | "amber" | "red
     if (pct > 100) return "amber";
     return "green";
   }
-
+  // Protein, Fat, Fibre share the same thresholds
   if (pct > 110) return "amber";
   if (pct < 80) return "red";
   return "green";

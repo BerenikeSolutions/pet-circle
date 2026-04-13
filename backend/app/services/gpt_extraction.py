@@ -27,7 +27,7 @@ Rules:
     - All dates normalized to YYYY-MM-DD.
     - JSON keys strictly validated.
     - Extraction failures never crash the application.
-    - OpenAI API key from environment (settings.OPENAI_API_KEY) — never hardcoded.
+    - Anthropic API key from environment (settings.ANTHROPIC_API_KEY) — never hardcoded.
 """
 
 import json

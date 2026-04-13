@@ -87,6 +87,57 @@ _error_sent: dict[str, str] = {}
 # Files uploaded within this window are considered one batch.
 _UPLOAD_BATCH_WINDOW_SECONDS: int = 120
 
+# --- Conversation history buffer for query engine ---
+# Stores the last N query turns per user so follow-up questions can be
+# resolved in context (e.g. "what about X?", "tell me more", "is that normal?").
+# This is intentionally in-memory: conversation context is session-scoped,
+# not business state, and need not survive server restarts.
+# Key: mobile_number, Value: {"turns": [...], "last_updated": float}
+_query_history: dict[str, dict] = {}
+
+# Maximum number of prior Q&A pairs to keep per user (user + assistant = 2 messages each).
+_QUERY_HISTORY_MAX_PAIRS: int = 3
+
+# Seconds of inactivity before history is discarded.
+_QUERY_HISTORY_TTL_SECONDS: int = 3600  # 1 hour
+
+
+def _get_query_history(mobile_number: str) -> list[dict]:
+    """
+    Return recent conversation turns for a user, or [] if none / expired.
+
+    Each entry is {"role": "user"|"assistant", "content": str}.
+    Expired entries (idle > TTL) are purged on access.
+    """
+    entry = _query_history.get(mobile_number)
+    if not entry:
+        return []
+    if time.time() - entry["last_updated"] > _QUERY_HISTORY_TTL_SECONDS:
+        _query_history.pop(mobile_number, None)
+        return []
+    return list(entry["turns"])
+
+
+def _update_query_history(mobile_number: str, question: str, answer: str) -> None:
+    """
+    Append a user question and assistant answer to the conversation buffer.
+
+    Trims the buffer to the most recent _QUERY_HISTORY_MAX_PAIRS pairs
+    so memory usage stays bounded.
+    """
+    entry = _query_history.setdefault(
+        mobile_number, {"turns": [], "last_updated": 0.0}
+    )
+    turns: list[dict] = entry["turns"]
+    turns.append({"role": "user", "content": question})
+    turns.append({"role": "assistant", "content": answer})
+    # Keep only the last N pairs (2 messages per pair).
+    max_messages = _QUERY_HISTORY_MAX_PAIRS * 2
+    if len(turns) > max_messages:
+        turns = turns[-max_messages:]
+    entry["turns"] = turns
+    entry["last_updated"] = time.time()
+
 # Debounce timers for batch extraction per pet.
 # Key: str(pet_id), Value: asyncio.Task that waits then extracts.
 _extraction_timers: dict[str, asyncio.Task] = {}
@@ -416,7 +467,7 @@ def _should_use_agentic_order() -> bool:
     Falls back to False (deterministic state machine) on any error.
     """
     flag = getattr(settings, "AGENTIC_ORDER_ENABLED", "false")
-    has_key = bool(getattr(settings, "OPENAI_API_KEY", None))
+    has_key = bool(getattr(settings, "ANTHROPIC_API_KEY", None))
     return flag.lower() == "true" and has_key
 
 
@@ -743,20 +794,33 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
         await _send_help_menu(db, from_number, user=user)
         return
 
-    # --- Acknowledgments (thanks, ok, got it) — canned reply ---
+    # --- Acknowledgments (thanks, ok, cool, great …) ---
+    # If the user is mid-conversation (has query history), route to the query
+    # engine so it can respond in context (e.g. "cool" after a vaccination
+    # answer → "Glad that helps! Let me know if you need anything else about Max.").
+    # If there is no prior context, fall back to the canned reply.
     if text_lower in ACKNOWLEDGMENTS:
-        await send_text_message(
-            db, from_number,
-            "You're welcome! Let me know if you need anything else.",
-        )
+        if _get_query_history(from_number):
+            await _handle_query(db, user, text)
+        else:
+            await send_text_message(
+                db, from_number,
+                "You're welcome! Let me know if you need anything else.",
+            )
         return
 
-    # --- Farewells (bye, see you) — canned reply ---
+    # --- Farewells (bye, see you) ---
+    # Mid-conversation: let the LLM close the conversation in context
+    # (e.g. "Bye! Hope Max's vaccination goes well next week! 🐾").
+    # No prior context: canned reply is appropriate.
     if text_lower in FAREWELLS:
-        await send_text_message(
-            db, from_number,
-            "Bye! I'm always here when you need me. Take care! 🐾",
-        )
+        if _get_query_history(from_number):
+            await _handle_query(db, user, text)
+        else:
+            await send_text_message(
+                db, from_number,
+                "Bye! I'm always here when you need me. Take care! 🐾",
+            )
         return
 
     # --- Help / Menu — show available commands ---
@@ -1707,7 +1771,12 @@ async def _delayed_batch_extraction(
 
 
 async def _handle_query(db: Session, user, text: str) -> None:
-    """Handle a general text query via GPT query engine."""
+    """Handle a general text query via GPT query engine.
+
+    Passes the last few conversation turns so the model can resolve
+    follow-up questions in context (e.g. "tell me more", "what about X?").
+    Updates the per-user history buffer after each successful answer.
+    """
     from app.services.query_engine import answer_pet_question
 
     from_number = _get_mobile(user)
@@ -1723,13 +1792,21 @@ async def _handle_query(db: Session, user, text: str) -> None:
         await send_text_message(db, from_number, "Please register a pet first.")
         return
 
+    # Retrieve recent conversation turns for context-aware answering.
+    history = _get_query_history(from_number)
+
     try:
         # 45s timeout prevents a stuck GPT call from hanging the user's session.
         result = await asyncio.wait_for(
-            answer_pet_question(db, pet.id, text),
+            answer_pet_question(db, pet.id, text, conversation_history=history),
             timeout=45,
         )
         answer = result.get("answer", "Sorry, I couldn't find an answer.")
+
+        # Persist this exchange so future messages can reference it.
+        if result.get("status") == "success":
+            _update_query_history(from_number, text, answer)
+
         await send_text_message(db, from_number, answer)
     except TimeoutError:
         logger.error("Query engine timed out for pet %s", str(pet.id))

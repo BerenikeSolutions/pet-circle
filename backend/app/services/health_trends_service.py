@@ -319,18 +319,46 @@ def _build_vaccine_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster]]
 
 
 def _build_flea_tick_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster]]) -> dict[str, Any] | None:
-    """Build flea/tick dot-plot card with gap severity coloring."""
+    """Build flea/tick dot-plot card with gap severity coloring.
+
+    Mirrors deworming logic: shows overdue/upcoming entries even when no
+    last_done_date has been recorded so the card always reflects clinical state.
+    """
     flea_rows = [row for row in rows if _classify_preventive_item(row[1].item_name) == "flea_tick"]
     if not flea_rows:
         return None
 
-    flea_rows = sorted(flea_rows, key=lambda item: (item[0].last_done_date or date.min))
-    doses = []
+    today = date.today()
+    flea_rows = sorted(
+        flea_rows,
+        key=lambda item: (item[0].last_done_date or item[0].next_due_date or date.min),
+    )
+
+    doses: list[dict[str, Any]] = []
     previous_done_date: date | None = None
+    has_undone = False  # True when any row lacks last_done_date
+
     for idx, (record, master) in enumerate(flea_rows, start=1):
+        if not record.last_done_date:
+            # No dose recorded — mirror deworming: overdue or upcoming
+            has_undone = True
+            if record.next_due_date and record.next_due_date < today:
+                status = "overdue"
+            else:
+                status = "upcoming"
+            doses.append({
+                "num": idx,
+                "label": master.item_name,
+                "gap": None,
+                "status": status,
+                "gap_alert": False,
+                "date": record.next_due_date.isoformat() if record.next_due_date else None,
+            })
+            continue
+
         gap_text = None
         status = "green"
-        if record.last_done_date and previous_done_date:
+        if previous_done_date:
             gap_weeks = _gap_in_weeks(previous_done_date, record.last_done_date)
             gap_text = f"{gap_weeks}w"
             if gap_weeks <= 6:
@@ -340,25 +368,55 @@ def _build_flea_tick_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster
             else:
                 status = "red"
 
-        doses.append(
-            {
-                "num": idx,
-                "label": master.item_name,
-                "gap": gap_text,
-                "status": status,
-                "gap_alert": status == "red",
-                "date": record.last_done_date.isoformat() if record.last_done_date else None,
-            }
-        )
-        if record.last_done_date:
-            previous_done_date = record.last_done_date
+        doses.append({
+            "num": idx,
+            "label": master.item_name,
+            "gap": gap_text,
+            "status": status,
+            "gap_alert": status == "red",
+            "date": record.last_done_date.isoformat(),
+        })
+        previous_done_date = record.last_done_date
 
-    red_gap_count = sum(1 for d in doses if d.get("status") == "red")
-    if red_gap_count > 0:
+    # Append an upcoming next-due node for a meaningful L→R timeline, but only
+    # when all existing entries are done (undone entries already cover this role).
+    if not has_undone:
+        latest_next_due = max(
+            (record.next_due_date for record, _ in flea_rows if record.next_due_date),
+            default=None,
+        )
+        if latest_next_due and latest_next_due >= today:
+            doses.append({
+                "num": len(doses) + 1,
+                "label": "Next due",
+                "gap": None,
+                "status": "upcoming",
+                "gap_alert": False,
+                "date": latest_next_due.isoformat(),
+            })
+
+    # Footer — mirrors deworming severity levels
+    real_doses = [d for d in doses if d["status"] not in ("upcoming", "overdue")]
+    has_overdue = any(d["status"] == "overdue" for d in doses)
+    red_gap_count = sum(1 for d in real_doses if d["status"] == "red")
+
+    if has_overdue:
+        footer_text = "⚠ No tick & flea treatment recorded. Administer immediately."
+        footer_color = "#b52020"
+        footer_bg = "#FFEDED"
+    elif not real_doses:
+        footer_text = "No doses given yet. Start protection as soon as possible."
+        footer_color = "#B45309"
+        footer_bg = "#FFF6E6"
+    elif len(real_doses) == 1:
+        footer_text = "First dose recorded. Apply monthly for continuous coverage."
+        footer_color = "#B45309"
+        footer_bg = "#FFF6E6"
+    elif red_gap_count > 0:
         footer_text = "⚠ Critical coverage gaps — discuss with your vet. Gaps coincide with risk of vector-borne infection."
         footer_color = "#B45309"
         footer_bg = "#FFF6E6"
-    elif any(d.get("status") == "amber" for d in doses):
+    elif any(d.get("status") == "amber" for d in real_doses):
         footer_text = "⚠ Some coverage gaps detected. Aim for monthly or 6-weekly dosing."
         footer_color = "#B45309"
         footer_bg = "#FFF6E6"
@@ -401,6 +459,23 @@ def _build_deworming_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster
             }
         )
 
+    # Append a single upcoming node for done records whose next_due_date is in
+    # the future — gives the chart a meaningful L→R timeline with a "next due" dot.
+    done_node_dates = {n["date"] for n in nodes if n["state"] == "done"}
+    for record, master in deworm_rows:
+        if (
+            record.last_done_date
+            and record.next_due_date
+            and record.next_due_date >= today
+            and record.next_due_date.isoformat() not in done_node_dates
+        ):
+            nodes.append({
+                "label": master.item_name,
+                "state": "upcoming",
+                "date": record.next_due_date.isoformat(),
+            })
+            break  # one upcoming node is sufficient
+
     done_count = sum(1 for n in nodes if n["state"] == "done")
     missed_count = sum(1 for n in nodes if n["state"] == "missed")
     has_now = any(n["state"] == "now" for n in nodes)
@@ -422,14 +497,14 @@ def _build_deworming_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster
         headline = f"Only {done_count} dose{'s' if done_count != 1 else ''} in {gap_label}. Significantly overdue."
     elif missed_count > 0 or has_now:
         headline = "Deworming overdue. Administer as soon as possible."
-    elif done_count == len(nodes):
+    elif done_count == len(deworm_rows):
         headline = "Deworming on track."
     else:
         headline = "Deworming cadence"
 
     if missed_count > 0 or has_now:
         footer = {"text": "🚨 Administer immediately", "color": "#b52020", "bg": "var(--tr)"}
-    elif done_count == len(nodes):
+    elif missed_count == 0 and not has_now and done_count > 0:
         footer = {"text": "✓ Deworming on track", "color": "#166534", "bg": "#E9FBEF"}
     else:
         footer = {"text": "Review deworming schedule with your vet.", "color": "#B45309", "bg": "#FFF6E6"}

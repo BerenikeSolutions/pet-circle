@@ -198,129 +198,156 @@ NUTRITION_TARGET_SYSTEM_PROMPT = (
 )
 
 def _build_food_estimation_prompt(
-    species: str | None,
-    breed: str | None,
-    weight_kg: float | None,
-    age_description: str | None,
+    species: str | None = None,
+    breed: str | None = None,
+    weight_kg: float | None = None,
+    age_description: str | None = None,
     gender: str | None = None,
     conditions: list[str] | None = None,
 ) -> str:
     """
-    Build a comprehensive pet-specific food estimation prompt.
+    Build veterinary nutritionist prompt for food analysis.
 
-    Uses a strict veterinary nutritionist decision framework:
-    1. Resolve food identity (exact product, brand, variant)
-    2. Determine serving size (brand guidelines / user-provided / UNKNOWN)
-    3. Estimate daily nutrition with confidence scoring
-    4. Fail-safe when data is insufficient
+    Returns the core prompt for nutrition analysis that:
+    1. Resolves food identity
+    2. Determines serving size with strict rules
+    3. Handles mixed diets properly
+    4. Estimates daily nutrition intake
+    5. Analyzes micronutrient gaps qualitatively
+    6. Returns top 4 micronutrient gaps
     """
-    species_norm = (species or "dog").lower().strip()
-    breed_norm = (breed or "mixed breed").strip()
-    weight_part = f"{weight_kg:g}kg " if weight_kg and weight_kg > 0 else ""
-    age_part = f", {age_description}" if age_description else ""
-    gender_part = f" {gender.lower()}" if gender else ""
-
-    pet_descriptor = f"a {weight_part}{breed_norm}{gender_part} {species_norm}{age_part}"
-
-    # Age category for feeding guideline selection
-    age_category = "adult"
-    if age_description:
-        desc_lower = age_description.lower()
-        if "month" in desc_lower and "year" not in desc_lower:
-            age_category = "puppy" if species_norm == "dog" else "kitten"
-        elif "senior" in desc_lower or any(
-            f"{y} year" in desc_lower for y in range(8, 20)
-        ):
-            age_category = "senior"
-
-    species_rules = ""
-    if species_norm == "cat":
-        species_rules = (
-            "- This is a CAT — cats are obligate carnivores. Protein and fat "
-            "should be noticeably higher than a dog's equivalent serving.\n"
-            "- Taurine is essential for cats; if the food naturally contains it "
-            "(meat, fish, organ meat) reflect that in your estimate.\n"
-            "- Carbohydrates should be minimal for cats.\n"
-        )
-    else:
-        species_rules = (
-            "- This is a DOG — balance protein, fat, and carbs appropriately "
-            "for the breed size and activity level.\n"
-            "- Large/giant breeds benefit from added glucosamine and joint support.\n"
-        )
-
-    condition_rules = ""
-    if conditions:
-        cond_list = ", ".join(conditions)
-        condition_rules = (
-            f"- This pet has the following diagnosed health conditions: {cond_list}.\n"
-            "  Adjust estimates with these conditions in mind — e.g. lower "
-            "phosphorus/protein for kidney disease, lower fat for pancreatitis, "
-            "added glucosamine for joint/hip issues, lower carbs for diabetes, "
-            "higher fibre for GI issues, hypoallergenic if food allergies.\n"
-        )
-
     return (
         "You are a board-certified veterinary nutritionist.\n\n"
-        "Your task: Given a food item name and type, estimate its DAILY nutritional "
-        f"intake for {pet_descriptor}.\n\n"
-        "Follow this strict decision framework:\n\n"
-        "---\n"
+        "Your task:\n"
+        "Given food items, pet details, and optionally user-provided quantities, estimate DAILY nutritional intake and identify the most important micronutrient gaps.\n\n"
+        "You must follow this strict decision framework:\n\n"
+        "-----------------------------------\n"
         "STEP 1 — RESOLVE FOOD IDENTITY\n"
-        "---\n"
-        "- Identify the most likely specific product based on the food name, "
-        f"species ({species_norm}), and age ({age_category}).\n"
-        f"- Example: \"Pedigree\" + {age_category} {species_norm} → Pedigree "
-        f"{age_category.title()} {species_norm.title()} Food\n"
-        "- If multiple variants are possible, choose the most common one and reduce confidence.\n"
-        "- If product identity is highly ambiguous, reduce confidence.\n\n"
-        "---\n"
+        "-----------------------------------\n"
+        "- Identify the most likely specific product based on:\n"
+        "- food name\n"
+        "- species\n"
+        "- age (puppy / adult / senior)\n"
+        "- Example:\n"
+        "\"Pedigree\" + adult dog → Pedigree Adult Dog Food\n"
+        "- If multiple variants are possible, choose the most common one and reduce confidence\n"
+        "- If product identity is highly ambiguous, reduce confidence\n\n"
+        "-----------------------------------\n"
         "STEP 2 — DETERMINE SERVING SIZE\n"
-        "---\n"
-        "CASE A: USER PROVIDED QUANTITY\n"
-        "- If the user message includes a daily portion (e.g. \"200g/day\", \"2 cups/day\"), "
-        "use EXACTLY that quantity. Do NOT override, scale, or reinterpret it.\n\n"
+        "-----------------------------------\n\n"
+        "CASE A: USER PROVIDED QUANTITY (any food)\n"
+        "- Use EXACTLY the user-provided quantity (e.g., \"2 cups/day\", \"1 bowl/day\")\n"
+        "- Do NOT override, scale, or reinterpret it\n\n"
         "CASE B: COMMERCIAL / PACKAGED FOOD AND NO QUANTITY PROVIDED\n"
-        "- Use ONLY official brand feeding guidelines for the product.\n"
-        f"- Use pet weight ({weight_part.strip() or 'unknown'}) and age ({age_category}) "
-        "ONLY to select the correct feeding range.\n"
-        "- Choose a reasonable midpoint within that range.\n"
-        "- Do NOT invent or extrapolate beyond brand guidance.\n\n"
+        "- Use ONLY official brand feeding guidelines\n"
+        "- Use pet weight and age ONLY to select the correct feeding range\n"
+        "- Choose a reasonable midpoint within that range\n"
+        "- Do NOT invent or extrapolate beyond brand guidance\n\n"
         "CASE C: HOMEMADE / GENERIC FOOD AND NO QUANTITY PROVIDED\n"
-        "- DO NOT estimate or assume any serving size.\n"
-        "- Set confidence below 0.6.\n\n"
-        "IF serving size cannot be determined with confidence, set confidence < 0.6.\n\n"
-        "---\n"
-        "STEP 3 — NUTRITION ESTIMATION\n"
-        "---\n"
-        "- Estimate TOTAL DAILY intake based on determined serving size.\n"
-        "- Ensure values are realistic and internally consistent.\n"
-        "- Macro percentages must remain within realistic biological limits.\n"
-        "- Total calories must fall within realistic daily intake ranges "
-        f"for {pet_descriptor}.\n"
-        "- Be conservative with estimates.\n\n"
-        f"{species_rules}"
-        f"{condition_rules}"
-        "---\n"
+        "- DO NOT estimate or assume any serving size\n"
+        "- Mark portion as UNKNOWN\n\n"
+        "IF serving size cannot be determined with confidence:\n"
+        "- Set confidence < 0.6\n"
+        "- RETURN NO ANALYSIS (see fail-safe)\n\n"
+        "-----------------------------------\n"
+        "STEP 3 — MIXED DIET HANDLING\n"
+        "-----------------------------------\n\n"
+        "If BOTH commercial food AND homemade food are present:\n\n"
+        "- Treat commercial food as the PRIMARY diet anchor:\n"
+        "- Use it for:\n"
+        "- calories_per_day\n"
+        "- macronutrient percentages (protein, fat, fibre)\n\n"
+        "- For homemade food WITHOUT quantity:\n"
+        "- DO NOT include in:\n"
+        "- calories\n"
+        "- macronutrient calculations\n"
+        "- ONLY use it for qualitative micronutrient signals if possible\n\n"
+        "- If homemade food HAS quantity:\n"
+        "- Include it fully in all calculations\n\n"
+        "-----------------------------------\n"
+        "STEP 4 — NUTRITION ESTIMATION\n"
+        "-----------------------------------\n"
+        "- Estimate TOTAL DAILY intake based on determined serving size\n"
+        "- Ensure values are realistic and internally consistent\n"
+        "- Prevent extreme or biologically impossible outputs\n"
+        "- Macro percentages must remain within realistic biological limits\n"
+        "- Total calories must fall within realistic daily intake ranges\n\n"
+        "-----------------------------------\n"
+        "STEP 5 — MICRONUTRIENT GAP ANALYSIS\n"
+        "-----------------------------------\n\n"
+        "- Identify micronutrient gaps dynamically based on:\n"
+        "- pet nutritional requirements\n"
+        "- current diet composition\n\n"
+        "- Use ONLY this controlled list of nutrient names:\n"
+        "omega_3, omega_6, vitamin_e, vitamin_d3, glucosamine, calcium, phosphorus, iron, zinc, taurine, fibre\n\n"
+        "- For each nutrient:\n"
+        "- Assign ONLY one of the following statuses:\n"
+        "- \"sufficient\"\n"
+        "- \"low\"\n"
+        "- \"missing\"\n\n"
+        "- DO NOT include nutrients where status cannot be confidently determined\n"
+        "- DO NOT output \"unknown\" under any condition\n\n"
+        "- DO NOT output numeric values, units, or requirements for micronutrients\n"
+        "- Micronutrients are strictly qualitative signals\n\n"
+        "- Assign a severity_score (0–1) based on:\n"
+        "- deficiency severity (missing > low > sufficient)\n"
+        "- relevance to pet conditions\n"
+        "- confidence in assessment\n\n"
+        "-----------------------------------\n"
+        "STEP 6 — SELECT TOP MICRONUTRIENTS\n"
+        "-----------------------------------\n\n"
+        "- Rank micronutrients by severity_score\n"
+        "- Return ONLY the TOP 4 most important micronutrient gaps\n"
+        "- EXCLUDE all nutrients marked as \"sufficient\"\n"
+        "- If fewer than 4 meaningful gaps exist, return fewer\n\n"
+        "-----------------------------------\n"
         "OUTPUT FORMAT\n"
-        "---\n"
-        "Return ONLY valid JSON with these exact keys:\n"
-        "  resolved_name (string — the specific product you identified),\n"
-        "  confidence (float 0-1),\n"
-        "  serving_description (string — e.g. \"250g/day based on Royal Canin guidelines\"),\n"
-        "  calories_per_day (int),\n"
-        "  protein_pct (float), fat_pct (float), fibre_pct (float), moisture_pct (float),\n"
-        "  calcium (float, %), phosphorus (float, %),\n"
-        "  omega_3_mg (int), omega_6_mg (int), vitamin_e_iu (int), vitamin_d3_iu (int),\n"
-        "  glucosamine_mg (int), probiotics (bool)\n\n"
-        "---\n"
+        "-----------------------------------\n\n"
+        "Return ONLY valid JSON with these keys:\n\n"
+        "resolved_name (string),\n"
+        "confidence (float 0–1),\n"
+        "serving_description (string),\n"
+        "calories_per_day (int),\n"
+        "protein_pct (float),\n"
+        "fat_pct (float),\n"
+        "fibre_pct (float),\n\n"
+        "micronutrient_gaps: [\n"
+        "{\n"
+        "name (string),\n"
+        "status (string: sufficient | low | missing),\n"
+        "severity_score (float 0–1),\n"
+        "supplement (string | null — specific product name if supplementation is advised, null if sufficient or no supplement needed),\n"
+        "reason (string — one concise sentence explaining why this gap matters for this specific pet, diet, and conditions)\n"
+        "}\n"
+        "]\n\n"
+        "-----------------------------------\n"
+        "CRITICAL RULES\n"
+        "-----------------------------------\n\n"
+        "- NEVER estimate serving size arbitrarily\n"
+        "- NEVER assume portion size for homemade food\n"
+        "- NEVER scale portions beyond brand guidelines\n"
+        "- NEVER include homemade food in calorie or macro calculations unless quantity is provided\n"
+        "- NEVER fabricate precision where data is missing\n"
+        "- Maintain internal consistency across all outputs\n\n"
+        "-----------------------------------\n"
         "FAIL-SAFE\n"
-        "---\n"
-        "If product identity is ambiguous OR serving size is missing/unclear "
-        "OR confidence < 0.6, RETURN:\n"
-        '{"confidence": <value>, "error": "INSUFFICIENT_DATA", '
-        '"message": "Provide exact SKU or serving size for accurate diet analysis"}\n\n'
-        "- No explanation, no markdown — JSON only"
+        "-----------------------------------\n\n"
+        "If ANY of the following:\n"
+        "- product identity is ambiguous OR\n"
+        "- serving size is missing or unclear OR\n"
+        "- confidence < 0.6\n\n"
+        "THEN RETURN:\n\n"
+        "{\n"
+        '\"confidence\": <value>,\n'
+        '\"error\": \"INSUFFICIENT_DATA\",\n'
+        '\"message\": \"Provide exact SKU or serving size for accurate diet analysis\"\n'
+        "}\n\n"
+        "-----------------------------------\n"
+        "GENERAL\n"
+        "-----------------------------------\n\n"
+        "- No explanation\n"
+        "- No markdown\n"
+        "- JSON only"
     )
 
 
@@ -830,9 +857,10 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
 
     # Aggregate nutritional values
     actual = {
-        "calories": 0, "protein": 0, "fat": 0, "fibre": 0, "moisture": 0,
-        "calcium": 0.0, "phosphorus": 0.0, "omega_3": 0, "omega_6": 0,
-        "vitamin_e": 0, "vitamin_d3": 0, "glucosamine": 0, "probiotics": False,
+        "calories": 0, "protein": 0, "fat": 0, "fibre": 0,
+        # Qualitative micronutrient gaps from prompt: {name: {status, severity_score}}
+        # Status: "missing" | "low" | "sufficient"
+        "gaps": {},
     }
 
     for estimated in estimations:
@@ -851,14 +879,8 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
     # Build macros array
     macros = _build_macros(actual, targets, breed_key)
 
-    # Build vitamins array
-    vitamins = _build_vitamins(actual, targets)
-
-    # Build minerals array
-    minerals = _build_minerals(actual, targets, has_hip_dysplasia)
-
-    # Build others array
-    others = _build_others(actual, targets, has_hip_dysplasia)
+    # Build vitamins, minerals, others dynamically from prompt gap output
+    vitamins, minerals, others = _build_micronutrient_sections(actual, targets, has_hip_dysplasia)
 
     # Build improvements list
     all_nutrients = minerals + others + vitamins
@@ -905,18 +927,13 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
             f" Supplements: {', '.join(supplement_labels[:5])}."
             if supplement_labels else ""
         )
-        strengths = []
-        if actual["protein"] >= targets.get("protein_min", 20):
-            strengths.append("good protein levels")
-        if actual["omega_3"] > 0:
-            strengths.append("omega-3 support")
-        if actual.get("probiotics"):
-            strengths.append("probiotic support")
-        if actual["fibre"] >= targets.get("fibre_min", 3):
-            strengths.append("adequate fibre")
-        if actual["calcium"] >= targets.get("calcium_min", 0.8):
-            strengths.append("sufficient calcium")
-        strength_text = (" Strengths: " + ", ".join(strengths) + ".") if strengths else ""
+        # Strengths: nutrients the LLM explicitly marked as sufficient
+        sufficient_nutrients = [
+            _NUTRIENT_META[name]["display"]
+            for name, gap in actual["gaps"].items()
+            if gap.get("status") == "sufficient" and name in _NUTRIENT_META
+        ]
+        strength_text = (" Strengths: " + ", ".join(sufficient_nutrients) + ".") if sufficient_nutrients else ""
         diet_summary = f"Current food: {food_list}.{supplements_text}{strength_text}"
     else:
         diet_summary = "No diet items added yet. Add your pet's food in the Nutrition tab for a detailed analysis."
@@ -939,165 +956,164 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
 # ─── Accumulation Helpers ────────────────────────────────────────────
 
 def _accumulate_from_estimation(actual: dict, est: dict) -> None:
-    """Accumulate nutritional values from AI-estimated food nutrition."""
+    """Accumulate nutritional values from AI-estimated food nutrition.
+
+    Handles the new prompt output format:
+    - Macros: calories_per_day, protein_pct, fat_pct, fibre_pct (numeric)
+    - Micronutrients: micronutrient_gaps array (qualitative status + severity_score)
+    """
     actual["calories"] += int(est.get("calories_per_day", 0) or est.get("calories_per_serving", 0))
     actual["protein"] = max(actual["protein"], float(est.get("protein_pct", 0)))
     actual["fat"] = max(actual["fat"], float(est.get("fat_pct", 0)))
     actual["fibre"] = max(actual["fibre"], float(est.get("fibre_pct", 0)))
-    actual["moisture"] = max(actual["moisture"], float(est.get("moisture_pct", 0)))
-    actual["calcium"] = max(actual["calcium"], float(est.get("calcium", 0)))
-    actual["phosphorus"] = max(actual["phosphorus"], float(est.get("phosphorus", 0)))
-    actual["omega_3"] += int(est.get("omega_3_mg", 0))
-    actual["omega_6"] += int(est.get("omega_6_mg", 0))
-    actual["vitamin_e"] += int(est.get("vitamin_e_iu", 0))
-    actual["vitamin_d3"] += int(est.get("vitamin_d3_iu", 0))
-    actual["glucosamine"] += int(est.get("glucosamine_mg", 0))
-    if est.get("probiotics"):
-        actual["probiotics"] = True
+
+    # Merge micronutrient gaps — worst status (highest severity_score) wins
+    # when multiple foods report the same nutrient. Supplement suggestion is
+    # carried from whichever food item had the highest severity.
+    for gap in est.get("micronutrient_gaps", []):
+        name = gap.get("name", "")
+        status = gap.get("status", "")
+        severity = float(gap.get("severity_score", 0))
+        supplement = gap.get("supplement") or None
+        reason = gap.get("reason") or None
+        if name and status in ("missing", "low", "sufficient"):
+            existing = actual["gaps"].get(name)
+            if existing is None or severity > existing["severity_score"]:
+                actual["gaps"][name] = {
+                    "status": status,
+                    "severity_score": severity,
+                    "supplement": supplement,
+                    "reason": reason,
+                }
 
 
 # ─── Builder Helpers ─────────────────────────────────────────────────
 
+def _status_from_gap(gaps: dict, name: str, default: str = "Adequate") -> str:
+    """Translate qualitative gap status to display status string.
+
+    Falls back to `default` (Adequate) when the nutrient is not flagged as a gap,
+    meaning the prompt considered it sufficient or did not assess it.
+    """
+    gap = gaps.get(name)
+    if not gap:
+        return default
+    return {"missing": "Missing", "low": "Low", "sufficient": "Adequate"}.get(
+        gap.get("status", "sufficient"), "Adequate"
+    )
+
+
 def _build_macros(actual: dict, targets: dict, breed_key: str) -> list[dict]:
-    """Build macronutrients array for the response."""
+    """Build macronutrients array for the response.
+
+    Returns 4 macros matching the new prompt output fields:
+    calories_per_day, protein_pct, fat_pct, fibre_pct.
+    """
     target_protein = targets.get("protein", 25)
     target_fat = targets.get("fat", 14)
-    target_carbs = targets.get("carbs", 50)
     target_fibre = targets.get("fibre", 4)
-    target_moisture = targets.get("moisture", 10)
-
-    carbs_actual = max(0, 100 - actual["protein"] - actual["fat"] - actual["fibre"] - actual["moisture"])
 
     return [
         {
             "name": "Protein", "icon": "\U0001f969",
             "actual": actual["protein"], "target": target_protein, "unit": "%",
             "status": _status_for_ratio(_safe_ratio(actual["protein"], target_protein)),
-            "note": "Good protein content" if actual["protein"] >= target_protein * 0.9 else "Consider protein-rich supplements",
+            "note": None,
         },
         {
             "name": "Fat", "icon": "\U0001f9c8",
             "actual": actual["fat"], "target": target_fat, "unit": "%",
             "status": _status_for_ratio(_safe_ratio(actual["fat"], target_fat)),
-            "note": "Essential for energy and coat health",
-        },
-        {
-            "name": "Carbohydrates", "icon": "\U0001f33e",
-            "actual": carbs_actual, "target": target_carbs, "unit": "%",
-            "status": "Adequate",
-            "note": "Derived from remaining macronutrient balance",
+            "note": None,
         },
         {
             "name": "Fibre", "icon": "\U0001f966",
             "actual": actual["fibre"], "target": target_fibre, "unit": "%",
             "status": _status_for_ratio(_safe_ratio(actual["fibre"], target_fibre)),
-            "note": "Supports digestive regularity",
-        },
-        {
-            "name": "Moisture", "icon": "\U0001f4a7",
-            "actual": actual["moisture"], "target": target_moisture, "unit": "%",
-            "status": _status_for_ratio(_safe_ratio(actual["moisture"], target_moisture)),
-            "note": "Ensure fresh water is always available",
+            "note": None,
         },
     ]
 
 
-def _build_vitamins(actual: dict, targets: dict) -> list[dict]:
-    """Build vitamins gap analysis array."""
-    vit_e_target = targets.get("vitamin_e", 300)
-    vit_d_target = targets.get("vitamin_d3", 400)
-
-    vit_e_status = _status_for_ratio(_safe_ratio(actual["vitamin_e"], vit_e_target))
-    vit_d_status = _status_for_ratio(_safe_ratio(actual["vitamin_d3"], vit_d_target))
-
-    return [
-        {
-            "name": "Vitamin E", "status": vit_e_status,
-            "supplement": "Vit E 400 IU Softgel" if vit_e_status != "Adequate" else None,
-            "price": "Rs.349/mo" if vit_e_status != "Adequate" else None,
-            "priority": _priority_for_status(vit_e_status),
-        },
-        {
-            "name": "Vitamin D3", "status": vit_d_status,
-            "supplement": "Sun Pharma Calcitriol" if vit_d_status != "Adequate" else None,
-            "price": "Rs.299/mo" if vit_d_status != "Adequate" else None,
-            "priority": _priority_for_status(vit_d_status),
-        },
-    ]
-
-
-def _build_minerals(actual: dict, targets: dict, has_hip_dysplasia: bool) -> list[dict]:
-    """Build minerals array."""
-    gluc_target = targets.get("glucosamine", 500)
-    calc_target = targets.get("calcium", 1.0)
-    phos_target = targets.get("phosphorus", 0.8)
-
-    gluc_status = _status_for_ratio(_safe_ratio(actual["glucosamine"], gluc_target))
-    calc_status = _status_for_ratio(_safe_ratio(actual["calcium"], calc_target))
-    phos_status = _status_for_ratio(_safe_ratio(actual["phosphorus"], phos_target))
-
-    return [
-        {
-            "name": "Glucosamine", "icon": "\U0001f9b4",
-            "status": gluc_status,
-            "priority": _priority_for_status(gluc_status, is_critical=has_hip_dysplasia),
-            "reason": "Critical for hip joint support" if has_hip_dysplasia else "Supports joint health",
-            "actual": actual["glucosamine"], "target": gluc_target,
-            "supplement": "Nutramax Cosequin DS Chewable" if gluc_status != "Adequate" else None,
-            "price": "Rs.799/mo" if gluc_status != "Adequate" else None,
-        },
-        {
-            "name": "Calcium", "icon": "\U0001f9b7",
-            "status": calc_status,
-            "priority": _priority_for_status(calc_status),
-            "reason": "Essential for bones and teeth",
-            "actual": actual["calcium"], "target": calc_target,
-            "supplement": None, "price": None,
-        },
-        {
-            "name": "Phosphorus", "icon": "\u26a1",
-            "status": phos_status,
-            "priority": _priority_for_status(phos_status),
-            "reason": "Works with calcium for bone health",
-            "actual": actual["phosphorus"], "target": phos_target,
-            "supplement": None, "price": None,
-        },
-    ]
+# ─── Nutrient Metadata Registry ──────────────────────────────────────
+# Maps prompt nutrient names → display metadata and category assignment.
+# "fibre" is excluded here because it appears as a macro donut chart instead.
+_NUTRIENT_META: dict[str, dict] = {
+    # reason is intentionally absent — it comes from the LLM prompt response per gap.
+    # Only display metadata (name, icon, category) and target lookup are defined here.
+    "vitamin_e":   {"display": "Vitamin E",   "icon": "\U0001f33f", "category": "vitamins",
+                    "target_key": "vitamin_e", "default_target": 300, "hip_critical": False},
+    "vitamin_d3":  {"display": "Vitamin D3",  "icon": "\u2600\ufe0f", "category": "vitamins",
+                    "target_key": "vitamin_d3", "default_target": 400, "hip_critical": False},
+    "glucosamine": {"display": "Glucosamine", "icon": "\U0001f9b4", "category": "minerals",
+                    "target_key": "glucosamine", "default_target": 500, "hip_critical": True},
+    "calcium":     {"display": "Calcium",     "icon": "\U0001f9b7", "category": "minerals",
+                    "target_key": "calcium",    "default_target": 1.0, "hip_critical": False},
+    "phosphorus":  {"display": "Phosphorus",  "icon": "\u26a1",      "category": "minerals",
+                    "target_key": "phosphorus", "default_target": 0.8, "hip_critical": False},
+    "iron":        {"display": "Iron",        "icon": "\U0001f9a8",  "category": "minerals",
+                    "target_key": "iron",       "default_target": 80,  "hip_critical": False},
+    "zinc":        {"display": "Zinc",        "icon": "\U0001f9f2",  "category": "minerals",
+                    "target_key": "zinc",       "default_target": 100, "hip_critical": False},
+    "omega_3":     {"display": "Omega-3",     "icon": "\U0001f41f",  "category": "others",
+                    "target_key": "omega_3",    "default_target": 300, "hip_critical": True},
+    "omega_6":     {"display": "Omega-6",     "icon": "\U0001f33b",  "category": "others",
+                    "target_key": "omega_6",    "default_target": 1500, "hip_critical": False},
+    "taurine":     {"display": "Taurine",     "icon": "\U0001f496",  "category": "others",
+                    "target_key": "taurine",    "default_target": 0,   "hip_critical": False},
+}
 
 
-def _build_others(actual: dict, targets: dict, has_hip_dysplasia: bool) -> list[dict]:
-    """Build other nutrients array."""
-    omega3_target = targets.get("omega_3", 300)
-    omega6_target = targets.get("omega_6", 1500)
+def _build_micronutrient_sections(
+    actual: dict, targets: dict, has_hip_dysplasia: bool
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """
+    Build vitamins, minerals, and others arrays dynamically from the prompt's
+    micronutrient_gaps. Only nutrients that the prompt flagged appear in the output;
+    nothing is hardcoded.
 
-    omega3_status = _status_for_ratio(_safe_ratio(actual["omega_3"], omega3_target))
-    omega6_status = _status_for_ratio(_safe_ratio(actual["omega_6"], omega6_target))
-    prob_status = "Adequate" if actual["probiotics"] else "Low"
+    Returns (vitamins, minerals, others) tuple.
+    """
+    gaps = actual.get("gaps", {})
+    vitamins: list[dict] = []
+    minerals: list[dict] = []
+    others: list[dict] = []
 
-    return [
-        {
-            "name": "Omega-3", "icon": "\U0001f41f",
-            "status": omega3_status,
-            "actual": actual["omega_3"], "target": omega3_target,
-            "supplement": "Zesty Paws Salmon Oil" if omega3_status != "Adequate" else None,
-            "price": "Rs.349/mo" if omega3_status != "Adequate" else None,
-            "priority": _priority_for_status(omega3_status, is_critical=has_hip_dysplasia),
-        },
-        {
-            "name": "Omega-6", "icon": "\U0001f33b",
-            "status": omega6_status,
-            "actual": actual["omega_6"], "target": omega6_target,
-            "supplement": None, "price": None,
-            "priority": _priority_for_status(omega6_status),
-        },
-        {
-            "name": "Probiotics", "icon": "\U0001f9a0",
-            "status": prob_status,
-            "supplement": "Purina FortiFlora" if prob_status != "Adequate" else None,
-            "price": "Rs.649/mo" if prob_status != "Adequate" else None,
-            "priority": _priority_for_status(prob_status),
-        },
-    ]
+    for nutrient_key, gap_data in gaps.items():
+        meta = _NUTRIENT_META.get(nutrient_key)
+        if not meta:
+            continue  # Unknown nutrient name — skip
+
+        status = _status_from_gap(gaps, nutrient_key)
+        is_critical = has_hip_dysplasia and meta.get("hip_critical", False)
+        priority = _priority_for_status(status, is_critical=is_critical)
+        default_target = float(targets.get(meta["target_key"], meta["default_target"]))
+
+        # Supplement and reason come from the LLM prompt response, not hardcoded
+        supplement = gap_data.get("supplement") or None
+        reason = gap_data.get("reason") or None
+
+        item: dict = {
+            "name": meta["display"],
+            "icon": meta["icon"],
+            "status": status,
+            "priority": priority,
+            "reason": reason,   # LLM-provided; None when not returned by prompt
+            "supplement": supplement,
+            "price": None,      # Pricing not provided by prompt
+        }
+
+        category = meta["category"]
+        if category == "vitamins":
+            vitamins.append(item)
+        elif category == "minerals":
+            item.update({"actual": 0, "target": default_target})
+            minerals.append(item)
+        else:
+            item.update({"actual": 0, "target": default_target})
+            others.append(item)
+
+    return vitamins, minerals, others
 
 
 def _build_improvements(all_nutrients: list[dict]) -> list[dict]:
@@ -1126,10 +1142,9 @@ def _build_improvements(all_nutrients: list[dict]) -> list[dict]:
 # ─── Diet Summary for Dashboard Donut ────────────────────────────────
 
 # Threshold boundary constants for donut macro color coding
-_PCT_OVER_AMBER = 110.0   # Protein / Fat / Omega-3 start of amber (over)
-_PCT_UNDER_RED = 80.0     # Protein / Fat / Omega-3 start of red (under)
+_PCT_OVER_AMBER = 110.0   # Protein / Fat / Fibre start of amber (over)
+_PCT_UNDER_RED = 80.0     # Protein / Fat / Fibre start of red (under)
 _PCT_CAL_AMBER = 100.0    # Calories: exceed target → amber
-_PCT_OMEGA3_CRITICAL = 15.0  # Omega-3 critical deficiency boundary
 
 
 def _diet_summary_threshold(macro_name: str, pct_of_need: float) -> tuple[str, str]:
@@ -1139,13 +1154,9 @@ def _diet_summary_threshold(macro_name: str, pct_of_need: float) -> tuple[str, s
     Rules (guardrail-compliant):
     - Calories:  >100 % → amber / "Slightly over target"
                  ≤100 % → green / "On track"
-    - Protein / Fat:
+    - Protein / Fat / Fibre:
                  >110 % → amber / "Slightly over"
                  <80  % → red   / "Deficient"
-                 80–110% → green / "On track"
-    - Omega-3:   ≤15  % → red   / "Critical gap"   (critical-deficiency shortcut)
-                 <80  % → red   / "Deficient"
-                 >110 % → amber / "Slightly over"
                  80–110% → green / "On track"
     - Green is NEVER returned for >110 %.
     """
@@ -1154,16 +1165,7 @@ def _diet_summary_threshold(macro_name: str, pct_of_need: float) -> tuple[str, s
             return "amber", "Slightly over target"
         return "green", "On track"
 
-    if macro_name == "Omega-3":
-        if pct_of_need <= _PCT_OMEGA3_CRITICAL:
-            return "red", "Critical gap"
-        if pct_of_need < _PCT_UNDER_RED:
-            return "red", "Deficient"
-        if pct_of_need > _PCT_OVER_AMBER:
-            return "amber", "Slightly over"
-        return "green", "On track"
-
-    # Protein and Fat share the same thresholds
+    # Protein, Fat, and Fibre share the same thresholds
     if pct_of_need > _PCT_OVER_AMBER:
         return "amber", "Slightly over"
     if pct_of_need < _PCT_UNDER_RED:
@@ -1176,14 +1178,17 @@ async def get_diet_summary(db: Session, pet) -> dict:
     Format existing nutrition analysis as donut summaries with guardrail thresholds.
 
     Calls the full analyze_nutrition pipeline, then re-formats the result into
-    4 donut-chart macro segments (Calories, Protein, Omega-3, Fat) plus up to 3
+    4 donut-chart macro segments (Calories, Protein, Fat, Fibre) plus up to 3
     missing micronutrients for the dashboard card.
+
+    The 4 macros map directly to the new prompt output fields:
+    calories_per_day, protein_pct, fat_pct, fibre_pct.
 
     Returns:
         {
             "macros": [
                 {"name": str, "pct_of_need": float, "color": str, "note": str},
-                ...   # 4 items: Calories, Protein, Omega-3, Fat
+                ...   # 4 items: Calories, Protein, Fat, Fibre
             ],
             "missing_micros": [
                 {"icon": str, "name": str, "reason": str},
@@ -1204,7 +1209,7 @@ async def get_diet_summary(db: Session, pet) -> dict:
     cal_actual = cal_info.get("actual", 0)
     cal_target = cal_info.get("target", DEFAULT_TARGETS["calories"])
 
-    # --- Macros list from analyze_nutrition (Protein, Fat) ---
+    # --- Macros list from analyze_nutrition (Protein, Fat, Fibre) ---
     macros_list = analysis.get("macros", [])
 
     def _find_macro(name: str) -> dict:
@@ -1212,15 +1217,7 @@ async def get_diet_summary(db: Session, pet) -> dict:
 
     protein_m = _find_macro("Protein")
     fat_m = _find_macro("Fat")
-
-    # --- Omega-3 lives in the 'others' array ---
-    omega3_actual: float = 0.0
-    omega3_target: float = float(DEFAULT_TARGETS["omega_3"])
-    for item in analysis.get("others", []):
-        if item.get("name") == "Omega-3":
-            omega3_actual = float(item.get("actual", 0))
-            omega3_target = float(item.get("target", omega3_target))
-            break
+    fibre_m = _find_macro("Fibre")
 
     def _safe_pct(actual: float, target: float) -> float:
         """Return % of daily target, capped floor at 0."""
@@ -1237,15 +1234,18 @@ async def get_diet_summary(db: Session, pet) -> dict:
         float(fat_m.get("actual", 0)),
         float(fat_m.get("target", DEFAULT_TARGETS["fat"])),
     )
-    omega3_pct = _safe_pct(omega3_actual, omega3_target)
+    fibre_pct = _safe_pct(
+        float(fibre_m.get("actual", 0)),
+        float(fibre_m.get("target", DEFAULT_TARGETS["fibre"])),
+    )
 
-    # Build 4 donut segments
+    # Build 4 donut segments: Calories, Protein, Fat, Fibre
     donut_macros: list[dict] = []
     for macro_name, pct in [
         ("Calories", cal_pct),
         ("Protein", protein_pct),
-        ("Omega-3", omega3_pct),
         ("Fat", fat_pct),
+        ("Fibre", fibre_pct),
     ]:
         color, note = _diet_summary_threshold(macro_name, pct)
         donut_macros.append({
@@ -1271,7 +1271,9 @@ async def get_diet_summary(db: Session, pet) -> dict:
         {
             "icon": n.get("icon", "\u26a0\ufe0f"),
             "name": n["name"],
-            "reason": n.get("reason") or f"{n['name']} supplementation recommended",
+            "reason": n.get("reason") or None,
+            # LLM-recommended product name; used as care plan item name when present
+            "supplement": n.get("supplement") or None,
         }
         for n in deficient[:3]
     ]

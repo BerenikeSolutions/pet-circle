@@ -17,6 +17,20 @@ import HealthTrendsView from "./trends/HealthTrendsView";
 
 type ViewState = "dashboard" | "trends" | "reminders" | "cart" | "checkout" | "confirm" | "records" | "nudges";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+function loadRazorpayScript(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    if ((window as any).Razorpay) { resolve(); return; }
+    const script = document.createElement("script");
+    script.src = "https://checkout.razorpay.com/v1/checkout.js";
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("Failed to load payment gateway."));
+    document.body.appendChild(script);
+  });
+}
+
 const MAX_STALE_RETRIES = 10;
 const STALE_RETRY_BASE_MS = 10000;
 const STALE_RETRY_FACTOR = 1.5;
@@ -202,11 +216,95 @@ function DashboardInner({ token }: { token: string }) {
   );
 
   const handlePlaceOrder = useCallback(async (details: CheckoutDetails) => {
-    void details;
-    setConfirmedItems(cart);
-    setConfirmedTotal(cartTotal);
-    setView("confirm");
-  }, [cart, cartTotal]);
+    const address = {
+      name: details.name,
+      phone: details.phone,
+      address: details.address,
+      pincode: details.pincode,
+    };
+
+    if (details.paymentMethod === "cod") {
+      const res = await fetch(`${API_BASE}/dashboard/${token}/place-order`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ payment_method: "cod", address }),
+      });
+      if (!res.ok) throw new Error("Could not place order. Please try again.");
+      setConfirmedItems(cart);
+      setConfirmedTotal(cartTotal);
+      setView("confirm");
+      return;
+    }
+
+    // UPI or card → Razorpay
+    const createRes = await fetch(`${API_BASE}/dashboard/${token}/create-payment`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ payment_method: details.paymentMethod, address }),
+    });
+    if (!createRes.ok) throw new Error("Could not initiate payment. Please try again.");
+    const { razorpay_order_id, amount, currency, key_id, order_db_id } =
+      await createRes.json() as {
+        razorpay_order_id: string; amount: number; currency: string;
+        key_id: string; order_db_id: string;
+      };
+
+    await loadRazorpayScript();
+
+    await new Promise<void>((resolve, reject) => {
+      const options = {
+        key: key_id,
+        amount,
+        currency,
+        order_id: razorpay_order_id,
+        name: "PetCircle",
+        description: "Pet care order",
+        prefill: {
+          name: details.name,
+          contact: details.phone,
+          ...(details.paymentMethod === "upi" && details.upiId
+            ? { vpa: details.upiId }
+            : {}),
+        },
+        method:
+          details.paymentMethod === "upi"
+            ? { upi: true, card: false, netbanking: false, wallet: false }
+            : { card: true, upi: false, netbanking: false, wallet: false },
+        handler: async (response: {
+          razorpay_payment_id: string;
+          razorpay_order_id: string;
+          razorpay_signature: string;
+        }) => {
+          try {
+            const verifyRes = await fetch(
+              `${API_BASE}/dashboard/${token}/verify-payment`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  order_db_id,
+                  razorpay_order_id: response.razorpay_order_id,
+                  razorpay_payment_id: response.razorpay_payment_id,
+                  razorpay_signature: response.razorpay_signature,
+                }),
+              }
+            );
+            if (!verifyRes.ok) throw new Error("Payment verification failed.");
+            setConfirmedItems(cart);
+            setConfirmedTotal(cartTotal);
+            setView("confirm");
+            resolve();
+          } catch (e) {
+            reject(e);
+          }
+        },
+        modal: { ondismiss: () => reject(new Error("Payment cancelled.")) },
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const rzp = new (window as any).Razorpay(options);
+      rzp.open();
+    });
+  }, [token, cart, cartTotal]);
 
   if (!isOnline && !data && !loading) {
     return (

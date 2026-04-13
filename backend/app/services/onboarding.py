@@ -4449,13 +4449,13 @@ async def _ai_supplement_recommendation(
         )
 
         async def _call() -> str:
-            response = await client.chat.completions.create(
+            response = await client.messages.create(
                 model=OPENAI_QUERY_MODEL,
                 temperature=0.4,
                 max_tokens=80,
                 messages=[{"role": "user", "content": prompt}],
             )
-            return (response.choices[0].message.content or "").strip()
+            return (response.content[0].text or "").strip()
 
         result = await retry_openai_call(_call)
         return result or None

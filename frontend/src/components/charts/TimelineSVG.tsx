@@ -107,7 +107,7 @@ export interface TimelineSVGProps {
 /** Compute evenly-distributed x-centres for n nodes. */
 function nodeXPositions(n: number): number[] {
   if (n === 0) return [];
-  if (n === 1) return [VW / 2];
+  if (n === 1) return [PAD];
   return Array.from({ length: n }, (_, i) =>
     PAD + (i / (n - 1)) * (VW - PAD * 2)
   );
@@ -259,11 +259,13 @@ export default function TimelineSVG({
             >
               {innerLabel}
             </text>
-            {/* Primary label below node */}
+            {/* Primary label below node — adaptive anchor prevents edge clipping */}
             <text
-              x={xs[i]}
+              x={xs[i] < VW / 4 ? PAD / 2 : xs[i] > (3 * VW) / 4 ? VW - PAD / 2 : xs[i]}
               y={LABEL_Y}
-              textAnchor="middle"
+              textAnchor={
+                xs[i] < VW / 4 ? "start" : xs[i] > (3 * VW) / 4 ? "end" : "middle"
+              }
               fontFamily="Inter,sans-serif"
               fontSize="10"
               fontWeight="600"
@@ -271,15 +273,17 @@ export default function TimelineSVG({
             >
               {node.label}
             </text>
-            {/* Optional sub-label */}
+            {/* Optional sub-label — adaptive anchor prevents edge clipping */}
             {node.sub && (
               <text
-                x={xs[i]}
+                x={xs[i] < VW / 4 ? PAD / 2 : xs[i] > (3 * VW) / 4 ? VW - PAD / 2 : xs[i]}
                 y={SUB_Y}
-                textAnchor="middle"
+                textAnchor={
+                  xs[i] < VW / 4 ? "start" : xs[i] > (3 * VW) / 4 ? "end" : "middle"
+                }
                 fontFamily="Inter,sans-serif"
                 fontSize="9"
-                fill={node.type === "done" ? "#34C759" : "#8A8A8A"}
+                fill={node.type === "done" ? "#166534" : "#8A8A8A"}
               >
                 {node.sub}
               </text>

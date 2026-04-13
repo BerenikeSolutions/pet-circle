@@ -127,38 +127,35 @@ async def parse_date_with_ai(raw_date: str) -> date:
     Raises:
         ValueError: If AI also cannot parse the date.
     """
-    from openai import AsyncOpenAI
+    from anthropic import AsyncAnthropic
 
     from app.config import settings
     from app.core.constants import OPENAI_QUERY_MODEL
 
-    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
 
     today_str = date.today().isoformat()
     try:
-        response = await client.chat.completions.create(
+        response = await client.messages.create(
             model=OPENAI_QUERY_MODEL,
             temperature=0.0,
             max_tokens=20,
+            system=(
+                f"You are a date parser. Today's date is {today_str}. "
+                "Extract the date from the user's input "
+                "and return ONLY the date in YYYY-MM-DD format. "
+                "If only month and year are given, use 01 as the day. "
+                "If only a year is given, use 01-01 as month and day. "
+                "For relative dates like 'last Dec', '2 months ago', 'last year', "
+                "resolve them to absolute dates using today's date as reference. "
+                "If you cannot determine a valid date, respond with ERROR."
+            ),
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        f"You are a date parser. Today's date is {today_str}. "
-                        "Extract the date from the user's input "
-                        "and return ONLY the date in YYYY-MM-DD format. "
-                        "If only month and year are given, use 01 as the day. "
-                        "If only a year is given, use 01-01 as month and day. "
-                        "For relative dates like 'last Dec', '2 months ago', 'last year', "
-                        "resolve them to absolute dates using today's date as reference. "
-                        "If you cannot determine a valid date, respond with ERROR."
-                    ),
-                },
                 {"role": "user", "content": raw_date},
             ],
         )
 
-        result = response.choices[0].message.content.strip()
+        result = response.content[0].text.strip()
         if result == "ERROR":
             raise ValueError(f"AI could not parse date: '{raw_date}'")
 

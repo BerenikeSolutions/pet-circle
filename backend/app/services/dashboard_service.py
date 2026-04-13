@@ -232,16 +232,21 @@ def _inject_supplement_recommendations(care_plan: dict, diet_summary: dict) -> d
 
     supplement_items = []
     for micro in missing_micros:
-        name = micro.get("name", "")
-        cap_name = name[0].upper() + name[1:] if name else name
+        nutrient_name = micro.get("name", "")
+        cap_name = nutrient_name[0].upper() + nutrient_name[1:] if nutrient_name else nutrient_name
+        # Use LLM-recommended product name when available; fall back to generic label
+        llm_supplement = micro.get("supplement") or None
+        item_name = llm_supplement if llm_supplement else f"{cap_name} Supplement"
+        # Use LLM-provided reason as the one-liner shown below the supplement name
+        reason = micro.get("reason") or None
         supplement_items.append({
-            "name": f"{cap_name} Supplement",
+            "name": item_name,
             "test_type": "supplement",
             "freq": "Daily",
             "next_due": None,
             "status_tag": "Recommended",
             "classification": "suggested",
-            "reason": micro.get("reason") or f"{cap_name} supplementation recommended",
+            "reason": reason,
             "orderable": True,
             "cta_label": "Order Now",
         })

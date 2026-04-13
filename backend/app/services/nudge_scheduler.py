@@ -797,7 +797,7 @@ def _get_or_generate_nudge_insight(db: Session, user: User, pet: Pet) -> str | N
             return existing.insight_text
 
     # Generate new insight via GPT
-    if not getattr(settings, "OPENAI_API_KEY", None):
+    if not getattr(settings, "ANTHROPIC_API_KEY", None):
         return None
 
     breed = getattr(pet, "breed", None) or "unknown breed"
@@ -813,15 +813,15 @@ def _get_or_generate_nudge_insight(db: Session, user: User, pet: Pet) -> str | N
     )
 
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=settings.OPENAI_API_KEY)
-        resp = client.chat.completions.create(
+        import anthropic
+        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        resp = client.messages.create(
             model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=120,
             temperature=0.7,
         )
-        insight_text = resp.choices[0].message.content.strip()
+        insight_text = resp.content[0].text.strip()
 
         row = PetAiInsight(
             pet_id=pet.id,
