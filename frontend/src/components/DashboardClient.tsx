@@ -21,7 +21,6 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 function loadRazorpayScript(): Promise<void> {
   return new Promise((resolve, reject) => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     if ((window as any).Razorpay) { resolve(); return; }
     const script = document.createElement("script");
     script.src = "https://checkout.razorpay.com/v1/checkout.js";
@@ -300,7 +299,6 @@ function DashboardInner({ token }: { token: string }) {
         },
         modal: { ondismiss: () => reject(new Error("Payment cancelled.")) },
       };
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const rzp = new (window as any).Razorpay(options);
       rzp.open();
     });
