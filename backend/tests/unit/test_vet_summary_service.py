@@ -26,7 +26,6 @@ os.environ.setdefault("APP_ENV", "test")
 
 from app.services.vet_summary_service import VetSummary, get_vet_summary
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

@@ -25,7 +25,6 @@ from app.services.nutrition_service import (
     get_diet_summary,
 )
 
-
 # ---------------------------------------------------------------------------
 # _diet_summary_threshold — Calories
 # ---------------------------------------------------------------------------

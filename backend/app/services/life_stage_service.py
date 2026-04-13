@@ -175,9 +175,7 @@ def _is_stage_specific_trait(label: str) -> bool:
         return False
     if any(token in value for token in _STAGE_SPECIFIC_TOKENS):
         return True
-    if any(token in value for token in _GENERIC_TRAIT_TOKENS):
-        return False
-    return True
+    return not any(token in value for token in _GENERIC_TRAIT_TOKENS)
 
 
 def _risk_keywords(documented_risks: list[str]) -> set[str]:

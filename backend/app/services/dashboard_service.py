@@ -756,7 +756,7 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
     async def _safe_async_call(label: str, default, coro):
         try:
             return await asyncio.wait_for(coro, timeout=_ENRICHMENT_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error(
                 "%s timed out after %ds for pet=%s",
                 label, _ENRICHMENT_TIMEOUT_SECONDS, pet_id,
@@ -824,8 +824,9 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
     # /health-summary and /vet-questions API calls.
     cached_insights: dict[str, dict | None] = {"health_summary": None, "vet_questions": None}
     try:
-        from app.models.pet_ai_insight import PetAiInsight
         from datetime import timedelta
+
+        from app.models.pet_ai_insight import PetAiInsight
         stale_cutoff = datetime.utcnow() - timedelta(days=AI_INSIGHT_CACHE_DAYS)
         insight_rows = (
             db.query(PetAiInsight)

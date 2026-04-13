@@ -11,6 +11,8 @@ import os
 import uuid
 from datetime import date, timedelta
 
+import pytest
+
 os.environ.setdefault("APP_ENV", "test")
 
 from sqlalchemy import create_engine, event
@@ -31,7 +33,6 @@ from app.services.signal_resolver import (
     resolve_food_signal,
     resolve_supplement_signal,
 )
-
 
 # ---------------------------------------------------------------------------
 # SQLite in-memory session fixture

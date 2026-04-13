@@ -25,13 +25,12 @@ Rules:
 import logging
 from typing import Any
 
+import razorpay as razorpay_sdk
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from fastapi.responses import Response as FastAPIResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func as sqlfunc
 from sqlalchemy.orm import Session
-
-import razorpay as razorpay_sdk
 
 from app.config import settings
 from app.core.constants import CARE_PLAN_DUE_SOON_DAYS
@@ -39,16 +38,16 @@ from app.core.encryption import encrypt_field
 from app.core.rate_limiter import check_dashboard_rate_limit
 from app.database import get_db
 from app.models.cart_item import CartItem
-from app.models.user import User
 from app.models.condition import Condition
-from app.models.diet_item import DietItem
-from app.models.product_food import ProductFood
-from app.models.product_supplement import ProductSupplement
 from app.models.condition_medication import ConditionMedication
 from app.models.condition_monitoring import ConditionMonitoring
 from app.models.contact import Contact
+from app.models.diet_item import DietItem
 from app.models.nudge import Nudge
 from app.models.pet import Pet
+from app.models.product_food import ProductFood
+from app.models.product_supplement import ProductSupplement
+from app.models.user import User
 from app.services.ai_insights_service import (
     get_or_generate_insight,
     get_or_generate_nutrition_importance,
@@ -92,11 +91,6 @@ from app.services.diet_service import (
     get_diet_items,
     update_diet_item,
 )
-from app.services.signal_resolver import (
-    SUPPLEMENT_TYPE_KEYWORDS,
-    resolve_food_signal,
-    resolve_supplement_signal,
-)
 from app.services.health_trends_service import get_health_trends as get_health_trends_v2
 from app.services.hygiene_service import (
     add_hygiene_item,
@@ -109,6 +103,11 @@ from app.services.nudge_engine import generate_nudges
 from app.services.nutrition_service import analyze_nutrition
 from app.services.razorpay_service import create_razorpay_payment, verify_razorpay_payment
 from app.services.records_service import get_records as get_records_v2
+from app.services.signal_resolver import (
+    SUPPLEMENT_TYPE_KEYWORDS,
+    resolve_food_signal,
+    resolve_supplement_signal,
+)
 from app.services.weight_service import add_weight_entry, get_weight_history
 from app.utils.date_utils import parse_date
 
@@ -533,10 +532,11 @@ async def dashboard_retry_all_failed(
     except ValueError:
         raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
 
+    import asyncio as _asyncio
+
     from app.models.document import Document as DocumentModel
     from app.services.document_upload import download_from_supabase
     from app.services.gpt_extraction import extract_and_process_document
-    import asyncio as _asyncio
 
     failed_docs = (
         db.query(DocumentModel)

@@ -50,12 +50,12 @@ from app.core.constants import (
 from app.core.encryption import decrypt_field, encrypt_field, hash_field
 from app.core.log_sanitizer import mask_phone
 from app.database import get_fresh_session
+from app.models.condition import Condition
+from app.models.custom_preventive_item import CustomPreventiveItem
 from app.models.dashboard_token import DashboardToken
 from app.models.deferred_care_plan_pending import DeferredCarePlanPending
-from app.models.condition import Condition
 from app.models.document import Document
 from app.models.pet import Pet
-from app.models.custom_preventive_item import CustomPreventiveItem
 from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
 from app.models.reminder import Reminder
@@ -934,9 +934,9 @@ def _get_question_for_state(state: str, pet=None, onboarding_data: dict | None =
             f"Any more details about {pet_name}'s preventive care?"
         ),
         "awaiting_documents": (
-            f"Do you have any health records handy — a vaccination card, "
-            f"vet prescription, or lab report? Share a photo or PDF and I'll pull "
-            f"the details in automatically. No worries if not, we can always add them later."
+            "Do you have any health records handy — a vaccination card, "
+            "vet prescription, or lab report? Share a photo or PDF and I'll pull "
+            "the details in automatically. No worries if not, we can always add them later."
         ),
     }
     return prompts.get(state, "Let's continue setting up your profile.")
@@ -2410,6 +2410,7 @@ def _upsert_pending_preventive_record(db, pet, master) -> None:
     Caller is responsible for committing.
     """
     from datetime import date as _date
+
     from app.services.preventive_calculator import compute_status
 
     reminder_before_days = master.reminder_before_days or 30
@@ -2891,9 +2892,9 @@ async def _transition_to_documents(db, user, pet, send_fn):
 
     await send_fn(
         db, mobile,
-        f"Do you have any health records handy — a vaccination card, vet prescription, "
-        f"or lab report? Share a photo or PDF and I'll pull the details in automatically. "
-        f"No worries if not, we can always add them later.",
+        "Do you have any health records handy — a vaccination card, vet prescription, "
+        "or lab report? Share a photo or PDF and I'll pull the details in automatically. "
+        "No worries if not, we can always add them later.",
     )
 
 
@@ -3802,9 +3803,7 @@ def _normalize_preventive_medicine_categories(parsed: dict) -> dict:
             return False
         target_date = _as_text(target.get("date"))
         source_date_text = _as_text(source_date)
-        if source_date_text and not target_date:
-            return False
-        return True
+        return not (source_date_text and not target_date)
 
     normalized = dict(parsed or {})
 
@@ -3912,8 +3911,9 @@ def _infer_species_from_breed(breed_key: str) -> str | None:
     Returns:
         "dog", "cat", or None if breed is not in either dictionary.
     """
-    from app.utils.breed_normalizer import _DOG_BREEDS, _CAT_BREEDS
     import re as _re
+
+    from app.utils.breed_normalizer import _CAT_BREEDS, _DOG_BREEDS
     key = _re.sub(r"[^a-z\s]", "", breed_key.lower().strip()).strip()
     if key in _DOG_BREEDS:
         return "dog"

@@ -582,11 +582,11 @@ def _category_has_meaningful_data(db: Session, pet: Pet, category: str) -> bool:
     Defensive: any query error returns False (preserves the existing behavior
     of falling through to the static priority list).
     """
-    from app.services.nudge_engine import _classify_item
     from app.models.condition import Condition
     from app.models.condition_medication import ConditionMedication
-    from app.models.diet_item import DietItem
     from app.models.diagnostic_test_result import DiagnosticTestResult
+    from app.models.diet_item import DietItem
+    from app.services.nudge_engine import _classify_item
 
     try:
         # Preventive-record-backed categories (keyword-classified by item_name).

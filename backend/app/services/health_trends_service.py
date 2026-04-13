@@ -158,13 +158,10 @@ def _build_weight_signal(weights_desc: list[WeightHistory]) -> dict[str, Any] | 
 
     alert = abs(delta) > 0.2
     if delta > 0.2:
-        direction = "up"
         recommendation = "Weight has trended up. Ask your vet for a measured meal and walk plan over the next 8-12 weeks."
     elif delta < -0.2:
-        direction = "down"
         recommendation = "Weight has trended down. Ask your vet if intake or deworming cadence should be adjusted this month."
     else:
-        direction = "stable"
         recommendation = "Weight is stable. Continue the same routine and re-check weight at the next preventive visit."
 
     # BCS from latest weight entry if available

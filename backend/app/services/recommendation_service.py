@@ -32,9 +32,9 @@ from app.core.constants import (
     ORDER_CAT_MEDICINES,
     ORDER_CAT_SUPPLEMENTS,
 )
-from app.models.order_recommendation import OrderRecommendation
 from app.models.condition import Condition
 from app.models.diet_item import DietItem
+from app.models.order_recommendation import OrderRecommendation
 from app.models.pet import Pet
 from app.models.pet_preference import PetPreference
 from app.models.preventive_master import PreventiveMaster

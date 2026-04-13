@@ -1147,7 +1147,6 @@ def _validate_extraction_json(raw_json: str, file_path: str | None = None) -> tu
                 continue
             # Reject implausibly old dates (before 2020) — likely a GPT year
             # hallucination (e.g. reading "25" as 1925 or misreading digit).
-            from datetime import date as _date
             if parsed_date.year < 2020:
                 logger.warning(
                     "Skipping extraction item at index %d — date year %d predates "
