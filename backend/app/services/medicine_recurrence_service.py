@@ -117,12 +117,38 @@ def _is_dual_use_medicine(medicine_name: str | None) -> bool:
 
 def _lookup_catalog_frequency(db: Session, medicine_name: str, item_type: str) -> int | None:
     """
-    Legacy fast-path: the product_catalog table used to carry a parsed
-    `frequency` column for deworming/flea-tick medicines. With the
-    cart-rules-engine rebuild, deworming and flea-tick products are no
-    longer stored in a structured catalog, so this lookup is a no-op and
+    Look up repeat_frequency from product_medicines table.
+
+    Queries product_medicines for a matching medicine name, then parses the
+    human-readable repeat_frequency string (e.g. "Monthly", "Every 3 months")
+    into an integer number of days. Returns None when no match is found so
     callers fall through to GPT.
     """
+    if not medicine_name or not db:
+        return None
+
+    try:
+        from app.models.product_medicines import ProductMedicines
+
+        med = (
+            db.query(ProductMedicines)
+            .filter(
+                ProductMedicines.active == True,
+                ProductMedicines.product_name.ilike(f"%{medicine_name}%"),
+            )
+            .first()
+        )
+        if med and med.repeat_frequency:
+            days = _parse_frequency_to_days(med.repeat_frequency)
+            if days:
+                logger.info(
+                    "product_medicines frequency for %r: %r -> %d days",
+                    medicine_name, med.repeat_frequency, days,
+                )
+                return days
+    except Exception as e:
+        logger.debug("product_medicines lookup failed for %r: %s", medicine_name, str(e))
+
     return None
 
 

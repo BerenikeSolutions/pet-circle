@@ -74,52 +74,119 @@ _RE_MEDICATION_SIGNAL = re.compile(
     re.IGNORECASE,
 )
 
-# Maps medication brand names to compatible preventive categories.
-# Some medicines can reasonably be used for both deworming and flea/tick.
-_MEDICATION_TO_PREVENTIVE_CATEGORIES: dict[str, frozenset[str]] = {
-    # Both flea_tick + deworming
-    "simparica": frozenset({"flea_tick", "deworming"}),
-    "simparica trio": frozenset({"flea_tick", "deworming"}),
-    "nexgard spectra": frozenset({"flea_tick", "deworming"}),
-    "advocate": frozenset({"flea_tick", "deworming"}),
-    "revolution plus": frozenset({"flea_tick", "deworming"}),
-    "broadline": frozenset({"flea_tick", "deworming"}),
-    # Flea & Tick only
-    "nexgard": frozenset({"flea_tick"}),
-    "bravecto": frozenset({"flea_tick"}),
-    "frontline": frozenset({"flea_tick"}),
-    "frontline plus": frozenset({"flea_tick"}),
-    "fipronil": frozenset({"flea_tick"}),
-    "revolution": frozenset({"flea_tick"}),
-    "credelio": frozenset({"flea_tick"}),
-    "seresto": frozenset({"flea_tick"}),
-    "advantix": frozenset({"flea_tick"}),
-    "advantage": frozenset({"flea_tick"}),
-    # Deworming only
-    "milbemax": frozenset({"deworming"}),
-    "drontal": frozenset({"deworming"}),
-    "drontal plus": frozenset({"deworming"}),
-    "panacur": frozenset({"deworming"}),
-    "prazitel": frozenset({"deworming"}),
-    "prazitel plus": frozenset({"deworming"}),
-    "verminator": frozenset({"deworming"}),
-    "fenbendazole": frozenset({"deworming"}),
-    "praziquantel": frozenset({"deworming"}),
-    "pyrantel": frozenset({"deworming"}),
-    "ivermectin": frozenset({"deworming"}),
-    "albendazole": frozenset({"deworming"}),
-}
+# Maps medication names to compatible preventive categories.
+# Dynamically loaded from product_medicines table on module initialization.
+# Format: {medicine_name_normalized: frozenset({"flea_tick", "deworming", ...})}
+_MEDICATION_TO_PREVENTIVE_CATEGORIES: dict[str, frozenset[str]] = {}
+_KNOWN_MEDICATION_BRANDS: set[str] = set()
 
-# Known preventive medication brand names used for quick medication-name checks.
-_KNOWN_MEDICATION_BRANDS: set[str] = set(_MEDICATION_TO_PREVENTIVE_CATEGORIES.keys())
+# Flag to track if mapping has been initialized
+_MEDICINE_MAPPING_INITIALIZED = False
+
+
+def _initialize_medicine_mapping(db=None) -> None:
+    """
+    Build medicine-to-categories mapping from product_medicines table.
+    Called lazily on first use or explicitly with a DB session.
+    """
+    global _MEDICATION_TO_PREVENTIVE_CATEGORIES, _KNOWN_MEDICATION_BRANDS, _MEDICINE_MAPPING_INITIALIZED
+
+    if _MEDICINE_MAPPING_INITIALIZED and _MEDICATION_TO_PREVENTIVE_CATEGORIES:
+        return
+
+    # If no DB session provided, try to use default session
+    _db_created_here = False
+    if db is None:
+        try:
+            from app.database import SessionLocal
+            db = SessionLocal()
+            _db_created_here = True
+        except Exception:
+            # If we can't get a DB session, use minimal fallback mapping
+            _MEDICATION_TO_PREVENTIVE_CATEGORIES = {
+                "simparica": frozenset({"flea_tick", "deworming"}),
+                "nexgard spectra": frozenset({"flea_tick", "deworming"}),
+                "advocate": frozenset({"flea_tick", "deworming"}),
+                "drontal": frozenset({"deworming"}),
+                "nexgard": frozenset({"flea_tick"}),
+                "bravecto": frozenset({"flea_tick"}),
+                "frontline": frozenset({"flea_tick"}),
+            }
+            _KNOWN_MEDICATION_BRANDS = set(_MEDICATION_TO_PREVENTIVE_CATEGORIES.keys())
+            _MEDICINE_MAPPING_INITIALIZED = True
+            return
+
+    try:
+        from app.models.product_medicines import ProductMedicines
+
+        medicines = db.query(ProductMedicines).filter(
+            ProductMedicines.active == True
+        ).all()
+
+        mapping = {}
+        for med in medicines:
+            categories = set()
+
+            # Parse type field to determine categories
+            type_lower = med.type.lower()
+            if "deworming" in type_lower:
+                categories.add("deworming")
+            if "flea" in type_lower or "tick" in type_lower:
+                categories.add("flea_tick")
+
+            if not categories:
+                continue
+
+            # Normalize product name for matching
+            normalized_name = med.product_name.strip().lower()
+            # Remove weight ranges like "2–3.5 kg"
+            normalized_name = re.sub(r"\s*\d+[–-]?\d*\.?\d*\s*(kg|ml|g|tablets?|pipette|chew|caps?)\s*", "", normalized_name, flags=re.IGNORECASE)
+            normalized_name = normalized_name.strip()
+
+            if normalized_name:
+                mapping[normalized_name] = frozenset(categories)
+
+            # Also try shorter name (first word or brand)
+            words = normalized_name.split()
+            if words:
+                mapping[words[0]] = frozenset(categories)
+
+        _MEDICATION_TO_PREVENTIVE_CATEGORIES = mapping
+        _KNOWN_MEDICATION_BRANDS = set(mapping.keys())
+        _MEDICINE_MAPPING_INITIALIZED = True
+
+    except Exception as e:
+        # If mapping fails, use minimal fallback
+        logger.warning("Failed to initialize medicine mapping from product_medicines: %s", str(e))
+        _MEDICATION_TO_PREVENTIVE_CATEGORIES = {
+            "simparica": frozenset({"flea_tick", "deworming"}),
+            "nexgard spectra": frozenset({"flea_tick", "deworming"}),
+            "drontal": frozenset({"deworming"}),
+            "nexgard": frozenset({"flea_tick"}),
+            "bravecto": frozenset({"flea_tick"}),
+        }
+        _KNOWN_MEDICATION_BRANDS = set(_MEDICATION_TO_PREVENTIVE_CATEGORIES.keys())
+        _MEDICINE_MAPPING_INITIALIZED = True
+    finally:
+        # Only close the session if we created it internally
+        if _db_created_here:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 
 def _build_medicine_coverage_prompt() -> str:
-    """Build a MEDICINE COVERAGE GUIDE prompt snippet from _MEDICATION_TO_PREVENTIVE_CATEGORIES.
+    """Build a MEDICINE COVERAGE GUIDE prompt snippet from product_medicines table.
 
-    Single source of truth — adding a brand to the dict automatically updates
-    both GPT prompts (onboarding + document extraction) and the fallback lookup.
+    Dynamically sources from _MEDICATION_TO_PREVENTIVE_CATEGORIES which is
+    populated from the product_medicines table. Automatically includes all active
+    medicines in the database.
     """
+    # Ensure mapping is initialized
+    if not _MEDICINE_MAPPING_INITIALIZED:
+        _initialize_medicine_mapping()
+
     both: list[str] = []
     flea_only: list[str] = []
     deworm_only: list[str] = []
@@ -133,19 +200,22 @@ def _build_medicine_coverage_prompt() -> str:
             deworm_only.append(title)
     lines = [
         "- MEDICINE COVERAGE GUIDE (use this to set prevention_targets correctly):",
-        f"  BOTH deworming + flea_tick: {', '.join(both)}",
-        f"  flea_tick only: {', '.join(flea_only)}",
-        f"  deworming only: {', '.join(deworm_only)}",
+        f"  BOTH deworming + flea_tick: {', '.join(sorted(set(both)))}",
+        f"  flea_tick only: {', '.join(sorted(set(flea_only)))}",
+        f"  deworming only: {', '.join(sorted(set(deworm_only)))}",
         "  For any medicine NOT in this list, use your medical knowledge to determine the correct targets.",
     ]
     return "\n".join(lines)
 
 
-def _get_preventive_categories_for_medicine(medication_name: str | None) -> set[str]:
+def _get_preventive_categories_for_medicine(medication_name: str | None, db=None) -> set[str]:
     """Return compatible preventive categories for a medicine brand mention.
 
+    Queries product_medicines table via dynamic mapping for accurate categorization.
     Performs normalized containment checks so values like "NexGard Spectra chew"
     still resolve to configured compatibility categories.
+
+    Falls back to "Other" option for unmapped medicines (user custom entry).
     """
     if not isinstance(medication_name, str):
         return set()
@@ -154,10 +224,15 @@ def _get_preventive_categories_for_medicine(medication_name: str | None) -> set[
     if not normalized:
         return set()
 
+    # Ensure mapping is initialized
+    if not _MEDICINE_MAPPING_INITIALIZED:
+        _initialize_medicine_mapping(db)
+
     categories: set[str] = set()
     for brand, mapped in _MEDICATION_TO_PREVENTIVE_CATEGORIES.items():
         if brand in normalized:
             categories.update(mapped)
+
     return categories
 
 
@@ -165,11 +240,15 @@ def _is_likely_medication_name(name: str) -> bool:
     """Return True if *name* looks like a drug/product rather than a diagnosed condition.
 
     Checks both explicit dosage/form signals (e.g. "50mg", "Capsule") and known
-    preventive medication brand names (e.g. "Simparica", "NexGard").
+    preventive medication brand names from product_medicines table
+    (e.g. "Simparica", "NexGard").
     This prevents GPT mis-classifications from being stored as Condition records.
     """
     if _RE_MEDICATION_SIGNAL.search(name):
         return True
+    # Ensure mapping is initialized
+    if not _MEDICINE_MAPPING_INITIALIZED:
+        _initialize_medicine_mapping()
     return bool(_get_preventive_categories_for_medicine(name))
 
 

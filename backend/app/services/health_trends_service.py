@@ -315,7 +315,47 @@ def _build_vaccine_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster]]
     }
 
 
-def _build_flea_tick_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster]]) -> dict[str, Any] | None:
+def _fetch_medicine_info(medicine_name: str | None, db: Session | None) -> dict[str, Any] | None:
+    """Look up a medicine in product_medicines and return display metadata.
+
+    Returns a dict with ingredient/dosage/frequency/warning keys, or None when
+    either the medicine_name is absent or the catalog lookup fails.
+    """
+    if not medicine_name or db is None:
+        return None
+    try:
+        from app.models.product_medicines import ProductMedicines
+
+        med = (
+            db.query(ProductMedicines)
+            .filter(
+                ProductMedicines.active == True,
+                ProductMedicines.product_name.ilike(f"%{medicine_name}%"),
+            )
+            .first()
+        )
+        if med:
+            return {
+                "product_name": med.product_name,
+                "brand_name": med.brand_name,
+                "form": med.form,
+                "ingredients": med.key_ingredients,
+                "dosage": med.dosage,
+                "repeat_frequency": med.repeat_frequency,
+                "warnings": med.notes,
+                "price_display": (
+                    f"₹{med.discounted_paise // 100}" if med.discounted_paise else None
+                ),
+            }
+    except Exception:
+        pass
+    return None
+
+
+def _build_flea_tick_cadence(
+    rows: list[tuple[PreventiveRecord, PreventiveMaster]],
+    db: Session | None = None,
+) -> dict[str, Any] | None:
     """Build flea/tick dot-plot card with gap severity coloring.
 
     Mirrors deworming logic: shows overdue/upcoming entries even when no
@@ -343,14 +383,18 @@ def _build_flea_tick_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster
                 status = "overdue"
             else:
                 status = "upcoming"
-            doses.append({
+            dose_entry: dict[str, Any] = {
                 "num": idx,
                 "label": master.item_name,
                 "gap": None,
                 "status": status,
                 "gap_alert": False,
                 "date": record.next_due_date.isoformat() if record.next_due_date else None,
-            })
+            }
+            med_info = _fetch_medicine_info(record.medicine_name, db)
+            if med_info:
+                dose_entry["medicine_info"] = med_info
+            doses.append(dose_entry)
             continue
 
         gap_text = None
@@ -365,14 +409,18 @@ def _build_flea_tick_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster
             else:
                 status = "red"
 
-        doses.append({
+        dose_entry = {
             "num": idx,
             "label": master.item_name,
             "gap": gap_text,
             "status": status,
             "gap_alert": status == "red",
             "date": record.last_done_date.isoformat(),
-        })
+        }
+        med_info = _fetch_medicine_info(record.medicine_name, db)
+        if med_info:
+            dose_entry["medicine_info"] = med_info
+        doses.append(dose_entry)
         previous_done_date = record.last_done_date
 
     # Append an upcoming next-due node for a meaningful L→R timeline, but only
@@ -429,7 +477,11 @@ def _build_flea_tick_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster
     }
 
 
-def _build_deworming_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster]], today: date) -> dict[str, Any] | None:
+def _build_deworming_cadence(
+    rows: list[tuple[PreventiveRecord, PreventiveMaster]],
+    today: date,
+    db: Session | None = None,
+) -> dict[str, Any] | None:
     """Build deworming timeline card."""
     deworm_rows = [row for row in rows if _classify_preventive_item(row[1].item_name) == "deworming"]
     if not deworm_rows:
@@ -448,13 +500,15 @@ def _build_deworming_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster
             state = "now"
             node_date = record.next_due_date
 
-        nodes.append(
-            {
-                "label": master.item_name,
-                "state": state,
-                "date": node_date.isoformat() if node_date else None,
-            }
-        )
+        node: dict[str, Any] = {
+            "label": master.item_name,
+            "state": state,
+            "date": node_date.isoformat() if node_date else None,
+        }
+        med_info = _fetch_medicine_info(record.medicine_name, db)
+        if med_info:
+            node["medicine_info"] = med_info
+        nodes.append(node)
 
     # Append a single upcoming node for done records whose next_due_date is in
     # the future — gives the chart a meaningful L→R timeline with a "next due" dot.
@@ -837,8 +891,8 @@ async def get_health_trends(db: Session, pet: Pet) -> dict[str, Any]:
 
     today = date.today()
     vaccines = _build_vaccine_cadence(preventive_rows, today)
-    flea_tick = _build_flea_tick_cadence(preventive_rows)
-    deworming = _build_deworming_cadence(preventive_rows, today)
+    flea_tick = _build_flea_tick_cadence(preventive_rows, db=db)
+    deworming = _build_deworming_cadence(preventive_rows, today, db=db)
     cadence = None if not any((vaccines, flea_tick, deworming)) else {
         "vaccines": vaccines,
         "flea_tick": flea_tick,

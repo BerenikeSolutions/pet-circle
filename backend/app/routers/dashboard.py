@@ -1314,26 +1314,10 @@ def dashboard_get_preventive_medicine_options(
     """
     Return medicine options for medicine-dependent preventive items.
 
-    Medicines are sourced from the frozen set of approved brands per category.
+    Medicines are dynamically sourced from the product_medicines table,
+    filtered by type (deworming, tick/flea) and active status.
     """
-    # Frozen-set medicine options per preventive item category.
-    _DEWORMING_MEDICINES = [
-        "Heartgard", "Milbemax", "Drontal", "Drontal Plus",
-        "Panacur", "Interceptor", "Sentinel", "Revolution",
-    ]
-    _FLEA_TICK_MEDICINES = [
-        "Bravecto", "Simparica", "Simparica Trio", "NexGard", "NexGard Spectra",
-        "Revolution", "Frontline Plus", "Advocate", "Stronghold", "Comfortis",
-    ]
-    _MEDICINE_OPTIONS_BY_ITEM = {
-        "deworming": _DEWORMING_MEDICINES,
-        "tick/flea": _FLEA_TICK_MEDICINES,
-        "tick-flea": _FLEA_TICK_MEDICINES,
-        "flea/tick": _FLEA_TICK_MEDICINES,
-        "flea-tick": _FLEA_TICK_MEDICINES,
-        "flea & tick": _FLEA_TICK_MEDICINES,
-        "tick & flea": _FLEA_TICK_MEDICINES,
-    }
+    from app.models.product_medicines import ProductMedicines
 
     try:
         _get_pet_for_dashboard_token(db, token)
@@ -1343,19 +1327,43 @@ def dashboard_get_preventive_medicine_options(
         if not item_name_norm:
             raise HTTPException(status_code=400, detail="item_name is required")
 
-        options = _MEDICINE_OPTIONS_BY_ITEM.get(item_name_norm)
-        if options is None:
-            # Fallback: substring match (handles puppy variants, etc.)
-            if "deworm" in item_name_norm:
-                options = _DEWORMING_MEDICINES
-            elif "flea" in item_name_norm or "tick" in item_name_norm:
-                options = _FLEA_TICK_MEDICINES
-            else:
-                options = []
+        # Determine preventive type from item_name
+        is_deworming = "deworm" in item_name_norm
+        is_flea_tick = "flea" in item_name_norm or "tick" in item_name_norm
+
+        if not (is_deworming or is_flea_tick):
+            # Unknown item type
+            options = ["Other"]
+            logger.warning("Unknown preventive item type: %s", item_name)
+            return {"item_name": item_name, "options": options}
+
+        # Query product_medicines for matching type
+        query = db.query(ProductMedicines).filter(
+            ProductMedicines.active == True
+        )
+
+        if is_deworming:
+            # Filter for deworming products
+            query = query.filter(
+                ProductMedicines.type.contains("Deworming")
+            )
+        else:  # is_flea_tick
+            # Filter for tick/flea products (include combined products)
+            from sqlalchemy import or_
+            query = query.filter(
+                or_(
+                    ProductMedicines.type.contains("Tick"),
+                    ProductMedicines.type.contains("Flea")
+                )
+            )
+
+        medicines = query.order_by(ProductMedicines.popularity_rank.asc()).all()
+        options = [m.product_name for m in medicines]
+        options.append("Other")  # Always include custom option
 
         logger.info(
-            "medicine_options request item_name=%r -> %d options",
-            item_name, len(options),
+            "medicine_options request item_name=%r -> %d options from product_medicines",
+            item_name, len(options) - 1,
         )
         return {"item_name": item_name, "options": options}
     except HTTPException:

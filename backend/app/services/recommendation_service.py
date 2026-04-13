@@ -189,6 +189,7 @@ async def get_or_generate_recommendations(
             age_range,
             category,
             profile_context,
+            db=db,
         )
 
         # Store in database for future reuse
@@ -222,6 +223,7 @@ async def _generate_recommendations_via_ai(
     age_range: str,
     category: str,
     profile_context: dict,
+    db: Session | None = None,
 ) -> list:
     """
     Call OpenAI to generate recommendations.
@@ -233,7 +235,8 @@ async def _generate_recommendations_via_ai(
     category_display = _get_category_description(category)
 
     prompt = _build_recommendation_prompt(
-        species, breed, age_range, category_display, profile_context
+        species, breed, age_range, category_display, profile_context,
+        db=db, category=category,
     )
 
     try:
@@ -295,12 +298,36 @@ async def _generate_recommendations_via_ai(
         return []
 
 
+def _fetch_catalog_medicines(db: Session | None, species: str, category: str) -> list[str]:
+    """Return top product names from product_medicines for the given species and category."""
+    if db is None:
+        return []
+    try:
+        from app.models.product_medicines import ProductMedicines
+        from sqlalchemy import or_
+
+        query = db.query(ProductMedicines.product_name).filter(
+            ProductMedicines.active == True,
+            ProductMedicines.life_stage_tags.ilike(f"%{species}%"),
+        )
+        if category == ORDER_CAT_MEDICINES or "medicine" in category.lower():
+            # Return a representative mix: flea/tick + deworming
+            results = query.order_by(ProductMedicines.popularity_rank.asc()).limit(10).all()
+        else:
+            results = []
+        return [r[0] for r in results]
+    except Exception:
+        return []
+
+
 def _build_recommendation_prompt(
     species: str,
     breed: str | None,
     age_range: str,
     category_display: str,
     profile_context: dict,
+    db: Session | None = None,
+    category: str = "",
 ) -> str:
     """Build the prompt for AI recommendation generation."""
     breed_info = f" ({breed})" if breed else ""
@@ -311,14 +338,25 @@ def _build_recommendation_prompt(
     preventive = ", ".join(profile_context.get("preventive", [])[:5]) or "none"
     history = ", ".join(profile_context.get("order_history", [])[:5]) or "none"
 
+    # For medicine category, include catalog products so GPT picks real SKUs
+    catalog_section = ""
+    if "medicine" in category_display.lower() or category == ORDER_CAT_MEDICINES:
+        catalog_medicines = _fetch_catalog_medicines(db, species, category)
+        if catalog_medicines:
+            catalog_section = (
+                f"Available medicines in our catalog (prefer these): "
+                f"{', '.join(catalog_medicines[:8])}\n"
+            )
+
     return (
         f"Recommend 5-7 {category_display.lower()} for a {age_range} {species}{breed_info}.\n\n"
         f"Current foods: {foods}\n"
         f"Current supplements: {supplements}\n"
         f"Active conditions: {conditions}\n"
         f"Preventive care already tracked: {preventive}\n"
-        f"Recent order history: {history}\n\n"
-        f"Return ONLY a JSON array with no markdown formatting, like this:\n"
+        f"Recent order history: {history}\n"
+        f"{catalog_section}"
+        f"\nReturn ONLY a JSON array with no markdown formatting, like this:\n"
         f"[\n"
         f'  {{"name": "Product Name", "description": "Short description", "reason": "Why recommended"}},\n'
         f"  ...\n"

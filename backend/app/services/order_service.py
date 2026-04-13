@@ -57,6 +57,31 @@ from app.services.whatsapp_sender import (
 logger = logging.getLogger(__name__)
 
 
+def _get_medicines_example_text(db: Session, species: str | None = None) -> str:
+    """Return example medicine text from top products in product_medicines.
+
+    Falls back to a generic example when the table is unavailable so the
+    order flow is never blocked by a catalog query failure.
+    """
+    try:
+        from app.models.product_medicines import ProductMedicines
+
+        query = db.query(ProductMedicines.product_name).filter(
+            ProductMedicines.active == True,
+        )
+        if species:
+            query = query.filter(ProductMedicines.life_stage_tags.ilike(f"%{species}%"))
+        rows = query.order_by(ProductMedicines.popularity_rank.asc()).limit(3).all()
+        names = [r[0] for r in rows]
+        if len(names) >= 2:
+            return f"_Example: {names[0]}, {names[1]}_"
+        if names:
+            return f"_Example: {names[0]}_"
+    except Exception as exc:
+        logger.debug("Could not fetch example medicines from product_medicines: %s", exc)
+    return "_Example: Nexgard, Drontal_"
+
+
 async def start_order_flow(db: Session, user) -> None:
     """
     Begin the order flow by sending category selection buttons.
@@ -182,7 +207,7 @@ async def handle_order_category(db: Session, user, payload: str) -> None:
         db, from_number,
         f"*{label}* — got it!\n\n"
         f"Please type the item names and quantities you need.\n"
-        f"Example: _Nexgard 3 tablets, Drontal 1 tablet_",
+        f"{_get_medicines_example_text(db)}",
     )
     logger.info("Order category '%s' selected by %s (no recommendations)", category, mask_phone(from_number))
 
@@ -370,7 +395,7 @@ async def handle_order_pet_for_recommendation(db: Session, user, text: str) -> N
         from_number,
         f"*{label}* — got it!\n\n"
         f"Please type the item names and quantities you need.\n"
-        f"Example: _Nexgard 3 tablets, Drontal 1 tablet_",
+        f"{_get_medicines_example_text(db)}",
     )
 
 
@@ -391,7 +416,7 @@ async def _send_recommendation_list(
         "Reply with:\n"
         "• Number(s) to select items: _1_, _2_, _1 3_, or _1-3_\n"
         "• Or type *usual* / *repeat* for your top saved items\n"
-        "• Or type your own items: _Nexgard, Vitamins_\n"
+        "• Or type your own items (medicine name, supplement, etc.)\n"
         "• Or reply *back* to cancel"
     )
     await send_text_message(db, from_number, rec_text)
