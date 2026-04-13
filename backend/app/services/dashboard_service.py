@@ -56,7 +56,7 @@ from app.services.ai_insights_service import (
     generate_care_plan_reasons,
     generate_recognition_bullets,
 )
-from app.services.care_plan_engine import compute_care_plan
+from app.services.care_plan_engine import compute_care_plan, get_preventive_baseline_days, _normalize_item_name
 from app.services.document_upload import download_from_supabase
 from app.services.gpt_extraction import _infer_document_category, _resolve_document_category
 from app.services.life_stage_service import get_life_stage_data
@@ -473,14 +473,34 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
     )
 
     for record, master in selected_records:
-        # Use custom recurrence if set, otherwise fall back to master default
-        effective_recurrence = record.custom_recurrence_days if record.custom_recurrence_days else master.recurrence_days
+        # Determine test_type for life-stage-based recurrence lookup.
+        test_type = _normalize_item_name(master.item_name)
+        _LIFE_STAGE_TYPES = {"deworming", "tick_flea"}
+
+        if record.custom_recurrence_days:
+            # Respect user-set custom interval always.
+            effective_recurrence = record.custom_recurrence_days
+        elif test_type in _LIFE_STAGE_TYPES:
+            # Override master.recurrence_days with life-stage-adjusted baseline so that
+            # Care Plan, Care Reminders, and Cadence all display the same next-due date.
+            effective_recurrence = get_preventive_baseline_days(pet, test_type)
+        else:
+            effective_recurrence = master.recurrence_days
+
+        # Recompute next_due_date from last_done_date + effective_recurrence so the
+        # displayed date is always consistent with care_plan_engine's computation.
+        from datetime import timedelta
+        if record.last_done_date and test_type in _LIFE_STAGE_TYPES:
+            display_next_due = str(record.last_done_date + timedelta(days=effective_recurrence))
+        else:
+            display_next_due = str(record.next_due_date) if record.next_due_date else None
+
         preventive_records.append({
             "item_name": master.item_name,
             "category": master.category,
             "circle": master.circle,
             "last_done_date": str(record.last_done_date) if record.last_done_date else None,
-            "next_due_date": str(record.next_due_date) if record.next_due_date else None,
+            "next_due_date": display_next_due,
             "status": record.status,
             "recurrence_days": effective_recurrence,
             "custom_recurrence_days": record.custom_recurrence_days,

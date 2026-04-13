@@ -454,7 +454,7 @@ def _build_flea_tick_cadence(
         footer_color = "#B45309"
         footer_bg = "#FFF6E6"
     elif len(real_doses) == 1:
-        footer_text = "First dose recorded. Apply monthly for continuous coverage."
+        footer_text = "Last dose recorded. Apply monthly for continuous coverage."
         footer_color = "#B45309"
         footer_bg = "#FFF6E6"
     elif red_gap_count > 0:
@@ -481,6 +481,7 @@ def _build_deworming_cadence(
     rows: list[tuple[PreventiveRecord, PreventiveMaster]],
     today: date,
     db: Session | None = None,
+    pet: Pet | None = None,
 ) -> dict[str, Any] | None:
     """Build deworming timeline card."""
     deworm_rows = [row for row in rows if _classify_preventive_item(row[1].item_name) == "deworming"]
@@ -512,20 +513,28 @@ def _build_deworming_cadence(
 
     # Append a single upcoming node for done records whose next_due_date is in
     # the future — gives the chart a meaningful L→R timeline with a "next due" dot.
+    # Use life-stage-adjusted recurrence (same formula as care_plan_engine) so that
+    # the cadence date always matches what the care plan card displays.
+    from datetime import timedelta
+    from app.services.care_plan_engine import get_preventive_baseline_days
+
     done_node_dates = {n["date"] for n in nodes if n["state"] == "done"}
     for record, master in deworm_rows:
-        if (
-            record.last_done_date
-            and record.next_due_date
-            and record.next_due_date >= today
-            and record.next_due_date.isoformat() not in done_node_dates
-        ):
-            nodes.append({
-                "label": master.item_name,
-                "state": "upcoming",
-                "date": record.next_due_date.isoformat(),
-            })
-            break  # one upcoming node is sufficient
+        if record.last_done_date:
+            if record.custom_recurrence_days:
+                recurrence = record.custom_recurrence_days
+            elif pet is not None:
+                recurrence = get_preventive_baseline_days(pet, "deworming")
+            else:
+                recurrence = master.recurrence_days
+            computed_next = record.last_done_date + timedelta(days=recurrence)
+            if computed_next >= today and computed_next.isoformat() not in done_node_dates:
+                nodes.append({
+                    "label": master.item_name,
+                    "state": "upcoming",
+                    "date": computed_next.isoformat(),
+                })
+                break  # one upcoming node is sufficient
 
     done_count = sum(1 for n in nodes if n["state"] == "done")
     missed_count = sum(1 for n in nodes if n["state"] == "missed")
@@ -892,7 +901,7 @@ async def get_health_trends(db: Session, pet: Pet) -> dict[str, Any]:
     today = date.today()
     vaccines = _build_vaccine_cadence(preventive_rows, today)
     flea_tick = _build_flea_tick_cadence(preventive_rows, db=db)
-    deworming = _build_deworming_cadence(preventive_rows, today, db=db)
+    deworming = _build_deworming_cadence(preventive_rows, today, db=db, pet=pet)
     cadence = None if not any((vaccines, flea_tick, deworming)) else {
         "vaccines": vaccines,
         "flea_tick": flea_tick,

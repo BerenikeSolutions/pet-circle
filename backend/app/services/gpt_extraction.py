@@ -545,6 +545,15 @@ def _resolve_document_category(
     if any(kw in combined for kw in ("pcr", "parasite panel", "parasite screen")):
         return "PCR & Parasite Panel"
 
+    # Lab-report results guard: if the document has actual diagnostic test results
+    # (parameter values + reference ranges) and GPT already returned a known lab
+    # report category, trust that classification.  Conditions extracted from an
+    # "impression" or diagnosis line at the bottom of a blood/urine report must
+    # NOT force the document to "Prescription".
+    _LAB_REPORT_CATEGORIES = {"Blood Report", "Urine Report", "Imaging", "PCR & Parasite Panel"}
+    if diagnostic_values and raw_category in _LAB_REPORT_CATEGORIES:
+        return raw_category
+
     # Structural signals — clinical_exam is prompt-guaranteed prescription-only,
     # and any extracted condition means a vet diagnosed + prescribed something.
     if isinstance(clinical_exam, dict) and any(
@@ -725,6 +734,17 @@ def _append_single_extracted_date_to_filename(
     if dot > 0:
         return f"{original_filename[:dot]}_{date_suffix}{original_filename[dot:]}"
     return f"{original_filename}_{date_suffix}"
+
+
+def _build_prescription_document_name(event_date) -> str:
+    """Build the canonical display name for vet prescription documents.
+
+    Format: VetPrescription_MONYY (e.g. VetPrescription_Mar26).
+    If no event_date is available, returns plain "VetPrescription".
+    """
+    if event_date:
+        return f"VetPrescription_{event_date.strftime('%b%y')}"
+    return "VetPrescription"
 
 
 def _extract_date_from_filename(file_path: str | None) -> str | None:
@@ -948,7 +968,11 @@ EXTRACTION_SYSTEM_PROMPT = (
     "even if the only content is a list of ordered tests and no diagnosis is written. "
     "A document that only lists test RESULTS from a diagnostic lab (with reference ranges and status flags) "
     "is a 'Blood Report' / 'Urine Report' / etc., NOT a Prescription. The distinguishing signal is: "
-    "ordered tests → Prescription; reported test results → Lab report.\n"
+    "ordered tests → Prescription; reported test results → Lab report. "
+    "For lab reports (Blood Report, Urine Report, PCR & Parasite Panel, Imaging): set conditions: [] "
+    "even if the document contains a brief clinical impression, interpretation, or diagnosis line — "
+    "conditions[] is only for vet prescriptions or clinic visit records where a doctor actively "
+    "diagnosed and treated the pet.\n"
     "- Handwritten medication lists are Prescriptions: A handwritten page listing drug names with doses "
     "and frequencies (e.g., 'Tab Pan 40mg BID', 'Tab Toxomox 500mg AIT', 'Tab Gabapentin 600mg') is ALWAYS "
     "a Prescription even if no clinic letterhead or formal diagnosis is visible. Set document_category to "
@@ -2097,8 +2121,10 @@ async def extract_and_process_document(
         )
         results["items_extracted"] = len(extracted_items)
 
-        # Keep original filename; append a date only when exactly one date is present.
-        if document.document_name:
+        # For non-prescriptions: keep original filename; append a date only when
+        # exactly one date is present.  Prescriptions are renamed below after
+        # event_date is resolved.
+        if document_category != "Prescription" and document.document_name:
             document.document_name = _append_single_extracted_date_to_filename(
                 str(document.document_name), extracted_items
             )[:200]
@@ -2108,6 +2134,7 @@ async def extract_and_process_document(
         # Compute event_date: prefer last_done_date from preventive items.
         # For diagnostic-only documents (urine, blood panel with no tracked items),
         # fall back to observed_at from diagnostic_values, then filename date.
+        # For prescriptions with no preventive items, also try diagnosed_at from conditions.
         event_dates: list = []
         for item in extracted_items:
             raw_date = item.get("last_done_date")
@@ -2125,6 +2152,15 @@ async def extract_and_process_document(
                         event_dates.append(parse_date(str(observed_at)))
                     except ValueError:
                         pass
+        if not event_dates and document_category == "Prescription":
+            # Prescription with no preventive items — try diagnosed_at from conditions.
+            for cond in (metadata.get("conditions") or []):
+                diagnosed_at = cond.get("diagnosed_at") if isinstance(cond, dict) else None
+                if diagnosed_at:
+                    try:
+                        event_dates.append(parse_date(str(diagnosed_at)))
+                    except ValueError:
+                        pass
         if not event_dates:
             # Last resort — extract date from the original filename.
             fn_date = _extract_date_from_filename(document.file_path)
@@ -2135,6 +2171,12 @@ async def extract_and_process_document(
                     pass
         if event_dates:
             document.event_date = max(event_dates)
+
+        # Rename vet prescriptions to VetPrescription_MONYY format.
+        # Uses the resolved event_date so the month/year matches the visit date
+        # visible in the document rather than the upload date.
+        if document_category == "Prescription":
+            document.document_name = _build_prescription_document_name(document.event_date)
 
         selected_doctor_name = _select_best_doctor_name(
             metadata_doctor_name=(str(metadata["doctor_name"]).strip() if metadata["doctor_name"] else None),

@@ -142,7 +142,7 @@ RATE_LIMIT_WINDOW_SECONDS: int = 60
 
 # --- OpenAI Model Configuration ---
 # Extraction model for parsing uploaded documents into structured health data.
-OPENAI_EXTRACTION_MODEL: str = "claude-sonnet-4-6"
+OPENAI_EXTRACTION_MODEL: str = "claude-opus-4-6"
 
 # Query model for answering user questions grounded in pet records.
 OPENAI_QUERY_MODEL: str = "claude-sonnet-4-6"

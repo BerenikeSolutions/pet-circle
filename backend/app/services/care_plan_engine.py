@@ -896,6 +896,26 @@ def _resolve_diet_item_signals(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def get_preventive_baseline_days(pet: Pet, test_type: str) -> int:
+    """Return life-stage-adjusted baseline recurrence days for a preventive test type.
+
+    Mirrors the same logic used inside compute_care_plan so that the care-cadence
+    view and the care-plan view always agree on the expected interval.
+
+    Args:
+        pet:       Pet model instance.
+        test_type: Canonical test_type string (e.g. "deworming", "tick_flea").
+
+    Returns:
+        Interval in days.
+    """
+    age_months = _get_pet_age_months(pet)
+    weight_kg = _get_weight_kg(pet)
+    breed_size = _get_breed_size(weight_kg, pet.breed)
+    life_stage = _get_life_stage(age_months, breed_size)
+    return _get_baseline_protocol(life_stage, test_type)
+
+
 def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
     """
     Compute the full care plan for a pet.

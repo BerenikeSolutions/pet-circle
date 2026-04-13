@@ -104,10 +104,12 @@ export default function DietAnalysisCard({ token, compact = false }: DietAnalysi
     },
   ];
 
+  // Order must match backend get_diet_summary: minerals → others → vitamins
+  // so the top-3 slice selects the same nutrients as the supplement cards.
   const allNutrients: NutritionNutrient[] = [
-    ...(nutrition?.vitamins ?? []),
     ...(nutrition?.minerals ?? []),
     ...(nutrition?.others ?? []),
+    ...(nutrition?.vitamins ?? []),
   ];
 
   const missingMicros = allNutrients
