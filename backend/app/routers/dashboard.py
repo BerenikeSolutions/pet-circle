@@ -2345,9 +2345,13 @@ async def resolve_supplement_by_micronutrient(
 
     Used by the Quick Fixes to Add section when the user clicks on a
     micronutrient-based supplement recommendation (which has no diet_item_id).
-    Maps the micronutrient name to a canonical supplement type via the
-    SUPPLEMENT_TYPE_KEYWORDS map, then returns matching products from
-    product_supplement, sorted by popularity.
+
+    Two-pass resolution:
+      1. Type match: maps micronutrient name → canonical supplement type via
+         SUPPLEMENT_TYPE_KEYWORDS; queries product_supplement by type.
+      2. Ingredient match: searches key_ingredients ILIKE '%<micronutrient>%'
+         to find products that literally contain the nutrient.
+    Results are merged (type-match first), deduped, and capped at 3 products.
 
     Returns the same shape as /products/resolve so the frontend ProductSelectorCard
     can be reused unchanged.
@@ -2357,8 +2361,8 @@ async def resolve_supplement_by_micronutrient(
     except ValueError:
         raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
 
-    # Map micronutrient name to canonical supplement type using the same
-    # keyword map the signal resolver uses for diet items.
+    # --- Step 1: type-based match via SUPPLEMENT_TYPE_KEYWORDS ---
+    # Longest-match keyword wins (e.g. "fish oil" > "oil").
     haystack = micronutrient.lower().strip()
     sup_type: str | None = None
     best_len = 0
@@ -2367,9 +2371,55 @@ async def resolve_supplement_by_micronutrient(
             sup_type = canonical
             best_len = len(keyword)
 
-    if not sup_type:
-        # No keyword match — return empty product list so the selector
-        # shows a graceful empty state rather than crashing.
+    # Normalise the micronutrient for a key_ingredients ILIKE search:
+    # replace underscores with spaces so "vitamin_e" → "vitamin e".
+    ingredient_term = haystack.replace("_", " ")
+
+    # --- Step 2: ingredient-level search ---
+    # Search key_ingredients for the exact micronutrient name regardless of
+    # whether a type match was found. This handles micronutrients like zinc,
+    # taurine, phosphorus that appear directly in ingredient lists.
+    ingredient_rows: list = []
+    if ingredient_term:
+        ingredient_rows = (
+            db.query(ProductSupplement)
+            .filter(
+                ProductSupplement.active == True,
+                ProductSupplement.key_ingredients.ilike(f"%{ingredient_term}%"),
+            )
+            .order_by(ProductSupplement.popularity_rank)
+            .limit(5)
+            .all()
+        )
+
+    # --- Step 3: type-based rows (primary) ---
+    type_rows: list = []
+    if sup_type:
+        type_rows = (
+            db.query(ProductSupplement)
+            .filter(
+                ProductSupplement.active == True,
+                ProductSupplement.type == sup_type,
+            )
+            .order_by(ProductSupplement.popularity_rank)
+            .limit(3)
+            .all()
+        )
+
+    # --- Step 4: merge — type-match first, ingredient-match fills remaining slots ---
+    # Dedup by sku_id; type-match products are preferred (they're the most targeted type).
+    seen_skus: set[str] = set()
+    merged: list = []
+    for p in type_rows:
+        if p.sku_id not in seen_skus:
+            seen_skus.add(p.sku_id)
+            merged.append(p)
+    for p in ingredient_rows:
+        if p.sku_id not in seen_skus and len(merged) < 3:
+            seen_skus.add(p.sku_id)
+            merged.append(p)
+
+    if not merged:
         return {
             "level": "L1",
             "products": [],
@@ -2380,30 +2430,7 @@ async def resolve_supplement_by_micronutrient(
             "pack_size_suggestion": None,
         }
 
-    # Fetch products matching this supplement type, ordered by popularity.
-    rows = (
-        db.query(ProductSupplement)
-        .filter(
-            ProductSupplement.active == True,
-            ProductSupplement.type == sup_type,
-        )
-        .order_by(ProductSupplement.popularity_rank)
-        .limit(3)
-        .all()
-    )
-
-    if not rows:
-        return {
-            "level": "L1",
-            "products": [],
-            "cta_label": None,
-            "highlight_sku": None,
-            "message": "No matching supplements found in our catalog.",
-            "vet_diet_warning": False,
-            "pack_size_suggestion": None,
-        }
-
-    highlight_sku = rows[0].sku_id
+    highlight_sku = merged[0].sku_id
     products = [
         {
             "sku_id": p.sku_id,
@@ -2420,7 +2447,7 @@ async def resolve_supplement_by_micronutrient(
             "is_highlighted": p.sku_id == highlight_sku,
             "highlight_reason": "Most Popular" if p.sku_id == highlight_sku else None,
         }
-        for p in rows
+        for p in merged
     ]
 
     return {

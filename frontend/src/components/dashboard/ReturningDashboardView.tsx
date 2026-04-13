@@ -77,11 +77,18 @@ export default function ReturningDashboardView({
   }, []);
 
   const handleAddToCart = useCallback(async (item: CarePlanItem, sectionTitle: string) => {
-    if (item.diet_item_id) {
+    // Supplement items without an explicit micronutrient field (e.g. from preventive-master)
+    // are resolved by item name so they also open the product selector.
+    const supplementResolveKey = item.micronutrient || (item.test_type === "supplement" ? item.name : null);
+    const resolveUrl = item.diet_item_id
+      ? `${API_BASE}/dashboard/${token}/products/resolve?diet_item_id=${encodeURIComponent(item.diet_item_id)}`
+      : supplementResolveKey
+        ? `${API_BASE}/dashboard/${token}/products/resolve-by-micronutrient?micronutrient=${encodeURIComponent(supplementResolveKey)}`
+        : null;
+
+    if (resolveUrl) {
       try {
-        const res = await fetch(
-          `${API_BASE}/dashboard/${token}/products/resolve?diet_item_id=${encodeURIComponent(item.diet_item_id)}`
-        );
+        const res = await fetch(resolveUrl);
         if (!res.ok) throw new Error("resolve failed");
         const result = await res.json();
         setSelectorProducts(result.products || []);
@@ -91,24 +98,19 @@ export default function ReturningDashboardView({
         setPendingSectionTitle(sectionTitle);
         setSelectorOpen(true);
       } catch {
-        // Fallback: add directly to cart
-        const id = cartItemId(item, sectionTitle);
-        onAddToCart(item, sectionTitle);
-        setAddedIds((prev) => ({ ...prev, [id]: true }));
-        const timeoutId = window.setTimeout(() => {
-          setAddedIds((prev) => ({ ...prev, [id]: false }));
-        }, 1800);
-        timerIdsRef.current.push(timeoutId);
+        // Network / server error — do nothing; don't open selector or add to cart
       }
-    } else {
-      const id = cartItemId(item, sectionTitle);
-      onAddToCart(item, sectionTitle);
-      setAddedIds((prev) => ({ ...prev, [id]: true }));
-      const timeoutId = window.setTimeout(() => {
-        setAddedIds((prev) => ({ ...prev, [id]: false }));
-      }, 1800);
-      timerIdsRef.current.push(timeoutId);
+      return;
     }
+
+    // No resolve URL: non-supplement items directly orderable without product lookup
+    const id = cartItemId(item, sectionTitle);
+    onAddToCart(item, sectionTitle);
+    setAddedIds((prev) => ({ ...prev, [id]: true }));
+    const timeoutId = window.setTimeout(() => {
+      setAddedIds((prev) => ({ ...prev, [id]: false }));
+    }, 1800);
+    timerIdsRef.current.push(timeoutId);
   }, [token, onAddToCart]);
 
   const handleSelectorAdd = useCallback(async (skuId: string, quantity: number) => {
@@ -116,7 +118,10 @@ export default function ReturningDashboardView({
 
     // Optimistic update — close popup and add to cart immediately using local product data
     const icon = product?.category === "food" ? "🥣" : "💊";
-    const name = product?.product_line || product?.brand_name || skuId;
+    // Food: product_line is the meaningful name; Supplement: product_name is the full name.
+    const name = product?.category === "food"
+      ? (product.product_line || product.brand_name || skuId)
+      : (product?.product_name || product?.brand_name || skuId);
     const price = product?.discounted_price ?? 0;
     const mrp = product?.mrp ?? price;
     onAddBySku(skuId, name, price, mrp, icon, pendingSectionTitle, quantity);

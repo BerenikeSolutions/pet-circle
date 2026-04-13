@@ -93,10 +93,13 @@ export default function DashboardView({
   const handleAddToCart = useCallback(async (item: CarePlanItem, sectionTitle: string) => {
     // Resolve products from backend when we have a diet_item_id (food/existing supplement)
     // or a micronutrient name (nutrition-gap supplement recommendations).
+    // Supplement items without an explicit micronutrient field (e.g. from preventive-master)
+    // are resolved by the item name so they also open the product selector.
+    const supplementResolveKey = item.micronutrient || (item.test_type === "supplement" ? item.name : null);
     const resolveUrl = item.diet_item_id
       ? `${API_BASE}/dashboard/${token}/products/resolve?diet_item_id=${encodeURIComponent(item.diet_item_id)}`
-      : item.micronutrient
-        ? `${API_BASE}/dashboard/${token}/products/resolve-by-micronutrient?micronutrient=${encodeURIComponent(item.micronutrient)}`
+      : supplementResolveKey
+        ? `${API_BASE}/dashboard/${token}/products/resolve-by-micronutrient?micronutrient=${encodeURIComponent(supplementResolveKey)}`
         : null;
 
     if (resolveUrl) {
