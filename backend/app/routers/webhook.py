@@ -293,9 +293,10 @@ async def handle_whatsapp_message(request: Request, db: Session = Depends(get_db
 
         # Slow path: DB-backed dedup survives server restarts.
         # Checks message_logs.wamid (unique index) for previously processed messages.
-        # FAIL-CLOSED: If we can't verify a message is new, reject it.
-        # A false-negative (dropping a legitimate new message) is far less harmful
-        # than a false-positive (reprocessing an old message and sending phantom uploads).
+        # FAIL-OPEN on connection errors: the in-memory _DEDUP_CACHE already vetted
+        # this message_id, and the wamid unique constraint at insert time is a third
+        # safety net. Dropping legitimate messages (fail-closed) is worse than the
+        # rare duplicate on a server-restart race — the constraint prevents phantom writes.
         if message_id:
             try:
                 existing = db.query(MessageLog.id).filter(
@@ -305,8 +306,13 @@ async def handle_whatsapp_message(request: Request, db: Session = Depends(get_db
                     logger.info("DB dedup: message_id %s already processed — skipping.", message_id)
                     return {"status": "ok"}
             except Exception as e:
-                logger.error("DB dedup check failed — rejecting message to prevent phantom reprocessing: %s", str(e))
-                return {"status": "ok"}
+                # SSL connection dropped or pool exhausted — do not drop the message.
+                # In-memory dedup already passed; wamid unique constraint at insert
+                # will reject any actual duplicate. Log at WARNING, not ERROR.
+                logger.warning(
+                    "DB dedup check unavailable (SSL/pool error) — continuing with in-memory dedup: %s",
+                    str(e)[:200],
+                )
 
         # Log the incoming message AFTER dedup so duplicates aren't logged twice.
         # The wamid unique constraint acts as a final dedup safety net.
