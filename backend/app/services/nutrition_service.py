@@ -1063,31 +1063,21 @@ def _status_from_gap(gaps: dict, name: str, default: str = "Adequate") -> str:
 def _build_macros(actual: dict, targets: dict, breed_key: str) -> list[dict]:
     """Build macronutrients array for the response.
 
-    Returns 4 macros matching the new prompt output fields:
-    calories_per_day, protein_pct, fat_pct, fibre_pct.
+    Returns 4 macros showing LLM API percentages directly:
+    protein_pct, fat_pct, fibre_pct.
     """
-    target_protein = targets.get("protein", 25)
-    target_fat = targets.get("fat", 14)
-    target_fibre = targets.get("fibre", 4)
-
     return [
         {
             "name": "Protein", "icon": "\U0001f969",
-            "actual": actual["protein"], "target": target_protein, "unit": "%",
-            "status": _status_for_ratio(_safe_ratio(actual["protein"], target_protein)),
-            "note": None,
+            "value": actual["protein"], "unit": "%",
         },
         {
             "name": "Fat", "icon": "\U0001f9c8",
-            "actual": actual["fat"], "target": target_fat, "unit": "%",
-            "status": _status_for_ratio(_safe_ratio(actual["fat"], target_fat)),
-            "note": None,
+            "value": actual["fat"], "unit": "%",
         },
         {
             "name": "Fibre", "icon": "\U0001f966",
-            "actual": actual["fibre"], "target": target_fibre, "unit": "%",
-            "status": _status_for_ratio(_safe_ratio(actual["fibre"], target_fibre)),
-            "note": None,
+            "value": actual["fibre"], "unit": "%",
         },
     ]
 
