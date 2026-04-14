@@ -219,7 +219,7 @@ OPENAI_NUTRITION_LOOKUP_MAX_TOKENS: int = 500
 NUTRITION_CACHE_STALENESS_DAYS: int = 365
 
 # --- Food Nutrition Estimation (unknown foods) ---
-OPENAI_FOOD_ESTIMATION_MAX_TOKENS: int = 800
+OPENAI_FOOD_ESTIMATION_MAX_TOKENS: int = 2000
 FOOD_CACHE_STALENESS_DAYS: int = 365
 
 # --- Personalized Nutrition Recommendations ---

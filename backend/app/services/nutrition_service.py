@@ -545,7 +545,11 @@ def _parse_json_from_response(raw: str) -> dict | None:
         return None
 
     # Strip markdown code fence wrappers: ```json ... ``` or ``` ... ```
+    # Also handle preamble text before the fence (e.g. "Here is the result:\n```json\n{...}")
     text = raw.strip()
+    fence_pos = text.find("```")
+    if fence_pos > 0:
+        text = text[fence_pos:]
     if text.startswith("```"):
         # Remove opening fence (optionally with language tag like ```json)
         lines = text.split("\n")
@@ -952,6 +956,11 @@ async def _call_openai_combined_meal_estimation(
         system=COMBINED_MEAL_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_prompt}],
     )
+    if response.stop_reason == "max_tokens":
+        logger.warning(
+            "Combined meal estimation truncated at max_tokens=%d — increase OPENAI_FOOD_ESTIMATION_MAX_TOKENS",
+            OPENAI_FOOD_ESTIMATION_MAX_TOKENS,
+        )
     raw = response.content[0].text
     logger.debug("Combined meal estimation raw: %s", raw)
     result = _parse_json_from_response(raw)
