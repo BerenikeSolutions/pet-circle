@@ -17,11 +17,11 @@ from app.database import Base
 
 
 class ProductSupplement(Base):
-    """A supplement SKU in the PetCircle catalog (S001..S016)."""
+    """A supplement SKU in the PetCircle catalog (S017..S116)."""
 
     __tablename__ = "product_supplement"
 
-    sku_id = Column(String(10), primary_key=True)          # S001, S002, ...
+    sku_id = Column(String(10), primary_key=True)          # S017, S018, ...
     brand_id = Column(String(10), nullable=False)
     brand_name = Column(String(100), nullable=False)
     product_name = Column(String(200), nullable=False)

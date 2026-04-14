@@ -109,7 +109,7 @@ export interface DotPlotSVGProps {
 /** Evenly distribute n dots across the usable canvas width. */
 function dotXPositions(n: number): number[] {
   if (n === 0) return [];
-  if (n === 1) return [VW / 2];
+  if (n === 1) return [PAD];
   return Array.from({ length: n }, (_, i) =>
     PAD + (i / (n - 1)) * (VW - PAD * 2)
   );
@@ -287,11 +287,13 @@ export default function DotPlotSVG({
             >
               {innerText}
             </text>
-            {/* X-axis date label */}
+            {/* X-axis date label — adaptive anchor prevents edge clipping */}
             <text
-              x={xs[i]}
+              x={xs[i] < VW / 4 ? PAD / 2 : xs[i] > (3 * VW) / 4 ? VW - PAD / 2 : xs[i]}
               y={DATE_Y}
-              textAnchor="middle"
+              textAnchor={
+                xs[i] < VW / 4 ? "start" : xs[i] > (3 * VW) / 4 ? "end" : "middle"
+              }
               fontFamily="Inter,sans-serif"
               fontSize="8"
               fill={

@@ -8,6 +8,8 @@ import AnalysisSummaryCard from "./AnalysisSummaryCard";
 import CarePlanCard from "./CarePlanCard";
 import CartFloater from "./CartFloater";
 import ProductSelectorCard, { type ResolvedProduct } from "./ProductSelectorCard";
+import EndNoteCard from "./EndNoteCard";
+import DocumentUploadModal from "./DocumentUploadModal";
 import type { DashboardViewProps } from "./DashboardView";
 import { buildCarePlanBuckets, computeCarePlanCounts } from "./dashboard-utils";
 
@@ -34,6 +36,8 @@ export default function ReturningDashboardView({
   const [floaterUnlocked, setFloaterUnlocked] = useState(false);
   const [addedIds, setAddedIds] = useState<Record<string, boolean>>({});
   const timerIdsRef = useRef<number[]>([]);
+
+  const [uploadModalOpen, setUploadModalOpen] = useState(false);
 
   // ProductSelectorCard state
   const [selectorOpen, setSelectorOpen] = useState(false);
@@ -73,11 +77,22 @@ export default function ReturningDashboardView({
   }, []);
 
   const handleAddToCart = useCallback(async (item: CarePlanItem, sectionTitle: string) => {
-    if (item.diet_item_id) {
+    // Supplement items without an explicit micronutrient field (e.g. from preventive-master)
+    // are resolved by item name so they also open the product selector.
+    const supplementResolveKey = item.micronutrient || (item.test_type === "supplement" ? item.name : null);
+    const medicineResolveKey =
+      item.test_type === "tick_flea" || item.test_type === "deworming" ? item.name : null;
+    const resolveUrl = item.diet_item_id
+      ? `${API_BASE}/dashboard/${token}/products/resolve?diet_item_id=${encodeURIComponent(item.diet_item_id)}`
+      : supplementResolveKey
+        ? `${API_BASE}/dashboard/${token}/products/resolve-by-micronutrient?micronutrient=${encodeURIComponent(supplementResolveKey)}`
+        : medicineResolveKey
+          ? `${API_BASE}/dashboard/${token}/medicines/resolve?item_name=${encodeURIComponent(medicineResolveKey)}`
+          : null;
+
+    if (resolveUrl) {
       try {
-        const res = await fetch(
-          `${API_BASE}/dashboard/${token}/products/resolve?diet_item_id=${encodeURIComponent(item.diet_item_id)}`
-        );
+        const res = await fetch(resolveUrl);
         if (!res.ok) throw new Error("resolve failed");
         const result = await res.json();
         setSelectorProducts(result.products || []);
@@ -87,41 +102,44 @@ export default function ReturningDashboardView({
         setPendingSectionTitle(sectionTitle);
         setSelectorOpen(true);
       } catch {
-        // Fallback: add directly to cart
-        const id = cartItemId(item, sectionTitle);
-        onAddToCart(item, sectionTitle);
-        setAddedIds((prev) => ({ ...prev, [id]: true }));
-        const timeoutId = window.setTimeout(() => {
-          setAddedIds((prev) => ({ ...prev, [id]: false }));
-        }, 1800);
-        timerIdsRef.current.push(timeoutId);
+        // Network / server error — do nothing; don't open selector or add to cart
       }
-    } else {
-      const id = cartItemId(item, sectionTitle);
-      onAddToCart(item, sectionTitle);
-      setAddedIds((prev) => ({ ...prev, [id]: true }));
-      const timeoutId = window.setTimeout(() => {
-        setAddedIds((prev) => ({ ...prev, [id]: false }));
-      }, 1800);
-      timerIdsRef.current.push(timeoutId);
+      return;
     }
+
+    // No resolve URL: non-supplement items directly orderable without product lookup
+    const id = cartItemId(item, sectionTitle);
+    onAddToCart(item, sectionTitle);
+    setAddedIds((prev) => ({ ...prev, [id]: true }));
+    const timeoutId = window.setTimeout(() => {
+      setAddedIds((prev) => ({ ...prev, [id]: false }));
+    }, 1800);
+    timerIdsRef.current.push(timeoutId);
   }, [token, onAddToCart]);
 
   const handleSelectorAdd = useCallback(async (skuId: string, quantity: number) => {
+    const product = selectorProducts.find((p) => p.sku_id === skuId);
+
+    // Optimistic update — close popup and add to cart immediately using local product data
+    const icon = product?.category === "food" ? "🥣" : "💊";
+    // Food: product_line is the meaningful name; Supplement/medicine: product_name is the full name.
+    const name = product?.category === "food"
+      ? (product.product_line || product.brand_name || skuId)
+      : (product?.product_name || product?.brand_name || skuId);
+    const price = product?.discounted_price ?? 0;
+    const mrp = product?.mrp ?? price;
+    onAddBySku(skuId, name, price, mrp, icon, pendingSectionTitle, quantity, product?.medicine_type);
+    setSelectorOpen(false);
+
+    // Sync with backend in background (best-effort)
     try {
-      const res = await fetch(`${API_BASE}/dashboard/${token}/cart/add`, {
+      await fetch(`${API_BASE}/dashboard/${token}/cart/add`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sku_id: skuId, quantity }),
       });
-      if (!res.ok) throw new Error("add to cart failed");
-      const data = await res.json();
-      const product = selectorProducts.find((p) => p.sku_id === skuId);
-      const mrp = product?.mrp ?? data.price;
-      onAddBySku(skuId, data.name, data.price, mrp, data.icon || "📦", pendingSectionTitle);
-      setSelectorOpen(false);
     } catch (e) {
-      console.error("Failed to add to cart:", e);
+      console.error("Failed to sync cart with backend:", e);
     }
   }, [token, selectorProducts, pendingSectionTitle, onAddBySku]);
 
@@ -129,7 +147,7 @@ export default function ReturningDashboardView({
     <div ref={containerRef} className="app">
       <ProfileBanner data={data} token={token} onGoToReminders={onGoToReminders} />
       <RecognitionCard data={data} onGoToRecords={onGoToRecords} isReturning />
-      <AnalysisSummaryCard data={data} onGoToTrends={onGoToTrends} />
+      <AnalysisSummaryCard data={data} token={token} onGoToTrends={onGoToTrends} />
       <CarePlanCard
         petName={data.pet.name}
         buckets={buckets}
@@ -142,6 +160,12 @@ export default function ReturningDashboardView({
         )}
         addedIds={addedIds}
         onAddToCart={handleAddToCart}
+      />
+      <EndNoteCard petName={data.pet.name} onUploadClick={() => setUploadModalOpen(true)} />
+      <DocumentUploadModal
+        open={uploadModalOpen}
+        token={token}
+        onClose={() => setUploadModalOpen(false)}
       />
       <CartFloater unlocked={floaterUnlocked} cartCount={cartCount} totalPrice={cartTotal} onGoToCart={onGoToCart} />
       <ProductSelectorCard

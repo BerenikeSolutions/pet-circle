@@ -11,12 +11,20 @@ interface VaccinationCadenceProps {
 export default function VaccinationCadence({ data }: VaccinationCadenceProps) {
   return (
     <TimelineSVG
-      nodes={data.rounds.map((round) => ({
-        nodeLabel: round.label,
-        label: formatAxisDate(round.date),
-        sub: round.done ? round.vaccines : "Due",
-        type: round.done ? "done" : "upcoming",
-      }))}
+      nodes={data.rounds.map((round) => {
+        const vaccineNames = round.vaccines.split("·").map((s) => s.trim()).filter(Boolean);
+        const sub = round.done
+          ? vaccineNames.length > 1
+            ? `${vaccineNames.length} vaccines`
+            : vaccineNames[0] || round.vaccines
+          : "Due";
+        return {
+          nodeLabel: round.label,
+          label: formatAxisDate(round.date),
+          sub,
+          type: round.done ? "done" : "upcoming",
+        };
+      })}
       gaps={buildVaccineGapLabels(data.rounds, data.gaps)}
       legend={[
         { type: "done", label: "Completed" },

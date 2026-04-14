@@ -161,6 +161,32 @@ def _generate_vaccine_nudges(db: Session, pet_id, pet_name: str, species: str) -
     return nudges
 
 
+def _get_medicine_warning(medicine_name: str | None, db: Session) -> str:
+    """Return a warning suffix from product_medicines.notes for the given medicine.
+
+    Returns an empty string when medicine_name is absent or not found in catalog.
+    Only TOXIC warnings (e.g., "TOXIC TO CATS") are included in nudge messages.
+    """
+    if not medicine_name:
+        return ""
+    try:
+        from app.models.product_medicines import ProductMedicines
+
+        med = (
+            db.query(ProductMedicines)
+            .filter(
+                ProductMedicines.active == True,
+                ProductMedicines.product_name.ilike(f"%{medicine_name}%"),
+            )
+            .first()
+        )
+        if med and med.notes and "toxic" in med.notes.lower():
+            return f" ⚠️ {med.notes}"
+    except Exception:
+        pass
+    return ""
+
+
 def _generate_deworming_nudges(db: Session, pet_id, pet_name: str, species: str) -> list[Nudge]:
     """Generate nudges for overdue/upcoming deworming."""
     nudges = []
@@ -183,18 +209,19 @@ def _generate_deworming_nudges(db: Session, pet_id, pet_name: str, species: str)
         if _classify_item(item_name) != "deworming":
             continue
 
+        warning = _get_medicine_warning(rec.medicine_name, db)
         if rec.status == "overdue":
             nudges.append(_make_nudge(
                 pet_id, "deworming", "urgent",
                 f"{item_name} is overdue",
-                f"{pet_name}'s {item_name} is past due.",
+                f"{pet_name}'s {item_name} is past due.{warning}",
                 mandatory=True, icon="💊",
             ))
         elif rec.next_due_date and (rec.next_due_date - today).days <= 7 and rec.status != "up_to_date":
             nudges.append(_make_nudge(
                 pet_id, "deworming", "high",
                 f"{item_name} due soon",
-                f"{pet_name}'s {item_name} is due within 7 days.",
+                f"{pet_name}'s {item_name} is due within 7 days.{warning}",
                 icon="💊",
             ))
 
@@ -223,18 +250,19 @@ def _generate_flea_nudges(db: Session, pet_id, pet_name: str, species: str) -> l
         if _classify_item(item_name) != "flea":
             continue
 
+        warning = _get_medicine_warning(rec.medicine_name, db)
         if rec.status == "overdue":
             nudges.append(_make_nudge(
                 pet_id, "flea", "urgent",
                 f"{item_name} is overdue",
-                f"{pet_name}'s {item_name} is past due.",
+                f"{pet_name}'s {item_name} is past due.{warning}",
                 icon="🐛",
             ))
         elif rec.next_due_date and (rec.next_due_date - today).days <= 7 and rec.status != "up_to_date":
             nudges.append(_make_nudge(
                 pet_id, "flea", "high",
                 f"{item_name} due soon",
-                f"{pet_name}'s {item_name} is due within 7 days.",
+                f"{pet_name}'s {item_name} is due within 7 days.{warning}",
                 icon="🐛",
             ))
 

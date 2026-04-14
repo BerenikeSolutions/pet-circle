@@ -42,6 +42,7 @@ from app.core.constants import (
     NUDGE_MIN_GAP_HOURS,
     NUDGE_POST_SCHEDULE_INTERVAL_DAYS,
     NUDGE_SCHEDULE_DAYS,
+    OPENAI_QUERY_MODEL,
 )
 from app.core.encryption import decrypt_field
 from app.core.log_sanitizer import mask_phone
@@ -581,11 +582,11 @@ def _category_has_meaningful_data(db: Session, pet: Pet, category: str) -> bool:
     Defensive: any query error returns False (preserves the existing behavior
     of falling through to the static priority list).
     """
-    from app.services.nudge_engine import _classify_item
     from app.models.condition import Condition
     from app.models.condition_medication import ConditionMedication
-    from app.models.diet_item import DietItem
     from app.models.diagnostic_test_result import DiagnosticTestResult
+    from app.models.diet_item import DietItem
+    from app.services.nudge_engine import _classify_item
 
     try:
         # Preventive-record-backed categories (keyword-classified by item_name).
@@ -796,7 +797,7 @@ def _get_or_generate_nudge_insight(db: Session, user: User, pet: Pet) -> str | N
             return existing.insight_text
 
     # Generate new insight via GPT
-    if not getattr(settings, "OPENAI_API_KEY", None):
+    if not getattr(settings, "ANTHROPIC_API_KEY", None):
         return None
 
     breed = getattr(pet, "breed", None) or "unknown breed"
@@ -812,15 +813,15 @@ def _get_or_generate_nudge_insight(db: Session, user: User, pet: Pet) -> str | N
     )
 
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key=settings.OPENAI_API_KEY)
-        resp = client.chat.completions.create(
-            model="gpt-4.1-mini",
+        import anthropic
+        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        resp = client.messages.create(
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=120,
             temperature=0.7,
         )
-        insight_text = resp.choices[0].message.content.strip()
+        insight_text = resp.content[0].text.strip()
 
         row = PetAiInsight(
             pet_id=pet.id,

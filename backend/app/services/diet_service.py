@@ -321,8 +321,35 @@ async def get_diet_items(db: Session, pet_id) -> list[dict]:
 
 
 async def add_diet_item(db: Session, pet_id, food_type: str, label: str, detail: str = None, icon: str = None) -> dict:
-    """Add a food or supplement item to a pet's diet."""
+    """Add a food or supplement item to a pet's diet.
+
+    Idempotent: if a diet item with the same (pet_id, label, type) already
+    exists the existing record is returned without modification.
+    """
     classified_type, default_icon = classify_food(label, food_type)
+
+    # Guard against duplicate-key violation on uq_diet_item_menu (pet_id, label, type)
+    existing = (
+        db.query(DietItem)
+        .filter(
+            DietItem.pet_id == pet_id,
+            DietItem.label == label,
+            DietItem.type == classified_type,
+        )
+        .first()
+    )
+    if existing:
+        logger.debug(
+            "Diet item already exists for pet %s: %s (%s) — skipping insert",
+            pet_id, label, classified_type,
+        )
+        return {
+            "id": str(existing.id),
+            "type": existing.type,
+            "icon": existing.icon,
+            "label": existing.label,
+            "detail": existing.detail,
+        }
 
     item = DietItem(
         pet_id=pet_id,

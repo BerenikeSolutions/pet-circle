@@ -13,9 +13,8 @@ All tests are pure Python — no DB, no network, no OpenAI.
 analyze_nutrition is patched via unittest.mock.patch so nothing I/O-bound runs.
 """
 
-import os
-import pytest
 import asyncio
+import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -25,7 +24,6 @@ from app.services.nutrition_service import (
     _diet_summary_threshold,
     get_diet_summary,
 )
-
 
 # ---------------------------------------------------------------------------
 # _diet_summary_threshold — Calories

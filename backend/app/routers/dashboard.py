@@ -22,28 +22,35 @@ Rules:
     - Pending reminders invalidated when dates change.
 """
 
+import asyncio
 import logging
 from typing import Any
 
+import razorpay as razorpay_sdk
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from fastapi.responses import Response as FastAPIResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func as sqlfunc
+import re as _re
+
+from sqlalchemy import func as sqlfunc, or_
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.core.constants import CARE_PLAN_DUE_SOON_DAYS
+from app.core.encryption import encrypt_field
 from app.core.rate_limiter import check_dashboard_rate_limit
 from app.database import get_db
 from app.models.cart_item import CartItem
 from app.models.condition import Condition
-from app.models.diet_item import DietItem
-from app.models.product_food import ProductFood
-from app.models.product_supplement import ProductSupplement
 from app.models.condition_medication import ConditionMedication
 from app.models.condition_monitoring import ConditionMonitoring
 from app.models.contact import Contact
+from app.models.diet_item import DietItem
 from app.models.nudge import Nudge
 from app.models.pet import Pet
+from app.models.product_food import ProductFood
+from app.models.product_supplement import ProductSupplement
+from app.models.user import User
 from app.services.ai_insights_service import (
     get_or_generate_insight,
     get_or_generate_nutrition_importance,
@@ -87,7 +94,6 @@ from app.services.diet_service import (
     get_diet_items,
     update_diet_item,
 )
-from app.services.signal_resolver import resolve_food_signal, resolve_supplement_signal
 from app.services.health_trends_service import get_health_trends as get_health_trends_v2
 from app.services.hygiene_service import (
     add_hygiene_item,
@@ -100,11 +106,20 @@ from app.services.nudge_engine import generate_nudges
 from app.services.nutrition_service import analyze_nutrition
 from app.services.razorpay_service import create_razorpay_payment, verify_razorpay_payment
 from app.services.records_service import get_records as get_records_v2
+from app.services.signal_resolver import (
+    SUPPLEMENT_TYPE_KEYWORDS,
+    resolve_food_signal,
+    resolve_supplement_signal,
+)
 from app.services.weight_service import add_weight_entry, get_weight_history
 from app.utils.date_utils import parse_date
 
 logger = logging.getLogger(__name__)
 
+# Extraction semaphore — shared with the WhatsApp upload path.
+# Imported from document_upload (single source of truth) so tuning
+# MAX_CONCURRENT_EXTRACTIONS in constants.py applies to both paths at once.
+from app.services.document_upload import get_extraction_semaphore as _get_extraction_semaphore  # noqa: E402
 
 router = APIRouter(
     prefix="/dashboard",
@@ -524,10 +539,11 @@ async def dashboard_retry_all_failed(
     except ValueError:
         raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
 
+    import asyncio as _asyncio
+
     from app.models.document import Document as DocumentModel
     from app.services.document_upload import download_from_supabase
     from app.services.gpt_extraction import extract_and_process_document
-    import asyncio as _asyncio
 
     failed_docs = (
         db.query(DocumentModel)
@@ -632,15 +648,7 @@ async def dashboard_upload_document(
     db: Session = Depends(get_db),
 ):
     """Upload a document from the dashboard and trigger GPT extraction."""
-    import asyncio
-
-    from app.services.document_upload import (
-        build_storage_path,
-        check_daily_upload_limit,
-        create_document_record,
-        validate_file_upload,
-    )
-    from app.services.storage_service import upload_file as storage_upload
+    from app.services.document_upload import process_document_upload
 
     try:
         dt = validate_dashboard_token(db, token)
@@ -658,43 +666,45 @@ async def dashboard_upload_document(
     mime_type = file.content_type or "application/octet-stream"
     filename = file.filename or "upload"
 
-    # Validate
+    # Validate, upload to storage, and create the DB record — all via the
+    # shared pipeline in document_upload.py.  Any fix there applies to both
+    # WhatsApp and dashboard uploads automatically.
     try:
-        validate_file_upload(len(file_content), mime_type)
-        check_daily_upload_limit(db, pet.id, pet.name)
+        document = await process_document_upload(
+            db=db,
+            pet_id=pet.id,
+            user_id=pet.user_id,
+            filename=filename,
+            file_content=file_content,
+            mime_type=mime_type,
+            pet_name=pet.name,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-    # Upload to GCP (primary) or Supabase (fallback)
-    try:
-        storage_path = build_storage_path(pet.user_id, pet.id, filename)
-        _, backend = await storage_upload(file_content, storage_path, mime_type)
     except RuntimeError:
         raise HTTPException(status_code=503, detail="File upload failed. Please try again.")
 
-    # Create DB record
-    document = create_document_record(
-        db, pet.id, storage_path, mime_type,
-        original_filename=filename,
-        storage_backend=backend,
-    )
-
-    # Trigger extraction in background
+    # Trigger GPT extraction in background, gated by the shared extraction
+    # semaphore (document_upload.get_extraction_semaphore).  The same semaphore
+    # is used by the WhatsApp batch extractor, so WhatsApp and dashboard uploads
+    # compete fairly for the DB pool budget — no separate per-path limits that
+    # could together still exhaust the pool.
     async def _run_extraction():
         from app.database import SessionLocal
         from app.services.gpt_extraction import extract_and_process_document
-        extraction_db = SessionLocal()
-        try:
-            await extract_and_process_document(
-                db=extraction_db,
-                document_id=document.id,
-                document_text="",
-                file_bytes=file_content,
-            )
-        except Exception as exc:
-            logger.error("Dashboard upload extraction failed: doc=%s, error=%s", document.id, exc)
-        finally:
-            extraction_db.close()
+        async with _get_extraction_semaphore():
+            extraction_db = SessionLocal()
+            try:
+                await extract_and_process_document(
+                    db=extraction_db,
+                    document_id=document.id,
+                    document_text="",
+                    file_bytes=file_content,
+                )
+            except Exception as exc:
+                logger.error("Dashboard upload extraction failed: doc=%s, error=%s", document.id, exc)
+            finally:
+                extraction_db.close()
 
     asyncio.create_task(_run_extraction())
 
@@ -1288,6 +1298,162 @@ def dashboard_update_frequency(
         raise HTTPException(status_code=503, detail="Could not update frequency.")
 
 
+# --- Medicine Resolve for Cart (ProductSelectorCard) ---
+
+def _medicine_suitable_for_pet(medicine, pet, today) -> bool:
+    """
+    Return False when the medicine's notes or product_name explicitly disqualify
+    this pet based on species, minimum weight, weight range, or minimum age.
+
+    Filtering rules (all skipped when the relevant pet field is None):
+    - Species exclusion: "not for cats" / "toxic to cats" in notes
+    - Min weight:        "min weight Xkg" in notes
+    - Weight range:      "X–Y kg" in product_name (only when pet.weight is known)
+    - Min age:           "min age X weeks" / "from X weeks of age" in notes
+    """
+    import re
+    notes_lower = (medicine.notes or "").lower()
+
+    # Species exclusion (life_stage_tags already pre-filters, but some notes
+    # contain explicit cross-species toxicity warnings, e.g. Advantix)
+    if pet.species == "cat" and ("not for cats" in notes_lower or "toxic to cats" in notes_lower):
+        return False
+    if pet.species == "dog" and "not for dogs" in notes_lower:
+        return False
+
+    if pet.weight is not None:
+        pet_weight = float(pet.weight)
+
+        # Minimum weight floor from notes: "min weight 2kg", "min weight 1.5kg"
+        m = re.search(r"min(?:imum)?\s*weight\s*(\d+(?:\.\d+)?)\s*kg", notes_lower)
+        if m and pet_weight < float(m.group(1)):
+            return False
+
+        # Weight range from product_name: "NexGard 2–4 kg", "Frontline Plus 2–10 kg"
+        # Unicode en-dash (–) and ASCII hyphen (-) both matched
+        r = re.search(
+            r"(\d+(?:\.\d+)?)\s*[–\-]\s*(\d+(?:\.\d+)?)\s*kg",
+            medicine.product_name.lower(),
+        )
+        if r:
+            rmin, rmax = float(r.group(1)), float(r.group(2))
+            if not (rmin <= pet_weight <= rmax):
+                return False
+
+    if pet.dob is not None:
+        age_weeks = (today - pet.dob).days // 7
+
+        # "min age 8 weeks", "minimum age 7 weeks"
+        m = re.search(r"min(?:imum)?\s*age\s*(\d+)\s*weeks?", notes_lower)
+        if m and age_weeks < int(m.group(1)):
+            return False
+
+        # "for puppies from 2 weeks of age"
+        m2 = re.search(r"from\s*(\d+)\s*weeks?\s*of\s*age", notes_lower)
+        if m2 and age_weeks < int(m2.group(1)):
+            return False
+
+    return True
+
+
+@router.get("/{token}/medicines/resolve")
+def dashboard_resolve_medicines(
+    token: str,
+    item_name: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Return medicine products (from product_medicines) for a Flea & Tick or
+    Deworming Quick Fix item.  Products are filtered by:
+      1. item type  (tick_flea or deworming — combined medicines appear in both)
+      2. pet species via life_stage_tags
+      3. pet details via notes-based suitability filter (_medicine_suitable_for_pet)
+
+    Response shape matches products/resolve-by-micronutrient so ProductSelectorCard
+    can be reused without changes.
+    """
+    from app.models.product_medicines import ProductMedicines
+    from datetime import date as _date
+    from sqlalchemy import or_
+
+    try:
+        pet = _get_pet_for_dashboard_token(db, token)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+
+    item_name_norm = (item_name or "").strip().lower()
+    is_tick_flea = "tick" in item_name_norm or "flea" in item_name_norm
+    is_deworming = "deworm" in item_name_norm
+
+    if not is_tick_flea and not is_deworming:
+        return {"products": []}
+
+    query = db.query(ProductMedicines).filter(ProductMedicines.active.is_(True))
+
+    if is_tick_flea:
+        # Include pure tick/flea AND combined products (Flea+Deworming, Tick+Flea+Deworming)
+        query = query.filter(
+            or_(
+                ProductMedicines.type.ilike("%Tick%"),
+                ProductMedicines.type.ilike("%Flea%"),
+            )
+        )
+    else:
+        # Include pure deworming AND all combined products that cover deworming
+        query = query.filter(ProductMedicines.type.ilike("%Deworming%"))
+
+    # Filter by pet species via life_stage_tags
+    query = query.filter(ProductMedicines.life_stage_tags.ilike(f"%{pet.species}%"))
+
+    medicines = query.order_by(ProductMedicines.popularity_rank.asc()).all()
+
+    # Apply notes + weight-range suitability filter
+    today = _date.today()
+    suitable = [m for m in medicines if _medicine_suitable_for_pet(m, pet, today)]
+
+    if not suitable:
+        return {"products": []}
+
+    min_rank = min(m.popularity_rank for m in suitable if m.popularity_rank is not None) if any(
+        m.popularity_rank is not None for m in suitable
+    ) else None
+
+    products = []
+    for m in suitable:
+        discounted = m.discounted_paise // 100
+        mrp = m.mrp_paise // 100
+        ppu_paise = m.price_per_unit_paise if m.price_per_unit_paise else m.discounted_paise
+        price_per_unit = ppu_paise // 100
+
+        is_highlighted = (
+            m.popularity_rank is not None and m.popularity_rank == min_rank
+        )
+
+        products.append({
+            "sku_id": m.sku_id,
+            "category": "medicine",
+            "brand_name": m.brand_name,
+            "product_name": m.product_name,
+            "pack_size": m.pack_size or "",
+            "mrp": mrp,
+            "discounted_price": discounted,
+            "price_per_unit": price_per_unit,
+            "unit_label": "tablet",
+            "in_stock": bool(m.in_stock),
+            "vet_diet_flag": False,
+            "is_highlighted": is_highlighted,
+            "highlight_reason": "Most Popular" if is_highlighted else None,
+            "medicine_type": m.type,
+            "notes": m.notes or None,
+        })
+
+    logger.info(
+        "medicines/resolve item_name=%r pet_species=%s -> %d products",
+        item_name, pet.species, len(products),
+    )
+    return {"products": products}
+
+
 # --- Medicine Name Update (AI-based due date) ---
 
 class MedicineNameRequest(BaseModel):
@@ -1305,26 +1471,10 @@ def dashboard_get_preventive_medicine_options(
     """
     Return medicine options for medicine-dependent preventive items.
 
-    Medicines are sourced from the frozen set of approved brands per category.
+    Medicines are dynamically sourced from the product_medicines table,
+    filtered by type (deworming, tick/flea) and active status.
     """
-    # Frozen-set medicine options per preventive item category.
-    _DEWORMING_MEDICINES = [
-        "Heartgard", "Milbemax", "Drontal", "Drontal Plus",
-        "Panacur", "Interceptor", "Sentinel", "Revolution",
-    ]
-    _FLEA_TICK_MEDICINES = [
-        "Bravecto", "Simparica", "Simparica Trio", "NexGard", "NexGard Spectra",
-        "Revolution", "Frontline Plus", "Advocate", "Stronghold", "Comfortis",
-    ]
-    _MEDICINE_OPTIONS_BY_ITEM = {
-        "deworming": _DEWORMING_MEDICINES,
-        "tick/flea": _FLEA_TICK_MEDICINES,
-        "tick-flea": _FLEA_TICK_MEDICINES,
-        "flea/tick": _FLEA_TICK_MEDICINES,
-        "flea-tick": _FLEA_TICK_MEDICINES,
-        "flea & tick": _FLEA_TICK_MEDICINES,
-        "tick & flea": _FLEA_TICK_MEDICINES,
-    }
+    from app.models.product_medicines import ProductMedicines
 
     try:
         _get_pet_for_dashboard_token(db, token)
@@ -1334,19 +1484,43 @@ def dashboard_get_preventive_medicine_options(
         if not item_name_norm:
             raise HTTPException(status_code=400, detail="item_name is required")
 
-        options = _MEDICINE_OPTIONS_BY_ITEM.get(item_name_norm)
-        if options is None:
-            # Fallback: substring match (handles puppy variants, etc.)
-            if "deworm" in item_name_norm:
-                options = _DEWORMING_MEDICINES
-            elif "flea" in item_name_norm or "tick" in item_name_norm:
-                options = _FLEA_TICK_MEDICINES
-            else:
-                options = []
+        # Determine preventive type from item_name
+        is_deworming = "deworm" in item_name_norm
+        is_flea_tick = "flea" in item_name_norm or "tick" in item_name_norm
+
+        if not (is_deworming or is_flea_tick):
+            # Unknown item type
+            options = ["Other"]
+            logger.warning("Unknown preventive item type: %s", item_name)
+            return {"item_name": item_name, "options": options}
+
+        # Query product_medicines for matching type
+        query = db.query(ProductMedicines).filter(
+            ProductMedicines.active == True
+        )
+
+        if is_deworming:
+            # Filter for deworming products
+            query = query.filter(
+                ProductMedicines.type.contains("Deworming")
+            )
+        else:  # is_flea_tick
+            # Filter for tick/flea products (include combined products)
+            from sqlalchemy import or_
+            query = query.filter(
+                or_(
+                    ProductMedicines.type.contains("Tick"),
+                    ProductMedicines.type.contains("Flea")
+                )
+            )
+
+        medicines = query.order_by(ProductMedicines.popularity_rank.asc()).all()
+        options = [m.product_name for m in medicines]
+        options.append("Other")  # Always include custom option
 
         logger.info(
-            "medicine_options request item_name=%r -> %d options",
-            item_name, len(options),
+            "medicine_options request item_name=%r -> %d options from product_medicines",
+            item_name, len(options) - 1,
         )
         return {"item_name": item_name, "options": options}
     except HTTPException:
@@ -2041,7 +2215,19 @@ async def dashboard_place_order(
     """Place a COD order. For UPI/card/netbanking use /create-payment instead."""
     try:
         dt = validate_dashboard_token(db, token)
-        return await place_order(db, dt.pet_id, dt.user_id, body.payment_method, body.address, body.coupon)
+        result = await place_order(db, dt.pet_id, dt.user_id, body.payment_method, body.address, body.coupon)
+        # Save checkout preferences so next checkout can prefill these fields.
+        # Best-effort — never blocks the order response.
+        try:
+            user = db.query(User).filter(User.id == dt.user_id).first()
+            if user:
+                if body.address and body.address.get("address"):
+                    user.delivery_address = body.address["address"]
+                user.payment_method_pref = "cod"
+                db.commit()
+        except Exception as pref_err:
+            logger.warning("Failed to save COD checkout preferences: %s", str(pref_err))
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -2078,7 +2264,7 @@ async def dashboard_create_payment(
     """
     try:
         dt = validate_dashboard_token(db, token)
-        return await create_razorpay_payment(
+        result = await create_razorpay_payment(
             db,
             pet_id=dt.pet_id,
             user_id=dt.user_id,
@@ -2087,6 +2273,19 @@ async def dashboard_create_payment(
             coupon=body.coupon,
             coupon_discount_percent=body.coupon_discount_percent,
         )
+        # Save address and payment method preference eagerly so the next
+        # checkout can prefill them even if payment is abandoned.
+        # Best-effort — never blocks the response.
+        try:
+            user = db.query(User).filter(User.id == dt.user_id).first()
+            if user:
+                if body.address and body.address.get("address"):
+                    user.delivery_address = body.address["address"]
+                user.payment_method_pref = body.payment_method
+                db.commit()
+        except Exception as pref_err:
+            logger.warning("Failed to save payment method preference: %s", str(pref_err))
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
@@ -2108,10 +2307,12 @@ async def dashboard_verify_payment(
 
     Called by frontend after Razorpay checkout succeeds.
     Verifies the HMAC-SHA256 signature, marks order as paid, clears cart.
+    After verification, fetches UPI VPA from Razorpay API and saves it
+    encrypted so the next UPI checkout can prefill the VPA.
     """
     try:
         dt = validate_dashboard_token(db, token)
-        return await verify_razorpay_payment(
+        result = await verify_razorpay_payment(
             db,
             pet_id=dt.pet_id,
             order_db_id=body.order_db_id,
@@ -2119,6 +2320,22 @@ async def dashboard_verify_payment(
             razorpay_payment_id=body.razorpay_payment_id,
             razorpay_signature=body.razorpay_signature,
         )
+        # Fetch payment details from Razorpay to get the UPI VPA and save
+        # it encrypted for next-checkout prefill. Best-effort — never blocks.
+        try:
+            if settings.RAZORPAY_KEY_ID and settings.RAZORPAY_KEY_SECRET:
+                rzp_client = razorpay_sdk.Client(
+                    auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET)
+                )
+                payment_details = rzp_client.payment.fetch(body.razorpay_payment_id)
+                if payment_details.get("method") == "upi" and payment_details.get("vpa"):
+                    user = db.query(User).filter(User.id == dt.user_id).first()
+                    if user:
+                        user.saved_upi_id = encrypt_field(payment_details["vpa"])
+                        db.commit()
+        except Exception as pref_err:
+            logger.warning("Failed to save UPI VPA preference: %s", str(pref_err))
+        return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
@@ -2128,35 +2345,6 @@ async def dashboard_verify_payment(
         logger.error("Verify payment error: %s", str(e), exc_info=True)
         raise HTTPException(status_code=503, detail="Payment verification failed.")
 
-
-class AddToCartRequest(BaseModel):
-    product_id: str = Field(..., min_length=1)
-    name: str = Field(..., min_length=1, max_length=200)
-    price: int = Field(..., ge=0)
-    icon: str | None = None
-    sub: str | None = None
-    tag: str | None = None
-    tag_color: str | None = None
-
-
-@router.post("/{token}/cart/add")
-async def dashboard_add_to_cart(
-    token: str,
-    body: AddToCartRequest,
-    db: Session = Depends(get_db),
-):
-    """Add a product to the pet's cart."""
-    try:
-        dt = validate_dashboard_token(db, token)
-        return await add_to_cart(
-            db, dt.pet_id, body.product_id, body.name, body.price,
-            body.icon, body.sub, body.tag, body.tag_color,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error("Add to cart error: %s", str(e), exc_info=True)
-        raise HTTPException(status_code=503, detail="Could not add to cart.")
 
 
 @router.delete("/{token}/cart/{product_id}")
@@ -2303,6 +2491,206 @@ async def resolve_product_endpoint(
     }
 
 
+def _build_ingredient_conditions(term: str) -> list:
+    """
+    Return SQLAlchemy filter conditions for key_ingredients matching.
+
+    Expansion rules applied in order:
+
+    Fix A — "Vit X" abbreviation:
+        "vit d3" → also search "vitamin d3" and carry that expanded form forward.
+
+    Fix B — Vitamin singular ↔ plural:
+        "vitamin a"  → also "vitamins a"; "vitamins a" → also "vitamin a".
+
+    Fix C — Vitamin letter-list regex (covers plain and numbered suffixes):
+        "vitamin d3" → regex matches "Vitamins A D3 E B-complex" even though
+        "vitamins d3" is not a direct substring (the letters are space-separated).
+        Pattern: ``vitamins?\\s+(?:[a-z]\\d*\\s+)*<suffix>(\\s|$|,|-)``
+
+    Fix D — Hyphenated L-/N-/DL- amino-acid prefixes:
+        Normalization strips hyphens from the search term but the DB retains them.
+        "l carnitine" → also ILIKE "%l-carnitine%".
+
+    Returns a list of conditions suitable for ``or_(*conditions)``.
+    """
+    conditions: list = [ProductSupplement.key_ingredients.ilike(f"%{term}%")]
+
+    # Fix A: "vit X" → "vitamin X"
+    expanded = term
+    if _re.match(r"^vit\s+", term, _re.IGNORECASE) and not _re.match(r"^vita", term, _re.IGNORECASE):
+        expanded = "vitamin " + term[4:]
+        conditions.append(ProductSupplement.key_ingredients.ilike(f"%{expanded}%"))
+
+    # Fix B: vitamin singular ↔ plural
+    if expanded.startswith("vitamin ") and not expanded.startswith("vitamins "):
+        plural = "vitamins " + expanded[8:]
+        conditions.append(ProductSupplement.key_ingredients.ilike(f"%{plural}%"))
+    elif expanded.startswith("vitamins "):
+        singular = "vitamin " + expanded[9:]
+        conditions.append(ProductSupplement.key_ingredients.ilike(f"%{singular}%"))
+
+    # Fix C: vitamin letter-list regex — handles both single letters ("a", "e")
+    # and numbered suffixes ("d3", "b12", "k2") in space-separated lists.
+    m = _re.match(r"^vitamins?\s+([a-z]\d*)$", expanded, _re.IGNORECASE)
+    if m:
+        suffix = _re.escape(m.group(1))  # e.g. "d3", "b12", "a"
+        # Walk through the space-separated letter[+digit] entries in the list
+        # until the target suffix is found, terminated by space / comma / hyphen / end.
+        regex_pat = rf"vitamins?\s+(?:[a-z]\d*\s+)*{suffix}(\s|$|,|-)"
+        conditions.append(ProductSupplement.key_ingredients.op("~*")(regex_pat))
+
+    # Fix D: hyphenated L-/N-/DL- amino-acid prefixes
+    # e.g. "l carnitine" (hyphens stripped by normalizer) → also "%l-carnitine%"
+    for prefix in ("dl ", "l ", "n "):
+        if term.startswith(prefix):
+            hyphenated = prefix.rstrip() + "-" + term[len(prefix):]
+            conditions.append(ProductSupplement.key_ingredients.ilike(f"%{hyphenated}%"))
+            break
+
+    return conditions
+
+
+@router.get("/{token}/products/resolve-by-micronutrient")
+async def resolve_supplement_by_micronutrient(
+    token: str,
+    micronutrient: str = Query(..., description="Micronutrient name (e.g. 'glucosamine', 'vitamin d3')"),
+    db: Session = Depends(get_db),
+):
+    """
+    Resolve supplement products for a missing micronutrient.
+
+    Used by the Quick Fixes to Add section when the user clicks on a
+    micronutrient-based supplement recommendation (which has no diet_item_id).
+
+    Two-pass resolution:
+      1. Type match: maps micronutrient name → canonical supplement type via
+         SUPPLEMENT_TYPE_KEYWORDS; queries product_supplement by type.
+      2. Ingredient match: searches key_ingredients ILIKE '%<micronutrient>%'
+         to find products that literally contain the nutrient.
+    Results are merged (type-match first), deduped, and capped at 3 products.
+
+    Returns the same shape as /products/resolve so the frontend ProductSelectorCard
+    can be reused unchanged.
+    """
+    try:
+        _get_pet_for_dashboard_token(db, token)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
+
+    # --- Step 1: type-based match via SUPPLEMENT_TYPE_KEYWORDS ---
+    # Longest whole-word match wins (word-boundary prevents "renal" matching
+    # inside "adrenal", and "milk" matching inside "milk thistle").
+    haystack = micronutrient.lower().strip()
+    sup_type: str | None = None
+    best_len = 0
+    for keyword, canonical in SUPPLEMENT_TYPE_KEYWORDS.items():
+        if len(keyword) <= best_len:
+            continue
+        if _re.search(r"\b" + _re.escape(keyword) + r"\b", haystack):
+            sup_type = canonical
+            best_len = len(keyword)
+
+    # Normalise the micronutrient for a key_ingredients ILIKE search:
+    # replace underscores and hyphens with spaces so "omega-3" → "omega 3",
+    # then strip generic trailing words ("supplement", "tablet", "capsule",
+    # "oil") that appear in item names but not in key_ingredients.
+    _STRIP_SUFFIXES = ("supplement", "tablet", "capsule", "capsules", "oil", "chew", "chews", "powder")
+    ingredient_term = haystack.replace("_", " ").replace("-", " ")
+    for _suffix in _STRIP_SUFFIXES:
+        if ingredient_term.endswith(f" {_suffix}"):
+            ingredient_term = ingredient_term[: -(len(_suffix) + 1)].strip()
+            break
+
+    # --- Step 2: ingredient-level search ---
+    # Uses OR conditions generated by _build_ingredient_conditions so that:
+    #   • "vitamin a"  matches both "Vitamin A capsule" and "Vitamins A D E B-complex"
+    #   • "vitamin b"  matches "Vitamin B-complex" and "Vitamins A D E B-complex"
+    #   • "omega 3"    matches "Omega 3 & 6, Vitamins A D E B-complex"
+    #   • "zinc"       matches any product whose key_ingredients contains "zinc"
+    ingredient_rows: list = []
+    if ingredient_term:
+        ingredient_conditions = _build_ingredient_conditions(ingredient_term)
+        ingredient_rows = (
+            db.query(ProductSupplement)
+            .filter(
+                ProductSupplement.active == True,
+                or_(*ingredient_conditions),
+            )
+            .order_by(ProductSupplement.popularity_rank)
+            .limit(5)
+            .all()
+        )
+
+    # --- Step 3: type-based rows (primary) ---
+    type_rows: list = []
+    if sup_type:
+        type_rows = (
+            db.query(ProductSupplement)
+            .filter(
+                ProductSupplement.active == True,
+                ProductSupplement.type == sup_type,
+            )
+            .order_by(ProductSupplement.popularity_rank)
+            .limit(3)
+            .all()
+        )
+
+    # --- Step 4: merge — type-match first, ingredient-match fills remaining slots ---
+    # Dedup by sku_id; type-match products are preferred (they're the most targeted type).
+    seen_skus: set[str] = set()
+    merged: list = []
+    for p in type_rows:
+        if p.sku_id not in seen_skus:
+            seen_skus.add(p.sku_id)
+            merged.append(p)
+    for p in ingredient_rows:
+        if p.sku_id not in seen_skus and len(merged) < 3:
+            seen_skus.add(p.sku_id)
+            merged.append(p)
+
+    if not merged:
+        return {
+            "level": "L1",
+            "products": [],
+            "cta_label": None,
+            "highlight_sku": None,
+            "message": "Share the supplement name on WhatsApp so we can help you reorder.",
+            "vet_diet_warning": False,
+            "pack_size_suggestion": None,
+        }
+
+    highlight_sku = merged[0].sku_id
+    products = [
+        {
+            "sku_id": p.sku_id,
+            "category": "supplement",
+            "brand_name": p.brand_name,
+            "product_name": p.product_name,
+            "pack_size": p.pack_size,
+            "mrp": int(p.mrp),
+            "discounted_price": int(p.discounted_price),
+            "price_per_unit": int(p.price_per_unit or 0),
+            "unit_label": "per unit",
+            "in_stock": bool(p.in_stock),
+            "vet_diet_flag": False,
+            "is_highlighted": p.sku_id == highlight_sku,
+            "highlight_reason": "Most Popular" if p.sku_id == highlight_sku else None,
+        }
+        for p in merged
+    ]
+
+    return {
+        "level": "L3",
+        "products": products,
+        "cta_label": "Order Now",
+        "highlight_sku": highlight_sku,
+        "message": None,
+        "vet_diet_warning": False,
+        "pack_size_suggestion": None,
+    }
+
+
 @router.get("/{token}/products/search")
 async def search_products_endpoint(
     token: str,
@@ -2310,11 +2698,12 @@ async def search_products_endpoint(
     db: Session = Depends(get_db),
 ):
     """
-    Search food and supplement products by brand or product name.
+    Search food, supplement, and medicine products by brand or product name.
     Returns up to 10 results, in-stock items first.
+    Medicines are filtered by pet species and exclude prescription-only antibiotics.
     """
     try:
-        _get_pet_for_dashboard_token(db, token)
+        pet = _get_pet_for_dashboard_token(db, token)
     except ValueError:
         raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")
 
@@ -2336,6 +2725,22 @@ async def search_products_endpoint(
         .filter(
             ProductSupplement.active == True,
             (ProductSupplement.brand_name.ilike(pattern) | ProductSupplement.product_name.ilike(pattern)),
+        )
+        .all()
+    )
+
+    # Search medicine products — filter by species and exclude antibiotics
+    from app.models.product_medicines import ProductMedicines
+    medicine_rows = (
+        db.query(ProductMedicines)
+        .filter(
+            ProductMedicines.active.is_(True),
+            ~ProductMedicines.type.ilike("%Antibiotic%"),
+            ProductMedicines.life_stage_tags.ilike(f"%{pet.species}%"),
+            (
+                ProductMedicines.brand_name.ilike(pattern)
+                | ProductMedicines.product_name.ilike(pattern)
+            ),
         )
         .all()
     )
@@ -2363,6 +2768,19 @@ async def search_products_endpoint(
             "mrp": int(p.mrp),
             "discounted_price": int(p.discounted_price),
             "in_stock": bool(p.in_stock),
+        })
+    for p in medicine_rows:
+        results.append({
+            "sku_id": p.sku_id,
+            "category": "medicine",
+            "brand_name": p.brand_name,
+            "name": f"{p.brand_name} {p.product_name}".strip(),
+            "pack_size": p.pack_size or "",
+            "mrp": p.mrp_paise // 100,
+            "discounted_price": p.discounted_paise // 100,
+            "in_stock": bool(p.in_stock),
+            "medicine_type": p.type,
+            "notes": p.notes or None,
         })
 
     # Sort: in_stock first, then by name
@@ -2403,6 +2821,15 @@ async def cart_add_endpoint(
         if not product:
             raise HTTPException(status_code=404, detail="Product not found.")
         price = int(product.discounted_price)
+        name = f"{product.brand_name} {product.product_name}".strip()
+        sub = product.pack_size or ""
+        icon = "💊"
+    elif sku_id.startswith("SKU-"):
+        from app.models.product_medicines import ProductMedicines
+        product = db.query(ProductMedicines).filter(ProductMedicines.sku_id == sku_id).first()
+        if not product:
+            raise HTTPException(status_code=404, detail="Product not found.")
+        price = product.discounted_paise // 100
         name = f"{product.brand_name} {product.product_name}".strip()
         sub = product.pack_size or ""
         icon = "💊"

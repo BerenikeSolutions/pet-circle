@@ -52,10 +52,11 @@ from app.models.preventive_record import PreventiveRecord
 from app.models.reminder import Reminder
 from app.models.user import User
 from app.services.ai_insights_service import (
+    AI_INSIGHT_CACHE_DAYS,
     generate_care_plan_reasons,
     generate_recognition_bullets,
 )
-from app.services.care_plan_engine import compute_care_plan
+from app.services.care_plan_engine import compute_care_plan, get_preventive_baseline_days, _normalize_item_name
 from app.services.document_upload import download_from_supabase
 from app.services.gpt_extraction import _infer_document_category, _resolve_document_category
 from app.services.life_stage_service import get_life_stage_data
@@ -231,18 +232,27 @@ def _inject_supplement_recommendations(care_plan: dict, diet_summary: dict) -> d
 
     supplement_items = []
     for micro in missing_micros:
-        name = micro.get("name", "")
-        cap_name = name[0].upper() + name[1:] if name else name
+        nutrient_name = micro.get("name", "")
+        cap_name = nutrient_name[0].upper() + nutrient_name[1:] if nutrient_name else nutrient_name
+        # Display the micronutrient name (not the LLM product name) as the item title.
+        # The LLM product name is used internally for product resolution but not shown.
+        item_name = f"{cap_name} Supplement" if cap_name else "Supplement"
+        # Use LLM-provided reason as the one-liner shown below the supplement name
+        reason = micro.get("reason") or None
         supplement_items.append({
-            "name": f"{cap_name} Supplement",
+            "name": item_name,
             "test_type": "supplement",
             "freq": "Daily",
             "next_due": None,
             "status_tag": "Recommended",
             "classification": "suggested",
-            "reason": micro.get("reason") or f"{cap_name} supplementation recommended",
+            "reason": reason,
             "orderable": True,
             "cta_label": "Order Now",
+            # Raw micronutrient name used by the frontend to fetch matching
+            # products from product_supplement via the resolve-by-micronutrient
+            # endpoint (instead of the diet_item_id path used for food items).
+            "micronutrient": nutrient_name,
         })
 
     if supplement_items:
@@ -426,8 +436,8 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         if _is_adult_dog and master.recurrence_days and master.recurrence_days >= 36500:
             continue
 
-        # Hide non-core vaccines unless the user has a logged completion date.
-        if _is_vaccine_item_name(master.item_name) and not _is_core_vaccine(master) and not record.last_done_date:
+        # Hide non-mandatory vaccines unless the user has a logged completion date.
+        if _is_vaccine_item_name(master.item_name) and not master.is_mandatory and not record.last_done_date:
             continue
 
         if _is_vaccine_item_name(master.item_name):
@@ -463,14 +473,34 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
     )
 
     for record, master in selected_records:
-        # Use custom recurrence if set, otherwise fall back to master default
-        effective_recurrence = record.custom_recurrence_days if record.custom_recurrence_days else master.recurrence_days
+        # Determine test_type for life-stage-based recurrence lookup.
+        test_type = _normalize_item_name(master.item_name)
+        _LIFE_STAGE_TYPES = {"deworming", "tick_flea"}
+
+        if record.custom_recurrence_days:
+            # Respect user-set custom interval always.
+            effective_recurrence = record.custom_recurrence_days
+        elif test_type in _LIFE_STAGE_TYPES:
+            # Override master.recurrence_days with life-stage-adjusted baseline so that
+            # Care Plan, Care Reminders, and Cadence all display the same next-due date.
+            effective_recurrence = get_preventive_baseline_days(pet, test_type)
+        else:
+            effective_recurrence = master.recurrence_days
+
+        # Recompute next_due_date from last_done_date + effective_recurrence so the
+        # displayed date is always consistent with care_plan_engine's computation.
+        from datetime import timedelta
+        if record.last_done_date and test_type in _LIFE_STAGE_TYPES:
+            display_next_due = str(record.last_done_date + timedelta(days=effective_recurrence))
+        else:
+            display_next_due = str(record.next_due_date) if record.next_due_date else None
+
         preventive_records.append({
             "item_name": master.item_name,
             "category": master.category,
             "circle": master.circle,
             "last_done_date": str(record.last_done_date) if record.last_done_date else None,
-            "next_due_date": str(record.next_due_date) if record.next_due_date else None,
+            "next_due_date": display_next_due,
             "status": record.status,
             "recurrence_days": effective_recurrence,
             "custom_recurrence_days": record.custom_recurrence_days,
@@ -501,9 +531,9 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         if _is_adult_dog and master.recurrence_days and master.recurrence_days >= 36500:
             continue
 
-        # Inject only core vaccines by default. Non-core vaccines should
+        # Inject only mandatory vaccines by default. Non-mandatory vaccines should
         # appear only after a logged completion date exists.
-        if _is_vaccine_item_name(master.item_name) and not _is_core_vaccine(master):
+        if _is_vaccine_item_name(master.item_name) and not master.is_mandatory:
             continue
 
         if master.item_name not in existing_names:
@@ -581,7 +611,12 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         document_data.append({
             "id": str(doc.id),
             "document_name": doc.document_name,
-            "document_category": _resolve_document_category(doc.document_category, inferred_category),
+            "document_category": _resolve_document_category(
+                doc.document_category,
+                inferred_category,
+                document_name=doc.document_name,
+                file_path=doc.file_path,
+            ),
             "doctor_name": doc.doctor_name,
             "hospital_name": doc.hospital_name,
             "mime_type": doc.mime_type,
@@ -733,15 +768,17 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
             })
 
     # --- Dashboard Rebuild v2 enrichments ---
-    # Hard 15s timeout per enrichment. Dashboard loads were hanging when an
-    # upstream OpenAI call stalled; with this ceiling the tab always renders
-    # with a sensible default instead of timing out the whole request.
-    _ENRICHMENT_TIMEOUT_SECONDS = 15
+    # Hard timeout per enrichment.
+    # Set to 45s to survive worst-case Claude 429 retry backoffs (10s + 20s)
+    # plus actual API call time. The global concurrency semaphore in retry.py
+    # prevents simultaneous callers from saturating the TPM quota, so in
+    # practice this timeout should rarely be reached.
+    _ENRICHMENT_TIMEOUT_SECONDS = 45
 
     async def _safe_async_call(label: str, default, coro):
         try:
             return await asyncio.wait_for(coro, timeout=_ENRICHMENT_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.error(
                 "%s timed out after %ds for pet=%s",
                 label, _ENRICHMENT_TIMEOUT_SECONDS, pet_id,
@@ -774,7 +811,7 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
     care_plan_reasons = await _safe_async_call(
         "ai_insights_service.generate_care_plan_reasons",
         {},
-        generate_care_plan_reasons(db, pet, orderable_items),
+        generate_care_plan_reasons(db, pet, orderable_items, diet_summary=diet_summary),
     )
     care_plan_v2 = _apply_reasons_to_care_plan(care_plan_v2, care_plan_reasons)
     care_plan_v2 = _inject_supplement_recommendations(care_plan_v2, diet_summary)
@@ -803,6 +840,30 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         "bullets": recognition_bullets,
     }
 
+    # --- Load cached AI insights (no GPT calls — DB lookup only) ---
+    # Include health_summary and vet_questions if they exist and are fresh.
+    # This lets the frontend render immediately without waiting for separate
+    # /health-summary and /vet-questions API calls.
+    cached_insights: dict[str, dict | None] = {"health_summary": None, "vet_questions": None}
+    try:
+        from datetime import timedelta
+
+        from app.models.pet_ai_insight import PetAiInsight
+        stale_cutoff = datetime.utcnow() - timedelta(days=AI_INSIGHT_CACHE_DAYS)
+        insight_rows = (
+            db.query(PetAiInsight)
+            .filter(
+                PetAiInsight.pet_id == pet_id,
+                PetAiInsight.insight_type.in_(["health_summary", "vet_questions"]),
+                PetAiInsight.generated_at >= stale_cutoff,
+            )
+            .all()
+        )
+        for row in insight_rows:
+            cached_insights[row.insight_type] = row.content_json
+    except Exception:
+        logger.warning("Failed to load cached AI insights for pet=%s", pet_id)
+
     # --- Build response (no internal IDs exposed) ---
     # photo_url: serve via dashboard endpoint if pet has a photo, else None.
     photo_url = f"/dashboard/{token}/pet-photo" if pet.photo_path else None
@@ -822,6 +883,10 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         "owner": {
             "full_name": user.full_name if user else None,
             "pincode": decrypt_field(user.pincode) if (user and user.pincode) else None,
+            "mobile_display": user.mobile_display if user else None,
+            "delivery_address": user.delivery_address if user else None,
+            "payment_method_pref": user.payment_method_pref if user else None,
+            "saved_upi_id": decrypt_field(user.saved_upi_id) if (user and user.saved_upi_id) else None,
         },
         "preventive_records": preventive_records,
         "reminders": reminder_data,
@@ -839,6 +904,8 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         "diet_summary": diet_summary,
         "recognition": recognition_payload,
         "is_first_visit": is_first_visit,
+        "cached_health_summary": cached_insights.get("health_summary"),
+        "cached_vet_questions": cached_insights.get("vet_questions"),
         # Internal pet_id exposed only for intra-service use (not sent to frontend).
         # Allows callers to avoid a second validate_dashboard_token() call.
         "_pet_id": str(pet_id),

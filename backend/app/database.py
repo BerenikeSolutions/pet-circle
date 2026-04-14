@@ -6,14 +6,15 @@ from environment configuration. All database access flows through
 the get_db() dependency to ensure proper session lifecycle management.
 
 Connection strategy:
-    - Supabase uses PgBouncer (port 6543) in transaction mode.
+    - Supabase uses PgBouncer/Supavisor (port 6543) in transaction mode.
     - QueuePool with pool_pre_ping=True validates each connection before
-      use, preventing "SSL connection closed unexpectedly" errors.
-    - pool_recycle=280 ensures connections are refreshed before Supabase's
-      5-minute idle timeout kills them.
-    - Pool (pool_size=10, max_overflow=10) sized for concurrent webhook
-      handling plus background extraction tasks, while staying within
-      Supabase's connection limits.
+      use, but cannot prevent the TOCTOU race where SSL drops after ping.
+    - pool_recycle=120 refreshes connections aggressively — well under any
+      idle-timeout Supabase/Supavisor might enforce server-side.
+    - Pool (pool_size=5, max_overflow=10) keeps fewer idle connections alive,
+      reducing the target surface for server-side SSL termination while still
+      supporting burst webhook + background task concurrency.
+    - keepalives settings prevent OS-level TCP idle drops on long queries.
 
 No business logic lives here — only connection infrastructure.
 """
@@ -51,9 +52,9 @@ engine = create_engine(
     settings.DATABASE_URL,
     poolclass=QueuePool,
     pool_pre_ping=True,
-    pool_size=15,
-    max_overflow=15,
-    pool_recycle=280,
+    pool_size=15,       # Handles burst uploads (15 docs = 15 concurrent tasks)
+    max_overflow=10,    # Hard cap at 25 total — headroom for 15 uploads + 8 extractions + dashboard
+    pool_recycle=120,   # Refresh well before Supabase/Supavisor idle-timeout
     pool_timeout=30,
     connect_args=connect_args,
     # Disable SQL echo in production — only enable for debugging.

@@ -65,6 +65,10 @@ export default function VetVisitCard({ visit, defaultOpen, onView }: VetVisitCar
                 borderRadius: 999,
                 padding: "4px 10px",
                 whiteSpace: "nowrap",
+                maxWidth: 160,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                flexShrink: 0,
               }}
             >
               {keyFindingLabel}

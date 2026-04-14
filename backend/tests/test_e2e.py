@@ -549,7 +549,7 @@ def main():
         test("CONFLICT_EXPIRY_DAYS = 5", CONFLICT_EXPIRY_DAYS == 5)
         test("REMINDER_SNOOZE_DAYS = 7", REMINDER_SNOOZE_DAYS == 7)
         test("OPENAI_EXTRACTION_MODEL = gpt-4.1", OPENAI_EXTRACTION_MODEL == "gpt-4.1")
-        test("OPENAI_QUERY_MODEL = gpt-4.1-mini", OPENAI_QUERY_MODEL == "gpt-4.1-mini")
+        test("OPENAI_QUERY_MODEL = gpt-4.1", OPENAI_QUERY_MODEL == "gpt-4.1")
         test("DASHBOARD_TOKEN_BYTES = 16", DASHBOARD_TOKEN_BYTES == 16)
         test("ALLOWED_MIME_TYPES has 3 types", len(ALLOWED_MIME_TYPES) == 3)
 

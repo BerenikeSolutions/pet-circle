@@ -4,7 +4,7 @@ PetCircle Phase 1 — Weight History Service
 Manages weight tracking for pets. Provides CRUD operations for
 weight measurements and breed-specific ideal weight ranges.
 
-Ideal weight ranges are looked up via OpenAI (gpt-4.1-mini) and
+Ideal weight ranges are looked up via OpenAI (gpt-4.1) and
 cached in the ideal_weight_cache table per (species, breed, gender,
 age_category) combo to minimize API costs.
 """
@@ -34,16 +34,16 @@ logger = logging.getLogger(__name__)
 # Default range when breed not found or OpenAI call fails
 DEFAULT_RANGE = {"min": 5, "max": 50}
 
-# --- OpenAI client singleton (lazy) ---
+# --- Anthropic client singleton (lazy) ---
 _openai_weight_client = None
 
 
 def _get_openai_weight_client():
-    """Return a cached AsyncOpenAI client for weight lookups (created on first call)."""
+    """Return a cached AsyncAnthropic client for weight lookups (created on first call)."""
     global _openai_weight_client
     if _openai_weight_client is None:
-        from openai import AsyncOpenAI
-        _openai_weight_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        from anthropic import AsyncAnthropic
+        _openai_weight_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
     return _openai_weight_client
 
 
@@ -95,23 +95,40 @@ def _calculate_weight_age_category(species: str | None, dob: date | None) -> str
 
 
 def _calculate_age_description(dob: date | None) -> str:
-    """Human-readable age string for the OpenAI prompt."""
+    """
+    Human-readable age string for the OpenAI prompt.
+
+    Uses precise month-based calculation to match frontend age display:
+    - Calculate total months from birth to today
+    - Adjust for day-of-month if today is earlier in the month than birth day
+    """
     if not dob:
         return "unknown age"
 
-    total_days = (date.today() - dob).days
-    if total_days < 0:
+    today = date.today()
+    if dob > today:
         return "unknown age"
 
-    years = total_days // 365
-    months = (total_days % 365) // 30
+    # Calculate precise months from DOB to today
+    months = (today.year - dob.year) * 12 + (today.month - dob.month)
+
+    # Adjust if today's day is earlier than birth day
+    if today.day < dob.day:
+        months -= 1
+
+    if months < 0:
+        return "unknown age"
+
+    # Convert months to years and remaining months
+    years = months // 12
+    remaining_months = months % 12
 
     if years == 0:
         return f"{months} month{'s' if months != 1 else ''} old"
-    elif months == 0:
+    elif remaining_months == 0:
         return f"{years} year{'s' if years != 1 else ''} old"
     else:
-        return f"{years} year{'s' if years != 1 else ''} and {months} month{'s' if months != 1 else ''} old"
+        return f"{years} year{'s' if years != 1 else ''} and {remaining_months} month{'s' if remaining_months != 1 else ''} old"
 
 
 # --- Core lookup ---
@@ -251,18 +268,17 @@ async def _call_openai_weight_lookup(
         f"Age: {age_description}"
     )
 
-    response = await client.chat.completions.create(
+    response = await client.messages.create(
         model=OPENAI_WEIGHT_LOOKUP_MODEL,
         temperature=OPENAI_WEIGHT_LOOKUP_TEMPERATURE,
         max_tokens=OPENAI_WEIGHT_LOOKUP_MAX_TOKENS,
-        response_format={"type": "json_object"},
+        system=WEIGHT_LOOKUP_SYSTEM_PROMPT,
         messages=[
-            {"role": "system", "content": WEIGHT_LOOKUP_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ],
     )
 
-    raw = response.choices[0].message.content
+    raw = response.content[0].text
     logger.debug("OpenAI weight lookup raw response: %s", raw)
 
     try:

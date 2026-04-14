@@ -30,14 +30,12 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.core.constants import (
     ACKNOWLEDGMENTS,
-    APP_WELCOME_HEADING,
     CONFLICT_KEEP_EXISTING,
     CONFLICT_USE_NEW,
     FAREWELLS,
     GREETINGS,
     HELP_COMMANDS,
-    NOTHING_MORE_PHRASES,
-    MAX_CONCURRENT_EXTRACTIONS,
+    MAX_CONCURRENT_UPLOAD_PROCESSING,
     MAX_PENDING_DOCS_PER_PET,
     MAX_PETS_PER_USER,
     NUDGE_ACTION,
@@ -65,11 +63,17 @@ from app.core.constants import (
 )
 from app.core.encryption import decrypt_field
 from app.core.log_sanitizer import mask_phone
-from app.utils.breed_fun_facts import get_breed_fun_fact
 
-# Semaphore to limit concurrent background extraction tasks.
-# Prevents DB connection pool exhaustion when many documents are uploaded.
-_extraction_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EXTRACTIONS)
+# Extraction semaphore — shared across ALL upload paths (WhatsApp + dashboard).
+# Imported from document_upload so any tuning change applies everywhere at once.
+from app.services.document_upload import get_extraction_semaphore as _get_extraction_semaphore  # noqa: E402
+
+# Semaphore to limit concurrent document upload *processing* tasks system-wide.
+# When a user sends 20 files at once, 20 background tasks would simultaneously
+# check out DB connections AND download WhatsApp media. Capping at 8 means at
+# most 8 connections are held for upload work, leaving headroom in the pool for
+# webhook handler sessions and other background tasks.
+_upload_processing_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOAD_PROCESSING)
 
 # --- Batch upload tracking ---
 # Tracks recent upload timestamps per pet to enforce the 5-file batch limit.
@@ -91,6 +95,57 @@ _error_sent: dict[str, str] = {}
 # Window in seconds for counting a "batch" of uploads.
 # Files uploaded within this window are considered one batch.
 _UPLOAD_BATCH_WINDOW_SECONDS: int = 120
+
+# --- Conversation history buffer for query engine ---
+# Stores the last N query turns per user so follow-up questions can be
+# resolved in context (e.g. "what about X?", "tell me more", "is that normal?").
+# This is intentionally in-memory: conversation context is session-scoped,
+# not business state, and need not survive server restarts.
+# Key: mobile_number, Value: {"turns": [...], "last_updated": float}
+_query_history: dict[str, dict] = {}
+
+# Maximum number of prior Q&A pairs to keep per user (user + assistant = 2 messages each).
+_QUERY_HISTORY_MAX_PAIRS: int = 3
+
+# Seconds of inactivity before history is discarded.
+_QUERY_HISTORY_TTL_SECONDS: int = 3600  # 1 hour
+
+
+def _get_query_history(mobile_number: str) -> list[dict]:
+    """
+    Return recent conversation turns for a user, or [] if none / expired.
+
+    Each entry is {"role": "user"|"assistant", "content": str}.
+    Expired entries (idle > TTL) are purged on access.
+    """
+    entry = _query_history.get(mobile_number)
+    if not entry:
+        return []
+    if time.time() - entry["last_updated"] > _QUERY_HISTORY_TTL_SECONDS:
+        _query_history.pop(mobile_number, None)
+        return []
+    return list(entry["turns"])
+
+
+def _update_query_history(mobile_number: str, question: str, answer: str) -> None:
+    """
+    Append a user question and assistant answer to the conversation buffer.
+
+    Trims the buffer to the most recent _QUERY_HISTORY_MAX_PAIRS pairs
+    so memory usage stays bounded.
+    """
+    entry = _query_history.setdefault(
+        mobile_number, {"turns": [], "last_updated": 0.0}
+    )
+    turns: list[dict] = entry["turns"]
+    turns.append({"role": "user", "content": question})
+    turns.append({"role": "assistant", "content": answer})
+    # Keep only the last N pairs (2 messages per pair).
+    max_messages = _QUERY_HISTORY_MAX_PAIRS * 2
+    if len(turns) > max_messages:
+        turns = turns[-max_messages:]
+    entry["turns"] = turns
+    entry["last_updated"] = time.time()
 
 # Debounce timers for batch extraction per pet.
 # Key: str(pet_id), Value: asyncio.Task that waits then extracts.
@@ -421,10 +476,8 @@ def _should_use_agentic_order() -> bool:
     Falls back to False (deterministic state machine) on any error.
     """
     flag = getattr(settings, "AGENTIC_ORDER_ENABLED", "false")
-    has_key = bool(getattr(settings, "OPENAI_API_KEY", None))
-    if flag.lower() != "true" or not has_key:
-        return False
-    return True
+    has_key = bool(getattr(settings, "ANTHROPIC_API_KEY", None))
+    return flag.lower() == "true" and has_key
 
 
 def _get_mobile(user) -> str:
@@ -528,10 +581,15 @@ async def route_message(db: Session, message_data: dict) -> None:
                 greeting_name = profile_name.split()[0] if profile_name else "there"
                 await send_text_message(
                     db, from_number,
-                    f"Hello {greeting_name}! 👋 Welcome to PetCircle — your pet's "
-                    f"personalised care companion, right here on WhatsApp. I'm here "
-                    f"to make sure your pet never misses the care they deserve.\n\n"
-                    f"Let's start — what's your pet's name?",
+                    f"Hi {greeting_name}, welcome to PetCircle — your pet care companion.\n\n"
+                    f"We're here to make pet parenting simpler, helping you stay on top of your pet's health, nutrition, and everyday wellness.\n\n"
+                    f"Here's how we support you:\n"
+                    f"• Organise your pet's complete health records\n"
+                    f"• Send timely reminders with one-click reordering\n"
+                    f"• Deliver personalised diet and nutrition recommendations\n"
+                    f"• Highlight health patterns and support better vet conversations\n\n"
+                    f"Because your pet deserves the very best care.\n\n"
+                    f"Let's get started — what's your pet's name?",
                 )
                 return
             # Otherwise fall through to handle user as existing.
@@ -745,20 +803,33 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
         await _send_help_menu(db, from_number, user=user)
         return
 
-    # --- Acknowledgments (thanks, ok, got it) — canned reply ---
+    # --- Acknowledgments (thanks, ok, cool, great …) ---
+    # If the user is mid-conversation (has query history), route to the query
+    # engine so it can respond in context (e.g. "cool" after a vaccination
+    # answer → "Glad that helps! Let me know if you need anything else about Max.").
+    # If there is no prior context, fall back to the canned reply.
     if text_lower in ACKNOWLEDGMENTS:
-        await send_text_message(
-            db, from_number,
-            "You're welcome! Let me know if you need anything else.",
-        )
+        if _get_query_history(from_number):
+            await _handle_query(db, user, text)
+        else:
+            await send_text_message(
+                db, from_number,
+                "You're welcome! Let me know if you need anything else.",
+            )
         return
 
-    # --- Farewells (bye, see you) — canned reply ---
+    # --- Farewells (bye, see you) ---
+    # Mid-conversation: let the LLM close the conversation in context
+    # (e.g. "Bye! Hope Max's vaccination goes well next week! 🐾").
+    # No prior context: canned reply is appropriate.
     if text_lower in FAREWELLS:
-        await send_text_message(
-            db, from_number,
-            "Bye! I'm always here when you need me. Take care! 🐾",
-        )
+        if _get_query_history(from_number):
+            await _handle_query(db, user, text)
+        else:
+            await send_text_message(
+                db, from_number,
+                "Bye! I'm always here when you need me. Take care! 🐾",
+            )
         return
 
     # --- Help / Menu — show available commands ---
@@ -1275,84 +1346,121 @@ async def _handle_media(db: Session, user, message_data: dict) -> None:
     # Track this upload in the in-memory batch window.
     _recent_uploads[pet_key].append(now)
 
-    # --- Download media from WhatsApp ---
-    media_result = await download_whatsapp_media(media_id)
-    if not media_result:
-        # Remove the tracked upload since download failed.
-        _recent_uploads[pet_key].pop()
-        await send_text_message(db, from_number, "Failed to download the file. Please try again.")
-        return
+    # Gate download + DB writes so at most MAX_CONCURRENT_UPLOAD_PROCESSING
+    # tasks run this section at once. Without this, 20 simultaneous uploads
+    # would check out 20 DB connections concurrently, overwhelming the pool
+    # and triggering SSL termination on Supabase's side.
+    async with _upload_processing_semaphore:
+        # --- Download media from WhatsApp ---
+        media_result = await download_whatsapp_media(media_id)
+        if not media_result:
+            # Remove the tracked upload since download failed.
+            _recent_uploads[pet_key].pop()
+            await send_text_message(db, from_number, "Failed to download the file. Please try again.")
+            return
 
-    file_content, detected_mime = media_result
+        file_content, detected_mime = media_result
 
-    try:
-        filename = original_filename or f"{media_id}.{_mime_to_ext(detected_mime)}"
-        document = await process_document_upload(
-            db=db,
-            pet_id=pet.id,
-            user_id=user.id,
-            filename=filename,
-            file_content=file_content,
-            mime_type=detected_mime,
-            pet_name=pet.name,
-            source_wamid=message_id,
-        )
-
-        # Track this exact document in the current in-memory batch so the
-        # deferred extractor doesn't accidentally sweep unrelated pending docs.
-        _batch_document_ids.setdefault(pet_key, []).append(document.id)
-
-        # Persist onboarding intent for this batch at upload time. The
-        # extraction pass later decides whether to finalize onboarding based
-        # on this flag AND whether the user asked to keep uploading more
-        # (see `is_upload_window_extended`).
-        if user.onboarding_state == "awaiting_documents":
-            _batch_is_onboarding[pet_key] = True
-            # Keep the deadline timer alive so auto-finalization still fires
-            # at the end of the window if the user goes silent.
-            _schedule_document_window_timer(
+        try:
+            filename = original_filename or f"{media_id}.{_mime_to_ext(detected_mime)}"
+            document = await process_document_upload(
+                db=db,
+                pet_id=pet.id,
                 user_id=user.id,
-                from_number=from_number,
-                deadline=user.doc_upload_deadline,
+                filename=filename,
+                file_content=file_content,
+                mime_type=detected_mime,
+                pet_name=pet.name,
+                source_wamid=message_id,
             )
-        else:
-            _batch_is_onboarding.setdefault(pet_key, False)
 
-        # Schedule (or reschedule) a deferred batch extraction.
-        # The timer resets with each new upload so extraction only starts
-        # after uploads have settled (_EXTRACTION_DELAY_SECONDS of silence).
-        _schedule_batch_extraction(
-            pet_id=pet.id,
-            pet_name=pet.name,
-            user_id=user.id,
-            from_number=from_number,
-        )
+            # Track this exact document in the current in-memory batch so the
+            # deferred extractor doesn't accidentally sweep unrelated pending docs.
+            _batch_document_ids.setdefault(pet_key, []).append(document.id)
 
-    except ValueError as e:
-        # Remove the tracked upload since storage failed.
-        _recent_uploads[pet_key].pop()
-        error_str = str(e)
-        if "not allowed" in error_str or "File type" in error_str:
-            # Unsupported MIME type (e.g. .docx): suppress per-file message.
-            # Track the count so it appears in the batch acknowledgment instead.
-            _unsupported_format_count[pet_key] = (
-                _unsupported_format_count.get(pet_key, 0) + 1
-            )
-            # Schedule a timer so the acknowledgment fires even if no valid
-            # documents are added to the batch.
+            # --- Immediate post-onboarding upload acknowledgement ---
+            # When a user sends documents AFTER onboarding, they wait through a
+            # 15s batch window + extraction time with no feedback.  Send a quick
+            # "Got it 🐾" on the FIRST document of a post-onboarding batch so the
+            # user knows their upload was received.  The detailed processing
+            # message still fires from the batch extractor once the window closes.
+            is_first_in_batch = len(_batch_document_ids[pet_key]) == 1
+            if is_first_in_batch and user.onboarding_state != "awaiting_documents":
+                try:
+                    await send_text_message(
+                        db,
+                        from_number,
+                        f"Got it 🐾 I'll update {pet.name}'s records once I've gone through "
+                        "what you sent. Feel free to share more documents — I'll process "
+                        "them together.",
+                    )
+                except Exception as ack_exc:
+                    logger.warning(
+                        "Immediate upload ack failed for pet=%s: %s", str(pet.id), ack_exc
+                    )
+
+            # Persist onboarding intent for this batch at upload time. The
+            # extraction pass later decides whether to finalize onboarding based
+            # on this flag AND whether the user asked to keep uploading more
+            # (see `is_upload_window_extended`).
+            if user.onboarding_state == "awaiting_documents":
+                _batch_is_onboarding[pet_key] = True
+                # Keep the deadline timer alive so auto-finalization still fires
+                # at the end of the window if the user goes silent.
+                _schedule_document_window_timer(
+                    user_id=user.id,
+                    from_number=from_number,
+                    deadline=user.doc_upload_deadline,
+                )
+            else:
+                _batch_is_onboarding.setdefault(pet_key, False)
+
+            # Schedule (or reschedule) a deferred batch extraction.
+            # The timer resets with each new upload so extraction only starts
+            # after uploads have settled (_EXTRACTION_DELAY_SECONDS of silence).
             _schedule_batch_extraction(
                 pet_id=pet.id,
                 pet_name=pet.name,
                 user_id=user.id,
                 from_number=from_number,
             )
-        else:
-            # File-size or daily-limit errors: send immediately — these are
-            # batch-level constraints the user needs to know about right away.
-            await send_text_message(db, from_number, error_str)
-    except RuntimeError:
-        _recent_uploads[pet_key].pop()
-        await send_text_message(db, from_number, "Upload failed. Please try again later.")
+
+        except ValueError as e:
+            # Remove the tracked upload since storage failed.
+            _recent_uploads[pet_key].pop()
+            error_str = str(e)
+            if "not allowed" in error_str or "File type" in error_str:
+                # Unsupported MIME type (e.g. .docx): suppress per-file message.
+                # Track the count so it appears in the batch acknowledgment instead.
+                _unsupported_format_count[pet_key] = (
+                    _unsupported_format_count.get(pet_key, 0) + 1
+                )
+                # Schedule a timer so the acknowledgment fires even if no valid
+                # documents are added to the batch.
+                _schedule_batch_extraction(
+                    pet_id=pet.id,
+                    pet_name=pet.name,
+                    user_id=user.id,
+                    from_number=from_number,
+                )
+            else:
+                # File-size or daily-limit errors: send immediately — these are
+                # batch-level constraints the user needs to know about right away.
+                await send_text_message(db, from_number, error_str)
+        except RuntimeError:
+            _recent_uploads[pet_key].pop()
+            # Always schedule the extraction timer even when this individual doc
+            # failed — other docs in the batch may have already succeeded and
+            # still need extraction + summary. Without this call, a DB error on
+            # one doc would leave successfully-uploaded docs with no timer and
+            # no user feedback.
+            _schedule_batch_extraction(
+                pet_id=pet.id,
+                pet_name=pet.name,
+                user_id=user.id,
+                from_number=from_number,
+            )
+            await send_text_message(db, from_number, "Upload failed. Please try again later.")
 
 
 def _schedule_batch_extraction(
@@ -1496,10 +1604,8 @@ async def _delayed_batch_extraction(
         # plan..." transition message, so we skip the ack there.
         if not should_finalize_onboarding and pet and user:
             unsupported_count = _unsupported_format_count.get(pet_key, 0)
-            doc_count = len(pending_docs)
             ack = (
-                f"Got it — we've received {doc_count} "
-                f"document{'s' if doc_count != 1 else ''} 🐾\n\n"
+                f"Got it — I've received your documents 🐾\n\n"
                 f"I'm starting to process them now to update {pet.name}'s records."
             )
             if unsupported_count > 0:
@@ -1508,17 +1614,23 @@ async def _delayed_batch_extraction(
                 _these = "these" if unsupported_count != 1 else "this"
                 _them = "them" if unsupported_count != 1 else "it"
                 ack += (
-                    f"\n\nJust a heads up: {unsupported_count} "
-                    f"document{_doc_s} couldn't be "
-                    f"read as {_they_re} in "
-                    f"an unsupported format (like .docx). You can share "
-                    f"{_these} as an image or "
-                    f"PDF and I'll pick {_them} "
+                    f"\n\nJust a heads up: Some documents couldn't be read as {_they_re} "
+                    f"in an unsupported format (like .docx). You can share "
+                    f"{_these} as an image or PDF and I'll pick {_them} "
                     f"up right away.\n\nGive me a few seconds while I go through the rest."
                 )
             else:
                 ack += "\n\nGive me a few seconds while I go through the rest."
-            await send_text_message(bg_db, from_number, ack)
+            try:
+                await send_text_message(bg_db, from_number, ack)
+            except Exception as _ack_err:
+                # An SSL drop or pool error here must not abort extraction — the
+                # user will still get the batch summary at the end even if the
+                # pre-extraction acknowledgment failed to deliver.
+                logger.warning(
+                    "Pre-extraction ack failed for pet=%s, continuing extraction: %s",
+                    str(pet_id), _ack_err,
+                )
 
         success_count = 0
         fail_count = 0
@@ -1535,7 +1647,7 @@ async def _delayed_batch_extraction(
         # Each extraction is given a 120s timeout to prevent one stuck GPT
         # call from blocking the entire pipeline for all other users.
         for idx, doc in enumerate(pending_docs, 1):
-            async with _extraction_semaphore:
+            async with _get_extraction_semaphore():
                 try:
                     # Download file content from storage (GCP or Supabase) for GPT processing.
                     from app.services.document_upload import download_from_supabase
@@ -1676,15 +1788,23 @@ async def _delayed_batch_extraction(
             bg_db.rollback()
         except Exception:
             pass
+        # bg_db may be in a broken/dead state after rollback — use a fresh session
+        # so the fallback error message always reaches the user even when the
+        # original session had an SSL drop or pool error.
         try:
-            await send_text_message(
-                bg_db, from_number,
-                f"Extraction encountered an issue for {pet_name}. "
-                f"Try uploading again.",
-            )
+            from app.database import get_fresh_session as _get_fresh_session
+            _err_db = _get_fresh_session()
+            try:
+                await send_text_message(
+                    _err_db, from_number,
+                    f"Extraction encountered an issue for {pet_name}. "
+                    f"Try uploading again.",
+                )
+            finally:
+                _err_db.close()
         except Exception:
             pass
-        # Clear batch counter even on failure so user isn't stuck.
+        # Clear batch counter even on failure so user is never stuck.
         _recent_uploads.pop(pet_key, None)
         _batch_document_ids.pop(pet_key, None)
         _batch_is_onboarding.pop(pet_key, None)
@@ -1693,7 +1813,12 @@ async def _delayed_batch_extraction(
 
 
 async def _handle_query(db: Session, user, text: str) -> None:
-    """Handle a general text query via GPT query engine."""
+    """Handle a general text query via GPT query engine.
+
+    Passes the last few conversation turns so the model can resolve
+    follow-up questions in context (e.g. "tell me more", "what about X?").
+    Updates the per-user history buffer after each successful answer.
+    """
     from app.services.query_engine import answer_pet_question
 
     from_number = _get_mobile(user)
@@ -1709,13 +1834,21 @@ async def _handle_query(db: Session, user, text: str) -> None:
         await send_text_message(db, from_number, "Please register a pet first.")
         return
 
+    # Retrieve recent conversation turns for context-aware answering.
+    history = _get_query_history(from_number)
+
     try:
         # 45s timeout prevents a stuck GPT call from hanging the user's session.
         result = await asyncio.wait_for(
-            answer_pet_question(db, pet.id, text),
+            answer_pet_question(db, pet.id, text, conversation_history=history),
             timeout=45,
         )
         answer = result.get("answer", "Sorry, I couldn't find an answer.")
+
+        # Persist this exchange so future messages can reference it.
+        if result.get("status") == "success":
+            _update_query_history(from_number, text, answer)
+
         await send_text_message(db, from_number, answer)
     except TimeoutError:
         logger.error("Query engine timed out for pet %s", str(pet.id))

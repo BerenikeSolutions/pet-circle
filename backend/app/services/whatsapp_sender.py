@@ -618,13 +618,18 @@ async def download_whatsapp_media(media_id: str) -> tuple[bytes, str] | None:
         Tuple of (file_bytes, mime_type) on success, None on failure.
     """
     import asyncio as _asyncio
+    import random as _random
 
     # Use the shared client for connection reuse. Media downloads use a
     # separate timeout (60s) because files can be large (up to 10MB).
     client = _get_whatsapp_client()
 
     # Retry on transient SSL errors from Meta's CDN.
-    max_retries = 2
+    # Exponential backoff (1s, 2s, 4s) with ±0.5s jitter breaks the thundering
+    # herd when 15 concurrent downloads all fail at the same moment — without
+    # jitter they'd all retry simultaneously and collide again.
+    max_retries = 3
+    _BACKOFFS = [1.0, 2.0, 4.0]
     for attempt in range(max_retries + 1):
         try:
             # Step 1: Get media URL
@@ -664,6 +669,7 @@ async def download_whatsapp_media(media_id: str) -> tuple[bytes, str] | None:
                 media_id, attempt + 1, max_retries + 1, str(e),
             )
             if attempt < max_retries:
-                await _asyncio.sleep(1)
+                backoff = _BACKOFFS[attempt] + _random.uniform(0, 0.5)
+                await _asyncio.sleep(backoff)
             else:
                 return None

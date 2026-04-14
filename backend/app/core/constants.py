@@ -35,18 +35,25 @@ MAX_UPLOAD_BYTES: int = MAX_UPLOAD_MB * 1024 * 1024
 
 # Maximum number of file uploads allowed per pet per day.
 # Prevents abuse and controls storage costs.
-MAX_UPLOADS_PER_PET_PER_DAY: int = 10
+MAX_UPLOADS_PER_PET_PER_DAY: int = 1000
 
 # Maximum number of pending (unprocessed) documents allowed per pet at a time.
 # If a pet already has this many pending documents, new uploads are rejected
 # until existing ones finish extraction. Prevents queue flooding.
-MAX_PENDING_DOCS_PER_PET: int = 5
+MAX_PENDING_DOCS_PER_PET: int = 100
 
 # Maximum number of concurrent background extraction tasks system-wide.
 # Sized to allow multiple pet batches to extract in parallel while
-# staying within DB pool limits (pool_size=10, max_overflow=10).
+# staying within DB pool limits (pool_size=15, max_overflow=10).
 # Each extraction holds a DB session for the GPT call duration (~5-15s).
-MAX_CONCURRENT_EXTRACTIONS: int = 5
+MAX_CONCURRENT_EXTRACTIONS: int = 8
+
+# Maximum number of concurrent document upload processing tasks system-wide.
+# Limits initial DB + media-download work when a user sends many files at once
+# (e.g. 15 documents). Without this, 15 tasks simultaneously hold DB connections
+# and hit Supabase hard enough to trigger SSL termination on the pooler side.
+# Peak load: 15 uploads + 8 extractions = 23 sessions — within pool ceiling of 25.
+MAX_CONCURRENT_UPLOAD_PROCESSING: int = 15
 
 # Allowed MIME types for uploaded documents.
 # Only images (JPEG, PNG) and PDF are accepted.
@@ -135,10 +142,10 @@ RATE_LIMIT_WINDOW_SECONDS: int = 60
 
 # --- OpenAI Model Configuration ---
 # Extraction model for parsing uploaded documents into structured health data.
-OPENAI_EXTRACTION_MODEL: str = "gpt-4.1"
+OPENAI_EXTRACTION_MODEL: str = "claude-opus-4-6"
 
 # Query model for answering user questions grounded in pet records.
-OPENAI_QUERY_MODEL: str = "gpt-4.1-mini"
+OPENAI_QUERY_MODEL: str = "claude-sonnet-4-6"
 
 # Temperature for extraction — deterministic output required.
 OPENAI_EXTRACTION_TEMPERATURE: float = 0.0
@@ -154,11 +161,25 @@ OPENAI_QUERY_TEMPERATURE: float = 0.0
 OPENAI_QUERY_MAX_TOKENS: int = 1500
 
 # --- Retry Configuration ---
-# OpenAI retry backoff intervals in seconds.
+# OpenAI retry backoff intervals in seconds (transient errors).
 OPENAI_RETRY_BACKOFFS: list[float] = [1.0, 2.0]
+# Rate-limit (429) specific backoffs — much longer to allow TPM window recovery.
+OPENAI_RATE_LIMIT_BACKOFFS: list[float] = [10.0, 20.0]
+# Max concurrent Claude/Anthropic API calls across the whole process.
+CLAUDE_API_CONCURRENCY: int = 5
+
+# --- Extraction Hardening ---
+# Maximum number of automatic replay attempts for a failed extraction.
+# After this many attempts the document stays 'failed' permanently.
+EXTRACTION_MAX_AUTO_RETRIES: int = 3
+
+# Confidence threshold below which a second-pass extraction is triggered.
+# The model rates its own confidence 0.0–1.0; values below this floor mean
+# the document was ambiguous and deserves a focused re-extraction.
+EXTRACTION_LOW_CONFIDENCE_THRESHOLD: float = 0.65
 
 # --- Weight Lookup (AI-powered ideal weight range) ---
-OPENAI_WEIGHT_LOOKUP_MODEL: str = OPENAI_QUERY_MODEL  # gpt-4.1-mini
+OPENAI_WEIGHT_LOOKUP_MODEL: str = OPENAI_QUERY_MODEL  # claude-sonnet-4-6
 OPENAI_WEIGHT_LOOKUP_TEMPERATURE: float = 0.0
 OPENAI_WEIGHT_LOOKUP_MAX_TOKENS: int = 200
 WEIGHT_CACHE_STALENESS_DAYS: int = 365
@@ -168,7 +189,7 @@ OPENAI_NUTRITION_LOOKUP_MAX_TOKENS: int = 500
 NUTRITION_CACHE_STALENESS_DAYS: int = 365
 
 # --- Food Nutrition Estimation (unknown foods) ---
-OPENAI_FOOD_ESTIMATION_MAX_TOKENS: int = 400
+OPENAI_FOOD_ESTIMATION_MAX_TOKENS: int = 800
 FOOD_CACHE_STALENESS_DAYS: int = 365
 
 # --- Personalized Nutrition Recommendations ---

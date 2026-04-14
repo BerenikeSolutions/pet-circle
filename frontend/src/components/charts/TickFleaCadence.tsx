@@ -20,7 +20,7 @@ export default function TickFleaCadence({ data }: TickFleaCadenceProps) {
         label: formatAxisDate(dose.date),
         gapWeeks: parseGapWeeks(dose.gap),
         gapLabel: dose.gap ?? undefined,
-        isUpcoming: dose.status.toLowerCase().includes("upcoming"),
+        isUpcoming: dose.status === "upcoming" || dose.status === "overdue",
       }))}
       criticalGaps={buildCriticalGapAnnotations(data.doses)}
       footer={data.footer.text}

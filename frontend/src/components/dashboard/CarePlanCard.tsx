@@ -120,9 +120,9 @@ export default function CarePlanCard({
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div className="care-name">{item.name}</div>
                         <div className="care-meta">
-                          {item.freq} · Next: {item.next_due || "--"}
+                          {item.freq} · {normalizeStatusTag(item.status_tag) === "Urgent" && item.next_due ? `Overdue since ${item.next_due}` : `Next: ${item.next_due || "--"}`}
                         </div>
-                        {item.reason && !(bucketKey === "continue" && item.test_type === "food") && (
+                        {item.reason && !(bucketKey === "continue" && (item.test_type === "food" || item.test_type === "supplement")) && (
                           <div style={{ fontSize: 11, color: "var(--t2)", lineHeight: 1.4, marginTop: 3, fontStyle: "italic" }}>
                             {item.reason}
                           </div>
@@ -130,11 +130,12 @@ export default function CarePlanCard({
                       </div>
 
                       <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5, flexShrink: 0 }}>
-                        {item.test_type !== "food" && item.test_type !== "supplement" && (
-                          bucketKey === "add"
-                            ? <span className="s-tag s-tag-rec">Recommended</span>
-                            : <span className={`s-tag ${itemStatusClass(item)}`}>{normalizeStatusTag(item.status_tag)}</span>
-                        )}
+                        {bucketKey === "add"
+                          ? <span className="s-tag s-tag-rec">Recommended</span>
+                          : item.test_type !== "food" && item.test_type !== "supplement"
+                            ? <span className={`s-tag ${itemStatusClass(item)}`}>{normalizeStatusTag(item.status_tag)}</span>
+                            : null
+                        }
 
                         {canOrder && (
                           <button

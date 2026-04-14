@@ -6,7 +6,7 @@ The model is strictly grounded in the pet's data — no external knowledge,
 no medical advice, no hallucinated information.
 
 Model configuration (from constants — never hardcoded):
-    - Model: OPENAI_QUERY_MODEL (gpt-4.1-mini)
+    - Model: OPENAI_QUERY_MODEL (gpt-4.1)
     - Temperature: 0 (deterministic responses)
     - Max tokens: 1500
 
@@ -66,16 +66,16 @@ from app.utils.retry import retry_openai_call
 
 logger = logging.getLogger(__name__)
 
-_openai_query_client = None
+_anthropic_query_client = None
 
 
 def _get_openai_query_client():
-    """Return a cached AsyncOpenAI client for queries (created on first call)."""
-    global _openai_query_client
-    if _openai_query_client is None:
-        from openai import AsyncOpenAI
-        _openai_query_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-    return _openai_query_client
+    """Return a cached AsyncAnthropic client for queries (created on first call)."""
+    global _anthropic_query_client
+    if _anthropic_query_client is None:
+        from anthropic import AsyncAnthropic
+        _anthropic_query_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+    return _anthropic_query_client
 
 
 # --- System prompt for strict query engine ---
@@ -102,7 +102,34 @@ QUERY_SYSTEM_PROMPT = (
     "- Do NOT help with scheduling vet visits or appointments. PetCircle does not "
     "provide vet visit scheduling. If asked, suggest the parent contact their vet directly.\n"
     "- Do NOT mention health score, scoring, or numeric wellness ratings in answers, even if asked.\n"
-    "- Format responses for WhatsApp (use *bold* for emphasis, keep it readable)."
+    "- Users can always add more health records by sending documents (photos, PDFs) directly "
+    "in this WhatsApp chat at any time. If a user asks about adding records, uploading documents, "
+    "or sharing more information, confirm they can share documents right here.\n"
+    "- Distinguish between items the pet is actively tracking (items with a recorded last_done_date "
+    "and due dates) and items that have no history. Items without any last_done_date are NOT "
+    "'upcoming' — they are unstarted recommendations. Never describe unstarted recommendations as "
+    "'upcoming' or 'not been done yet'. Only items with recorded completion history should be "
+    "described as 'upcoming' or 'overdue'.\n"
+    "- When summarising what has been done vs what is upcoming, keep the two lists separate: "
+    "(1) completed/tracked items with dates, (2) recommended additions the parent may want to "
+    "consider. Do NOT lump them into one list.\n"
+    "- Format responses for WhatsApp (use *bold* for emphasis, keep it readable).\n"
+    "- CONVERSATION CONTEXT: You may be given previous messages from this conversation. "
+    "Use them to understand what the user is referring to. Short follow-up messages like "
+    "'what about X?', 'and the next one?', 'is that normal?', or 'tell me more' refer to "
+    "the topic just discussed — resolve them using the prior exchange before answering. "
+    "Always interpret ambiguous or incomplete messages in light of the conversation history. "
+    "Never ask the user to repeat themselves if the context makes their intent clear.\n"
+    "- COLLOQUIAL RESPONSES: When the user sends a short casual message like 'cool', 'great', "
+    "'ok', 'awesome', 'perfect', 'thanks', 'got it', or similar, treat it as an acknowledgment "
+    "of what was just discussed. Respond warmly and briefly in context — for example, if you "
+    "just told them about their pet's upcoming vaccination, a reply of 'great' should get a "
+    "response like 'Glad that's helpful! Let me know if you have any other questions about "
+    "[pet name].' Do NOT re-summarise the previous answer. Keep the reply short and warm.\n"
+    "- FAREWELLS: When the user says goodbye ('bye', 'see you', 'cya', etc.), close the "
+    "conversation warmly and in context. Reference what was just discussed if relevant — "
+    "e.g. if you just reminded them about Max's deworming, say something like 'Bye! Hope "
+    "Max's deworming goes smoothly! 🐾 I'm always here when you need me.' Keep it brief."
 )
 
 
@@ -189,12 +216,18 @@ def _build_pet_context(db: Session, pet_id: UUID) -> str:
     context_parts.append("\n=== Preventive Health Records ===")
     if records:
         for record, master in records:
-            context_parts.append(
-                f"- {master.item_name} ({master.category}): "
-                f"Last done: {record.last_done_date}, "
-                f"Next due: {record.next_due_date}, "
-                f"Status: {record.status}"
-            )
+            if record.last_done_date:
+                context_parts.append(
+                    f"- {master.item_name} ({master.category}): "
+                    f"Last done: {record.last_done_date}, "
+                    f"Next due: {record.next_due_date}, "
+                    f"Status: {record.status}"
+                )
+            else:
+                context_parts.append(
+                    f"- {master.item_name} ({master.category}): "
+                    f"(no history — recommendation only, not yet started by owner)"
+                )
     else:
         context_parts.append("No preventive records found.")
 
@@ -488,6 +521,7 @@ async def answer_pet_question(
     db: Session,
     pet_id: UUID,
     question: str,
+    conversation_history: list[dict] | None = None,
 ) -> dict:
     """
     Answer a user's question about their pet using GPT.
@@ -497,8 +531,9 @@ async def answer_pet_question(
 
     Pipeline:
         1. Build context from pet's DB records.
-        2. Send context + question to GPT (gpt-4.1-mini from constants).
-        3. Return the grounded answer.
+        2. Build multi-turn messages array from conversation history (if any).
+        3. Send combined system prompt (rules + pet data) + messages to GPT.
+        4. Return the grounded answer.
 
     On GPT failure:
         - Return a user-friendly error message.
@@ -507,7 +542,11 @@ async def answer_pet_question(
     Args:
         db: SQLAlchemy database session.
         pet_id: UUID of the pet being queried.
-        question: The user's question text.
+        question: The user's current question text.
+        conversation_history: Optional list of prior turns as
+            [{"role": "user"|"assistant", "content": str}, ...].
+            Used so the model can resolve follow-up questions and
+            short references without the user repeating context.
 
     Returns:
         Dictionary with:
@@ -517,11 +556,28 @@ async def answer_pet_question(
     # Build context from pet's database records.
     context = _build_pet_context(db, pet_id)
 
-    # Construct the user message with context and question.
-    user_message = (
-        f"Here is the pet's data:\n\n{context}\n\n"
-        f"User question: {question}"
+    # Embed pet data directly in the system prompt so it is available
+    # across all conversation turns without repeating it per message.
+    system_with_context = (
+        QUERY_SYSTEM_PROMPT
+        + "\n\n=== Pet Data ===\n"
+        + context
     )
+
+    # Build messages array: prior turns (if any) + current question.
+    # The Anthropic API requires the first message to have role "user".
+    # Filter out any leading assistant turns defensively before appending.
+    messages: list[dict] = []
+    if conversation_history:
+        for turn in conversation_history:
+            role = turn.get("role", "")
+            content = turn.get("content", "")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+        # Strip any leading assistant turns so the array always starts with "user".
+        while messages and messages[0]["role"] == "assistant":
+            messages.pop(0)
+    messages.append({"role": "user", "content": question})
 
     try:
         # Reuse cached client — avoids recreating on every query.
@@ -529,16 +585,14 @@ async def answer_pet_question(
 
         async def _make_call() -> str:
             """Inner function wrapped by retry_openai_call."""
-            response = await client.chat.completions.create(
+            response = await client.messages.create(
                 model=OPENAI_QUERY_MODEL,
                 temperature=OPENAI_QUERY_TEMPERATURE,
                 max_tokens=OPENAI_QUERY_MAX_TOKENS,
-                messages=[
-                    {"role": "system", "content": QUERY_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_message},
-                ],
+                system=system_with_context,
+                messages=messages,
             )
-            return response.choices[0].message.content
+            return response.content[0].text
 
         # Retry with backoff: 3 attempts (1s, 2s) — from constants.
         answer = await retry_openai_call(_make_call)

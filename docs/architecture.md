@@ -53,7 +53,7 @@ Next.js Dashboard (token-based access)
 | Backend API | Python 3.11 + FastAPI | `backend/` |
 | Messaging | WhatsApp Cloud API | `backend/app/services/whatsapp_sender.py` |
 | AI Extraction | OpenAI GPT (gpt-4.1) | `backend/app/services/gpt_extraction.py` |
-| AI Query | OpenAI GPT (gpt-4.1-mini) | `backend/app/services/query_engine.py` |
+| AI Query | OpenAI GPT (gpt-4.1) | `backend/app/services/query_engine.py` |
 | Agentic Flows | OpenAI GPT (gpt-4.1) | `backend/app/services/agentic_onboarding.py`, `agentic_order.py`, `agentic_finalization.py` |
 | Database | Supabase (PostgreSQL) | `backend/app/database.py`, `backend/app/models/` |
 | File Storage | GCP Cloud Storage (primary), Supabase Storage (fallback) | `backend/app/services/storage_service.py`, `document_upload.py` |

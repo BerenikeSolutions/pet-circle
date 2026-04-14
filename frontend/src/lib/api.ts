@@ -26,6 +26,10 @@ export interface PetProfile {
 export interface OwnerInfo {
   full_name: string | null;
   pincode: string | null;
+  mobile_display: string | null;
+  delivery_address: string | null;
+  payment_method_pref: "cod" | "upi" | "card" | null;
+  saved_upi_id: string | null;
 }
 
 export interface PreventiveRecord {
@@ -283,6 +287,10 @@ export interface CarePlanItem {
   signal_level?: string | null;
   info_prompt?: string | null;
   diet_item_id?: string | null;
+  /** Raw micronutrient name (e.g. "glucosamine"). Present on supplement items
+   *  generated from missing-micronutrient analysis. Used to fetch matching
+   *  products via /products/resolve-by-micronutrient instead of diet_item_id. */
+  micronutrient?: string | null;
 }
 
 export interface CarePlanSection {

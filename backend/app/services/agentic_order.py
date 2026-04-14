@@ -2,13 +2,13 @@
 PetCircle — Agentic Order Service
 
 An LLM-driven alternative to the deterministic order state machine.
-Activated when AGENTIC_ORDER_ENABLED=true and OPENAI_API_KEY is set.
+Activated when AGENTIC_ORDER_ENABLED=true and ANTHROPIC_API_KEY is set.
 
 Architecture:
-    - One AgentOrderSession row per user stores the full OpenAI message
+    - One AgentOrderSession row per user stores the full Anthropic message
       history and a structured "collected_data" snapshot.
     - On each incoming WhatsApp message, we append the user turn, call the
-      OpenAI tool-calling API, execute any tool calls (which write to
+      Anthropic tool-calling API, execute any tool calls (which write to
       collected_data in-memory), persist the updated session, and send the
       assistant reply back via WhatsApp.
     - When the model decides the order is ready to confirm, it calls the
@@ -93,137 +93,110 @@ IMPORTANT:
 # Tool definitions
 # ---------------------------------------------------------------------------
 
+# Anthropic tool format: {"name", "description", "input_schema"} — no "type"/"function" wrapper.
 _ORDER_TOOLS = [
     {
-        "type": "function",
-        "function": {
-            "name": "set_items",
-            "description": (
-                "Store the list of items the user wants to order. "
-                "Call this as soon as the user mentions what they want. "
-                "Each item should be a plain string (e.g., 'Nexgard 3 tablets', 'Royal Canin 1kg'). "
-                "Use source='recommendation' when items were selected from get_recommendations results. "
-                "Use source='custom' (default) when the user typed items themselves."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "items": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of item names/descriptions.",
-                    },
-                    "source": {
-                        "type": "string",
-                        "enum": ["custom", "recommendation"],
-                        "description": "How these items were identified. Default: custom.",
-                    },
+        "name": "set_items",
+        "description": (
+            "Store the list of items the user wants to order. "
+            "Call this as soon as the user mentions what they want. "
+            "Each item should be a plain string (e.g., 'Nexgard 3 tablets', 'Royal Canin 1kg'). "
+            "Use source='recommendation' when items were selected from get_recommendations results. "
+            "Use source='custom' (default) when the user typed items themselves."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of item names/descriptions.",
                 },
-                "required": ["items"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_category",
-            "description": (
-                "Set the order category once it is clear. "
-                "Infer from items when possible — only ask the user if truly ambiguous."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "category": {
-                        "type": "string",
-                        "enum": ["medicines", "food_nutrition", "supplements"],
-                    },
+                "source": {
+                    "type": "string",
+                    "enum": ["custom", "recommendation"],
+                    "description": "How these items were identified. Default: custom.",
                 },
-                "required": ["category"],
-                "additionalProperties": False,
             },
+            "required": ["items"],
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "set_pet",
-            "description": (
-                "Set which pet this order is for. "
-                "Only needed when the user has more than one pet. "
-                "Pass the pet_id string from the get_pet_list result."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pet_id": {
-                        "type": "string",
-                        "description": "UUID string of the pet.",
-                    },
+        "name": "set_category",
+        "description": (
+            "Set the order category once it is clear. "
+            "Infer from items when possible — only ask the user if truly ambiguous."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": ["medicines", "food_nutrition", "supplements"],
                 },
-                "required": ["pet_id"],
-                "additionalProperties": False,
             },
+            "required": ["category"],
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "get_pet_list",
-            "description": (
-                "Fetch the user's active pets as a list of {pet_id, name} objects. "
-                "Call this before asking the user to select a pet. "
-                "If there is only one pet, call set_pet automatically without asking."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": False,
+        "name": "set_pet",
+        "description": (
+            "Set which pet this order is for. "
+            "Only needed when the user has more than one pet. "
+            "Pass the pet_id string from the get_pet_list result."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pet_id": {
+                    "type": "string",
+                    "description": "UUID string of the pet.",
+                },
             },
+            "required": ["pet_id"],
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "get_recommendations",
-            "description": (
-                "Fetch personalized product recommendations for the selected pet and category. "
-                "Returns a list of {name, reason} objects. "
-                "Present these to the user naturally and offer to add them to the order."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": False,
-            },
+        "name": "get_pet_list",
+        "description": (
+            "Fetch the user's active pets as a list of {pet_id, name} objects. "
+            "Call this before asking the user to select a pet. "
+            "If there is only one pet, call set_pet automatically without asking."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "confirm_order",
-            "description": (
-                "Finalize and place the order. Call this only after the user explicitly confirms. "
-                "Requires items to be set. If user has multiple pets, pet must also be set."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": False,
-            },
+        "name": "get_recommendations",
+        "description": (
+            "Fetch personalized product recommendations for the selected pet and category. "
+            "Returns a list of {name, reason} objects. "
+            "Present these to the user naturally and offer to add them to the order."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "cancel_order",
-            "description": "Cancel the order flow. Call when the user says they don't want to order.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": False,
-            },
+        "name": "confirm_order",
+        "description": (
+            "Finalize and place the order. Call this only after the user explicitly confirms. "
+            "Requires items to be set. If user has multiple pets, pet must also be set."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "cancel_order",
+        "description": "Cancel the order flow. Call when the user says they don't want to order.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
         },
     },
 ]
@@ -302,7 +275,7 @@ def _get_or_create_session(db: Session, user: User) -> AgentOrderSession:
 
         session = AgentOrderSession(
             user_id=user.id,
-            messages=[{"role": "system", "content": _SYSTEM_PROMPT}],
+            messages=[],  # System prompt passed directly to client.messages.create(system=...)
             collected_data={
                 "pet_id": None,
                 "category": None,
@@ -348,14 +321,15 @@ def _save_session(db: Session, session: AgentOrderSession) -> None:
 
 
 def _trim_messages(messages: list, max_turns: int = 10) -> list:
-    """Return system prompt + last max_turns non-system messages for the API call.
+    """Return last max_turns non-system messages for the API call.
 
+    The system prompt is passed separately via the system= parameter.
     session.messages is NOT mutated — full history is still persisted to DB.
-    This only trims what is sent to OpenAI, preventing unbounded context growth.
+    This only trims what is sent to Claude, preventing unbounded context growth.
     """
-    system_msgs = [m for m in messages if m.get("role") == "system"]
+    # Filter out any legacy system messages (from old OpenAI sessions stored in DB).
     turn_msgs = [m for m in messages if m.get("role") != "system"]
-    return system_msgs + turn_msgs[-max_turns:]
+    return turn_msgs[-max_turns:]
 
 
 async def _call_openai_with_tools(messages: list) -> object:
@@ -369,13 +343,14 @@ async def _call_openai_with_tools(messages: list) -> object:
     client = _get_openai_onboarding_client()
 
     async def _make_call():
-        return await client.chat.completions.create(
-            model="gpt-4.1",
+        return await client.messages.create(
+            model="claude-sonnet-4-6",
             temperature=0,
             max_tokens=500,
             tools=_ORDER_TOOLS,
-            tool_choice="auto",
-            messages=messages,
+            tool_choice={"type": "auto"},
+            system=_SYSTEM_PROMPT,
+            messages=[m for m in messages if m.get("role") != "system"],
         )
 
     return await retry_openai_call(_make_call)
@@ -393,13 +368,13 @@ async def _call_openai_text_only(messages: list) -> object:
     client = _get_openai_onboarding_client()
 
     async def _make_call():
-        return await client.chat.completions.create(
-            model="gpt-4.1",
+        # No tools passed — forces a pure text response (no tool calls possible).
+        return await client.messages.create(
+            model="claude-sonnet-4-6",
             temperature=0,
             max_tokens=500,
-            tools=_ORDER_TOOLS,
-            tool_choice="none",
-            messages=messages,
+            system=_SYSTEM_PROMPT,
+            messages=[m for m in messages if m.get("role") != "system"],
         )
 
     return await retry_openai_call(_make_call)
@@ -728,7 +703,7 @@ async def _run_agent_loop(
     session: AgentOrderSession,
 ) -> str | None:
     """
-    Execute the OpenAI tool-calling loop for one user turn.
+    Execute the Anthropic tool-calling loop for one user turn.
 
     Runs until:
     - The model produces a text reply (no tool call) → return the text.
@@ -743,34 +718,39 @@ async def _run_agent_loop(
 
     for iteration in range(MAX_ITERATIONS):
         response = await _call_openai_with_tools(_trim_messages(session.messages))
-        choice = response.choices[0]
-        message = choice.message
 
-        # Build assistant message dict
-        assistant_msg: dict = {"role": "assistant", "content": message.content or ""}
-        if message.tool_calls:
-            assistant_msg["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                }
-                for tc in message.tool_calls
-            ]
-        session.messages.append(assistant_msg)
+        # Anthropic response: response.content is a list of content blocks.
+        # Blocks can be TextBlock (type="text") or ToolUseBlock (type="tool_use").
+        content_blocks = response.content or []
+        tool_use_blocks = [b for b in content_blocks if getattr(b, "type", None) == "tool_use"]
+        text_blocks = [b for b in content_blocks if getattr(b, "type", None) == "text"]
+
+        # Persist the assistant turn as the raw content list (for multi-turn context).
+        # The Anthropic SDK returns content blocks; store them as serialisable dicts.
+        assistant_content = []
+        for block in content_blocks:
+            if getattr(block, "type", None) == "text":
+                assistant_content.append({"type": "text", "text": block.text})
+            elif getattr(block, "type", None) == "tool_use":
+                assistant_content.append({
+                    "type": "tool_use",
+                    "id": block.id,
+                    "name": block.name,
+                    "input": block.input,
+                })
+        session.messages.append({"role": "assistant", "content": assistant_content})
 
         # No tool calls → model is speaking directly to the user
-        if not message.tool_calls:
-            return message.content or ""
+        if not tool_use_blocks:
+            return text_blocks[0].text if text_blocks else ""
 
         # Execute each tool call
         terminal_signal: str | None = None
-        for tc in message.tool_calls:
+        tool_results = []
+        for tc in tool_use_blocks:
             result = await _dispatch_tool_call(
-                db, user, session, tc.function.name, tc.function.arguments
+                db, user, session, tc.name,
+                json.dumps(tc.input) if isinstance(tc.input, dict) else (tc.input or "{}")
             )
 
             if result == "__COMPLETE__":
@@ -780,22 +760,28 @@ async def _run_agent_loop(
                 terminal_signal = "CANCELLED"
                 result = "Order cancelled."
 
-            session.messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result,
-                }
-            )
+            tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": tc.id,
+                "content": result,
+            })
+
+        # Append all tool results in one user message (Anthropic requirement).
+        session.messages.append({"role": "user", "content": tool_results})
 
         if terminal_signal:
             # Let the model produce the closing message to the user.
-            # Use tool_choice="none" to guarantee a text reply — never a blank message.
-            # Trim to avoid sending unbounded history.
+            # Use tool_choice="any" (forces a tool call) → but here we want text only.
+            # Re-use the text-only call path.
             final_response = await _call_openai_text_only(
                 _trim_messages(session.messages)
             )
-            final_text = final_response.choices[0].message.content or ""
+            final_content = final_response.content or []
+            final_text = ""
+            for block in final_content:
+                if getattr(block, "type", None) == "text":
+                    final_text = block.text
+                    break
             session.messages.append({"role": "assistant", "content": final_text})
             return final_text
 

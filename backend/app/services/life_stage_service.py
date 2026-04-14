@@ -66,12 +66,12 @@ class _LifeStageTraitsPayload:
 
 
 def _get_openai_client():
-    """Lazy-initialise AsyncOpenAI client."""
+    """Lazy-initialise AsyncAnthropic client."""
     global _openai_client
     if _openai_client is None:
-        from openai import AsyncOpenAI
+        from anthropic import AsyncAnthropic
 
-        _openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        _openai_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
     return _openai_client
 
 
@@ -143,17 +143,16 @@ async def _generate_life_stage_traits_gpt(
     )
 
     async def _call() -> str:
-        response = await client.chat.completions.create(
+        response = await client.messages.create(
             model=OPENAI_QUERY_MODEL,
             temperature=0,
             max_tokens=700,
-            response_format={"type": "json_object"},
+            system=system_prompt,
             messages=[
-                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         )
-        return response.choices[0].message.content or "{}"
+        return response.content[0].text or "{}"
 
     raw = await retry_openai_call(_call)
     try:
@@ -176,9 +175,7 @@ def _is_stage_specific_trait(label: str) -> bool:
         return False
     if any(token in value for token in _STAGE_SPECIFIC_TOKENS):
         return True
-    if any(token in value for token in _GENERIC_TRAIT_TOKENS):
-        return False
-    return True
+    return not any(token in value for token in _GENERIC_TRAIT_TOKENS)
 
 
 def _risk_keywords(documented_risks: list[str]) -> set[str]:

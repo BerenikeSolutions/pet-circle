@@ -121,7 +121,7 @@ Background task runs:
 - **Conflict expiry:** 5 days, auto-resolve KEEP_EXISTING, log action
 - **Preventive master:** Frozen, always read from DB, no fallback
 - **WhatsApp templates:** All loaded from environment, no hardcoding
-- **OpenAI GPT:** Extraction: `gpt-4.1`, Query: `gpt-4.1-mini`, strict JSON, retry policy applied
+- **OpenAI GPT:** Extraction: `gpt-4.1`, Query: `gpt-4.1`, strict JSON, retry policy applied
 - **Storage:** Private S3 bucket `petcircle-documents`, path `{user_id}/{pet_id}/{filename}`, no public URLs
 - **Admin security:** Header `X-ADMIN-KEY` validated against `ADMIN_SECRET_KEY`
 - **Button payload IDs:** No hardcoding, e.g., `REMINDER_DONE`, `CONFLICT_USE_NEW`

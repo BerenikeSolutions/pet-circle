@@ -158,13 +158,10 @@ def _build_weight_signal(weights_desc: list[WeightHistory]) -> dict[str, Any] | 
 
     alert = abs(delta) > 0.2
     if delta > 0.2:
-        direction = "up"
         recommendation = "Weight has trended up. Ask your vet for a measured meal and walk plan over the next 8-12 weeks."
     elif delta < -0.2:
-        direction = "down"
         recommendation = "Weight has trended down. Ask your vet if intake or deworming cadence should be adjusted this month."
     else:
-        direction = "stable"
         recommendation = "Weight is stable. Continue the same routine and re-check weight at the next preventive visit."
 
     # BCS from latest weight entry if available
@@ -249,22 +246,41 @@ def _gap_in_weeks(previous: date, current: date) -> int:
 
 
 def _build_vaccine_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster]], today: date) -> dict[str, Any] | None:
-    """Build vaccine timeline card."""
+    """Build vaccine timeline card.
+
+    Vaccines on the same date are grouped into a single round so the
+    timeline shows one node per date with a vaccine count below it.
+    """
     vaccine_rows = [row for row in rows if _classify_preventive_item(row[1].item_name) == "vaccine"]
     if not vaccine_rows:
         return None
 
     vaccine_rows = sorted(vaccine_rows, key=lambda item: (item[0].last_done_date or item[0].next_due_date or today))
-    rounds = []
-    done_dates = [record.last_done_date for record, _ in vaccine_rows if record.last_done_date]
-    for idx, (record, master) in enumerate(vaccine_rows, start=1):
+
+    # Group vaccines by date → one round per unique date.
+    from collections import OrderedDict
+    date_groups: OrderedDict[date | None, list[tuple[PreventiveRecord, PreventiveMaster]]] = OrderedDict()
+    for record, master in vaccine_rows:
         node_date = record.last_done_date or record.next_due_date
+        date_groups.setdefault(node_date, []).append((record, master))
+
+    rounds = []
+    done_dates: list[date] = []
+    total_vaccines = len(vaccine_rows)
+    done_vaccine_count = 0
+
+    for idx, (node_date, group) in enumerate(date_groups.items(), start=1):
+        names = [m.item_name for _, m in group]
+        all_done = all(bool(r.last_done_date) for r, _ in group)
+        if all_done and node_date:
+            done_dates.append(node_date)
+            done_vaccine_count += len(group)
         rounds.append(
             {
                 "id": f"R{idx}",
                 "label": f"R{idx}",
-                "vaccines": master.item_name,
-                "done": bool(record.last_done_date),
+                "vaccines": " · ".join(names),
+                "done": all_done,
                 "date": node_date.isoformat() if node_date else None,
             }
         )
@@ -274,12 +290,11 @@ def _build_vaccine_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster]]
         if prev and cur:
             gaps.append(f"~{_gap_in_weeks(prev, cur) // 4} months")
 
-    done_count = len(done_dates)
-    all_done = done_count == len(vaccine_rows)
-    if all_done and done_count > 0:
-        headline = f"All {done_count} vaccines current. Annual cadence maintained."
-    elif done_count > 0:
-        headline = f"{done_count} of {len(vaccine_rows)} vaccine rounds completed."
+    all_complete = done_vaccine_count == total_vaccines and total_vaccines > 0
+    if all_complete:
+        headline = f"All {total_vaccines} vaccines current. Annual cadence maintained."
+    elif done_vaccine_count > 0:
+        headline = f"{len(done_dates)} of {len(date_groups)} vaccine rounds completed."
     else:
         headline = "No vaccines recorded yet."
 
@@ -300,19 +315,91 @@ def _build_vaccine_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster]]
     }
 
 
-def _build_flea_tick_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster]]) -> dict[str, Any] | None:
-    """Build flea/tick dot-plot card with gap severity coloring."""
+def _fetch_medicine_info(medicine_name: str | None, db: Session | None) -> dict[str, Any] | None:
+    """Look up a medicine in product_medicines and return display metadata.
+
+    Returns a dict with ingredient/dosage/frequency/warning keys, or None when
+    either the medicine_name is absent or the catalog lookup fails.
+    """
+    if not medicine_name or db is None:
+        return None
+    try:
+        from app.models.product_medicines import ProductMedicines
+
+        med = (
+            db.query(ProductMedicines)
+            .filter(
+                ProductMedicines.active == True,
+                ProductMedicines.product_name.ilike(f"%{medicine_name}%"),
+            )
+            .first()
+        )
+        if med:
+            return {
+                "product_name": med.product_name,
+                "brand_name": med.brand_name,
+                "form": med.form,
+                "ingredients": med.key_ingredients,
+                "dosage": med.dosage,
+                "repeat_frequency": med.repeat_frequency,
+                "warnings": med.notes,
+                "price_display": (
+                    f"₹{med.discounted_paise // 100}" if med.discounted_paise else None
+                ),
+            }
+    except Exception:
+        pass
+    return None
+
+
+def _build_flea_tick_cadence(
+    rows: list[tuple[PreventiveRecord, PreventiveMaster]],
+    db: Session | None = None,
+) -> dict[str, Any] | None:
+    """Build flea/tick dot-plot card with gap severity coloring.
+
+    Mirrors deworming logic: shows overdue/upcoming entries even when no
+    last_done_date has been recorded so the card always reflects clinical state.
+    """
     flea_rows = [row for row in rows if _classify_preventive_item(row[1].item_name) == "flea_tick"]
     if not flea_rows:
         return None
 
-    flea_rows = sorted(flea_rows, key=lambda item: (item[0].last_done_date or date.min))
-    doses = []
+    today = date.today()
+    flea_rows = sorted(
+        flea_rows,
+        key=lambda item: (item[0].last_done_date or item[0].next_due_date or date.min),
+    )
+
+    doses: list[dict[str, Any]] = []
     previous_done_date: date | None = None
+    has_undone = False  # True when any row lacks last_done_date
+
     for idx, (record, master) in enumerate(flea_rows, start=1):
+        if not record.last_done_date:
+            # No dose recorded — mirror deworming: overdue or upcoming
+            has_undone = True
+            if record.next_due_date and record.next_due_date < today:
+                status = "overdue"
+            else:
+                status = "upcoming"
+            dose_entry: dict[str, Any] = {
+                "num": idx,
+                "label": master.item_name,
+                "gap": None,
+                "status": status,
+                "gap_alert": False,
+                "date": record.next_due_date.isoformat() if record.next_due_date else None,
+            }
+            med_info = _fetch_medicine_info(record.medicine_name, db)
+            if med_info:
+                dose_entry["medicine_info"] = med_info
+            doses.append(dose_entry)
+            continue
+
         gap_text = None
         status = "green"
-        if record.last_done_date and previous_done_date:
+        if previous_done_date:
             gap_weeks = _gap_in_weeks(previous_done_date, record.last_done_date)
             gap_text = f"{gap_weeks}w"
             if gap_weeks <= 6:
@@ -322,25 +409,59 @@ def _build_flea_tick_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster
             else:
                 status = "red"
 
-        doses.append(
-            {
-                "num": idx,
-                "label": master.item_name,
-                "gap": gap_text,
-                "status": status,
-                "gap_alert": status == "red",
-                "date": record.last_done_date.isoformat() if record.last_done_date else None,
-            }
-        )
-        if record.last_done_date:
-            previous_done_date = record.last_done_date
+        dose_entry = {
+            "num": idx,
+            "label": master.item_name,
+            "gap": gap_text,
+            "status": status,
+            "gap_alert": status == "red",
+            "date": record.last_done_date.isoformat(),
+        }
+        med_info = _fetch_medicine_info(record.medicine_name, db)
+        if med_info:
+            dose_entry["medicine_info"] = med_info
+        doses.append(dose_entry)
+        previous_done_date = record.last_done_date
 
-    red_gap_count = sum(1 for d in doses if d.get("status") == "red")
-    if red_gap_count > 0:
+    # Append an upcoming next-due node for a meaningful L→R timeline, but only
+    # when all existing entries are done (undone entries already cover this role).
+    if not has_undone:
+        latest_next_due = max(
+            (record.next_due_date for record, _ in flea_rows if record.next_due_date),
+            default=None,
+        )
+        if latest_next_due and latest_next_due >= today:
+            doses.append({
+                "num": len(doses) + 1,
+                "label": "Next due",
+                "gap": None,
+                "status": "upcoming",
+                "gap_alert": False,
+                "date": latest_next_due.isoformat(),
+            })
+
+    # Footer — mirrors deworming severity levels
+    real_doses = [d for d in doses if d["status"] not in ("upcoming", "overdue")]
+    has_overdue = any(d["status"] == "overdue" for d in doses)
+    red_gap_count = sum(1 for d in real_doses if d["status"] == "red")
+
+    if has_overdue:
+        footer_text = "⚠ No tick & flea treatment recorded. Administer immediately."
+        footer_color = "#b52020"
+        footer_bg = "#FFEDED"
+    elif not real_doses:
+        footer_text = "No doses given yet. Start protection as soon as possible."
+        footer_color = "#B45309"
+        footer_bg = "#FFF6E6"
+    elif len(real_doses) == 1:
+        footer_text = "Last dose recorded. Apply monthly for continuous coverage."
+        footer_color = "#B45309"
+        footer_bg = "#FFF6E6"
+    elif red_gap_count > 0:
         footer_text = "⚠ Critical coverage gaps — discuss with your vet. Gaps coincide with risk of vector-borne infection."
         footer_color = "#B45309"
         footer_bg = "#FFF6E6"
-    elif any(d.get("status") == "amber" for d in doses):
+    elif any(d.get("status") == "amber" for d in real_doses):
         footer_text = "⚠ Some coverage gaps detected. Aim for monthly or 6-weekly dosing."
         footer_color = "#B45309"
         footer_bg = "#FFF6E6"
@@ -356,7 +477,12 @@ def _build_flea_tick_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster
     }
 
 
-def _build_deworming_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster]], today: date) -> dict[str, Any] | None:
+def _build_deworming_cadence(
+    rows: list[tuple[PreventiveRecord, PreventiveMaster]],
+    today: date,
+    db: Session | None = None,
+    pet: Pet | None = None,
+) -> dict[str, Any] | None:
     """Build deworming timeline card."""
     deworm_rows = [row for row in rows if _classify_preventive_item(row[1].item_name) == "deworming"]
     if not deworm_rows:
@@ -375,13 +501,40 @@ def _build_deworming_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster
             state = "now"
             node_date = record.next_due_date
 
-        nodes.append(
-            {
-                "label": master.item_name,
-                "state": state,
-                "date": node_date.isoformat() if node_date else None,
-            }
-        )
+        node: dict[str, Any] = {
+            "label": master.item_name,
+            "state": state,
+            "date": node_date.isoformat() if node_date else None,
+        }
+        med_info = _fetch_medicine_info(record.medicine_name, db)
+        if med_info:
+            node["medicine_info"] = med_info
+        nodes.append(node)
+
+    # Append a single upcoming node for done records whose next_due_date is in
+    # the future — gives the chart a meaningful L→R timeline with a "next due" dot.
+    # Use life-stage-adjusted recurrence (same formula as care_plan_engine) so that
+    # the cadence date always matches what the care plan card displays.
+    from datetime import timedelta
+    from app.services.care_plan_engine import get_preventive_baseline_days
+
+    done_node_dates = {n["date"] for n in nodes if n["state"] == "done"}
+    for record, master in deworm_rows:
+        if record.last_done_date:
+            if record.custom_recurrence_days:
+                recurrence = record.custom_recurrence_days
+            elif pet is not None:
+                recurrence = get_preventive_baseline_days(pet, "deworming")
+            else:
+                recurrence = master.recurrence_days
+            computed_next = record.last_done_date + timedelta(days=recurrence)
+            if computed_next >= today and computed_next.isoformat() not in done_node_dates:
+                nodes.append({
+                    "label": master.item_name,
+                    "state": "upcoming",
+                    "date": computed_next.isoformat(),
+                })
+                break  # one upcoming node is sufficient
 
     done_count = sum(1 for n in nodes if n["state"] == "done")
     missed_count = sum(1 for n in nodes if n["state"] == "missed")
@@ -404,14 +557,14 @@ def _build_deworming_cadence(rows: list[tuple[PreventiveRecord, PreventiveMaster
         headline = f"Only {done_count} dose{'s' if done_count != 1 else ''} in {gap_label}. Significantly overdue."
     elif missed_count > 0 or has_now:
         headline = "Deworming overdue. Administer as soon as possible."
-    elif done_count == len(nodes):
+    elif done_count == len(deworm_rows):
         headline = "Deworming on track."
     else:
         headline = "Deworming cadence"
 
     if missed_count > 0 or has_now:
         footer = {"text": "🚨 Administer immediately", "color": "#b52020", "bg": "var(--tr)"}
-    elif done_count == len(nodes):
+    elif missed_count == 0 and not has_now and done_count > 0:
         footer = {"text": "✓ Deworming on track", "color": "#166534", "bg": "#E9FBEF"}
     else:
         footer = {"text": "Review deworming schedule with your vet.", "color": "#B45309", "bg": "#FFF6E6"}
@@ -747,8 +900,8 @@ async def get_health_trends(db: Session, pet: Pet) -> dict[str, Any]:
 
     today = date.today()
     vaccines = _build_vaccine_cadence(preventive_rows, today)
-    flea_tick = _build_flea_tick_cadence(preventive_rows)
-    deworming = _build_deworming_cadence(preventive_rows, today)
+    flea_tick = _build_flea_tick_cadence(preventive_rows, db=db)
+    deworming = _build_deworming_cadence(preventive_rows, today, db=db, pet=pet)
     cadence = None if not any((vaccines, flea_tick, deworming)) else {
         "vaccines": vaccines,
         "flea_tick": flea_tick,

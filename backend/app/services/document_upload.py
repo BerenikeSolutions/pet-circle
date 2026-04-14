@@ -31,6 +31,8 @@ Note on pet photos:
       are intentionally not routed through GCP.
 """
 
+import asyncio
+import hashlib
 import logging
 from datetime import datetime
 from uuid import UUID
@@ -42,6 +44,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.core.constants import (
     ALLOWED_MIME_TYPES,
+    MAX_CONCURRENT_EXTRACTIONS,
     MAX_UPLOAD_BYTES,
     MAX_UPLOAD_MB,
     MAX_UPLOADS_PER_PET_PER_DAY,
@@ -51,6 +54,36 @@ from app.models.document import Document
 from app.utils.date_utils import IST
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Shared extraction semaphore — single source of truth for all upload paths.
+#
+# Both WhatsApp batch extraction (message_router) and dashboard immediate
+# extraction (dashboard router) acquire this semaphore before opening a DB
+# session for GPT processing.  A single shared semaphore means:
+#   - Any change to MAX_CONCURRENT_EXTRACTIONS applies everywhere at once.
+#   - WhatsApp and dashboard uploads compete fairly for the same pool budget
+#     instead of each path having its own independent limit that together
+#     could still exhaust the pool.
+#   - Total concurrent DB sessions from extraction ≤ MAX_CONCURRENT_EXTRACTIONS
+#     regardless of which path triggered the upload.
+# ---------------------------------------------------------------------------
+_extraction_semaphore: asyncio.Semaphore | None = None
+
+
+def get_extraction_semaphore() -> asyncio.Semaphore:
+    """
+    Return the process-wide document extraction concurrency semaphore.
+
+    Lazily created on first call so it always belongs to the running event
+    loop.  Both WhatsApp batch extraction and dashboard uploads must acquire
+    this semaphore before starting a GPT extraction task.
+    """
+    global _extraction_semaphore
+    if _extraction_semaphore is None:
+        _extraction_semaphore = asyncio.Semaphore(MAX_CONCURRENT_EXTRACTIONS)
+    return _extraction_semaphore
+
 
 # Cached Supabase client — created once, reused across uploads.
 _supabase_client = None
@@ -254,6 +287,53 @@ async def upload_to_supabase(
         ) from e
 
 
+def compute_content_hash(file_content: bytes) -> str:
+    """
+    Compute the SHA-256 hex digest of a file's raw bytes.
+
+    Used for duplicate detection: if a document with the same hash already
+    exists for the same pet and has been successfully extracted, the new
+    upload is skipped and the existing record returned instead.
+
+    Args:
+        file_content: Raw bytes of the uploaded file.
+
+    Returns:
+        64-character lowercase hex string (SHA-256 digest).
+    """
+    return hashlib.sha256(file_content).hexdigest()
+
+
+def find_duplicate_document(
+    db: Session,
+    pet_id: UUID,
+    content_hash: str,
+) -> Document | None:
+    """
+    Return an existing successfully-extracted document with the same content hash.
+
+    Checks for documents with extraction_status IN ('success', 'partially_extracted')
+    to avoid treating a previously-failed extraction as a valid duplicate.
+
+    Args:
+        db: SQLAlchemy database session.
+        pet_id: UUID of the pet to scope the search.
+        content_hash: SHA-256 hex digest of the file bytes.
+
+    Returns:
+        Existing Document if found, None otherwise.
+    """
+    return (
+        db.query(Document)
+        .filter(
+            Document.pet_id == pet_id,
+            Document.content_hash == content_hash,
+            Document.extraction_status.in_(["success", "partially_extracted"]),
+        )
+        .first()
+    )
+
+
 def create_document_record(
     db: Session,
     pet_id: UUID,
@@ -262,6 +342,7 @@ def create_document_record(
     original_filename: str | None = None,
     source_wamid: str | None = None,
     storage_backend: str = "supabase",
+    content_hash: str | None = None,
 ) -> Document:
     """
     Insert a document record into the database.
@@ -279,6 +360,7 @@ def create_document_record(
         original_filename: Original filename from the upload (optional).
         source_wamid: WhatsApp message ID that triggered this upload (optional).
         storage_backend: Which backend holds the file — 'gcp' or 'supabase'.
+        content_hash: SHA-256 hex digest of the file bytes (optional).
 
     Returns:
         The created Document model instance.
@@ -291,6 +373,7 @@ def create_document_record(
         document_name=original_filename[:200] if original_filename else None,
         source_wamid=source_wamid,
         storage_backend=storage_backend,
+        content_hash=content_hash,
     )
 
     db.add(document)
@@ -424,6 +507,20 @@ async def process_document_upload(
     # --- Step 3: Check daily upload limit ---
     check_daily_upload_limit(db, pet_id, pet_name=pet_name)
 
+    # --- Step 3b: Duplicate detection via content hash ---
+    # If an identical file has already been successfully extracted for this
+    # pet, skip upload and extraction entirely and return the existing record.
+    hash_value = compute_content_hash(file_content)
+    existing = find_duplicate_document(db, pet_id, hash_value)
+    if existing is not None:
+        logger.info(
+            "Duplicate document skipped (content_hash=%s, pet_id=%s, existing_doc=%s)",
+            hash_value,
+            str(pet_id),
+            str(existing.id),
+        )
+        return existing
+
     # --- Step 4: Build storage path ---
     storage_path = build_storage_path(user_id, pet_id, filename)
 
@@ -431,12 +528,13 @@ async def process_document_upload(
     from app.services.storage_service import upload_file as storage_upload
     _, backend = await storage_upload(file_content, storage_path, mime_type)
 
-    # --- Step 6: Create document record ---
+    # --- Step 6: Create document record (with content hash for future deduplication) ---
     document = create_document_record(
         db, pet_id, storage_path, mime_type,
         original_filename=filename,
         source_wamid=source_wamid,
         storage_backend=backend,
+        content_hash=hash_value,
     )
 
     return document

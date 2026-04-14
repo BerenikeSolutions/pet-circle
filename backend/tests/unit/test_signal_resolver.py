@@ -30,11 +30,9 @@ from app.services.signal_resolver import (
     MAX_OPTIONS,
     SUPPLEMENT_L1_MESSAGE,
     SignalLevel,
-    SignalResult,
     resolve_food_signal,
     resolve_supplement_signal,
 )
-
 
 # ---------------------------------------------------------------------------
 # SQLite in-memory session fixture
@@ -130,8 +128,6 @@ def _make_condition(name: str, is_active: bool = True) -> Condition:
 
 def seed_food_products(db: Session) -> list[ProductFood]:
     """Insert a representative subset of food products."""
-    from datetime import datetime
-
     products = [
         # Royal Canin — Labrador Adult line, 3 sizes
         ProductFood(

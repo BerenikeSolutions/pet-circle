@@ -18,7 +18,7 @@ Constraints:
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 
@@ -111,6 +111,19 @@ class User(Base):
     # Timestamps managed by PostgreSQL DEFAULT NOW().
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # --- Checkout Preferences ---
+    # Last-used delivery address (free text). Saved automatically after every
+    # successful order so the next checkout can prefill the address field.
+    delivery_address = Column(Text, nullable=True)
+
+    # Last payment method used: 'cod' | 'upi' | 'card'.
+    # Pre-selects the correct radio button on the next checkout.
+    payment_method_pref = Column(String(10), nullable=True)
+
+    # Fernet-encrypted UPI VPA (e.g. name@okicici), fetched from Razorpay API
+    # after a successful UPI payment. Passed as prefill.vpa on the next UPI order.
+    saved_upi_id = Column(String(500), nullable=True)
 
     # --- Order Flow State ---
     # Tracks the current step in the WhatsApp order conversation.

@@ -14,7 +14,7 @@ Constraints:
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, Date, DateTime, ForeignKey, String
+from sqlalchemy import Column, Date, DateTime, Float, ForeignKey, Integer, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -68,10 +68,11 @@ class Document(Base):
     hospital_name = Column(String(200), nullable=True)
 
     # GPT extraction pipeline status:
-    # 'pending'  — uploaded, awaiting extraction
-    # 'success'  — extraction completed, structured data saved
-    # 'failed'   — extraction failed after retries, user notified
-    # 'rejected' — document is not pet-related or is for a different pet
+    # 'pending'             — uploaded, awaiting extraction
+    # 'success'             — extraction completed, structured data saved
+    # 'partially_extracted' — metadata extracted but zero preventive items found
+    # 'failed'              — extraction failed after retries
+    # 'rejected'            — document is not pet-related or is for a different pet
     extraction_status = Column(String(20), nullable=False)
 
     # Human-readable reason set when extraction_status='rejected'.
@@ -99,6 +100,19 @@ class Document(Base):
     # Timestamp when the document was uploaded.
     # Indexed for daily upload limit check queries.
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    # Number of automatic replay attempts made after extraction failure.
+    # Capped at EXTRACTION_MAX_AUTO_RETRIES (3) by the replay cron.
+    retry_count = Column(Integer, nullable=False, server_default="0")
+
+    # SHA-256 hex digest of the raw file bytes.
+    # Used to detect duplicate uploads and skip re-extraction when the
+    # same file is uploaded again for the same pet.
+    content_hash = Column(String(64), nullable=True)
+
+    # Model-rated confidence for the extraction result (0.0–1.0).
+    # Values below EXTRACTION_LOW_CONFIDENCE_THRESHOLD trigger a second-pass retry.
+    extraction_confidence = Column(Float, nullable=True)
 
     # --- Relationships ---
 

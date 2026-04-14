@@ -7,8 +7,9 @@ pet profile creation. State is tracked via user.onboarding_state.
 Conversation flow:
     1. New number → Create user (welcome) → ask pet name
     2. Pet name → state=awaiting_breed_age → ask breed + age (combined)
-    3. Breed+age → state=awaiting_gender_weight → ask gender + weight + neutered (combined)
-    4. Gender/weight/neutered → auto-send life stage note → state=awaiting_food_type
+    3. Breed+age → state=awaiting_gender_weight → ask gender + weight only
+    4. Gender/weight → AI decides neuter question → state=awaiting_neuter_spay
+    4b. Neuter/spay → state=awaiting_food_type
     5. Food type → state=awaiting_meal_details → ask meal details (contextual)
     6. Meal details → state=awaiting_supplements → ask supplements
     7. Supplements → auto-send progress note → state=awaiting_preventive
@@ -30,7 +31,7 @@ import secrets
 from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
-from openai import AsyncOpenAI
+from anthropic import AsyncAnthropic
 from sqlalchemy import case, func, or_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -45,28 +46,27 @@ from app.core.constants import (
     MAX_PENDING_DOCS_PER_PET,
     MAX_PET_WEIGHT_KG,
     MAX_PETS_PER_USER,
+    OPENAI_QUERY_MODEL,
 )
 from app.core.encryption import decrypt_field, encrypt_field, hash_field
 from app.core.log_sanitizer import mask_phone
 from app.database import get_fresh_session
+from app.models.condition import Condition
+from app.models.custom_preventive_item import CustomPreventiveItem
 from app.models.dashboard_token import DashboardToken
 from app.models.deferred_care_plan_pending import DeferredCarePlanPending
-from app.models.condition import Condition
 from app.models.document import Document
 from app.models.pet import Pet
-from app.models.custom_preventive_item import CustomPreventiveItem
 from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
 from app.models.reminder import Reminder
 from app.models.user import User
 from app.services.diet_service import HOMEMADE_KW, add_diet_item, split_diet_items_by_type
-from app.services.hygiene_service import add_hygiene_item
 from app.services.nutrition_service import get_diet_summary
 from app.services.preventive_seeder import seed_preventive_master
 from app.utils.breed_normalizer import normalize_breed, normalize_breed_with_ai
 from app.utils.date_utils import (
     get_today_ist,
-    is_ambiguous_date_input,
     parse_date,
     parse_date_with_ai,
 )
@@ -77,11 +77,11 @@ logger = logging.getLogger(__name__)
 
 _openai_onboarding_client = None
 
-def _get_openai_onboarding_client() -> AsyncOpenAI:
-    """Return a cached AsyncOpenAI client for onboarding checks."""
+def _get_openai_onboarding_client() -> AsyncAnthropic:
+    """Return a cached AsyncAnthropic client for onboarding checks."""
     global _openai_onboarding_client
     if _openai_onboarding_client is None:
-        _openai_onboarding_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        _openai_onboarding_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
     return _openai_onboarding_client
 
 def is_doc_upload_deadline_expired(deadline: datetime | None) -> bool:
@@ -148,8 +148,15 @@ def _count_tracked_preventive_items_split(db: Session, pet_id) -> tuple[int, int
             ),
         )
     )
+    # Match vaccine keywords against BOTH PreventiveMaster.item_name and
+    # CustomPreventiveItem.item_name.  Vaccines logged as custom items (e.g.
+    # when the extractor couldn't map them to a master) have master=NULL after
+    # the outer-join, so a filter on PreventiveMaster.item_name alone would
+    # undercount them to zero — which surfaces as "N preventive care items"
+    # with no vaccine split in the care-plan message.
     vaccine_filter = _or(
-        *[PreventiveMaster.item_name.ilike(f"%{kw}%") for kw in _CARE_PLAN_VACCINE_TERMS]
+        *[PreventiveMaster.item_name.ilike(f"%{kw}%") for kw in _CARE_PLAN_VACCINE_TERMS],
+        *[CustomPreventiveItem.item_name.ilike(f"%{kw}%") for kw in _CARE_PLAN_VACCINE_TERMS],
     )
     vaccine_count = base_q.filter(vaccine_filter).count()
     total = base_q.count()
@@ -484,6 +491,9 @@ async def handle_onboarding_step(
     elif state == "awaiting_gender_weight":
         await _step_gender_weight(db, user, text, send_fn)
 
+    elif state == "awaiting_neuter_spay":
+        await _step_neuter_spay(db, user, text, send_fn)
+
     elif state == "awaiting_food_type":
         await _step_food_type(db, user, text, send_fn)
 
@@ -517,10 +527,15 @@ async def handle_onboarding_step(
         profile_name = user.full_name if user.full_name != "_pending" else "there"
         await send_fn(
             db, mobile,
-            f"Hello {profile_name}! 👋 Welcome to PetCircle — your pet's personalised "
-            f"care companion, right here on WhatsApp. I'm here to make sure your pet "
-            f"never misses the care they deserve.\n\n"
-            f"Let's start — what's your pet's name?",
+            f"Hi {profile_name}, welcome to PetCircle — your pet care companion.\n\n"
+            f"We're here to make pet parenting simpler, helping you stay on top of your pet's health, nutrition, and everyday wellness.\n\n"
+            f"Here's how we support you:\n"
+            f"• Organise your pet's complete health records\n"
+            f"• Send timely reminders with one-click reordering\n"
+            f"• Deliver personalised diet and nutrition recommendations\n"
+            f"• Highlight health patterns and support better vet conversations\n\n"
+            f"Because your pet deserves the very best care.\n\n"
+            f"Let's get started — what's your pet's name?",
         )
 
 
@@ -633,6 +648,12 @@ def _is_irrelevant_noise_for_state(
         return False
 
     normalized = re.sub(r"[.!?,]+$", "", text_lower.strip().lower())
+
+    # In neuter/spay step, yes/no are the expected answers.
+    if state == "awaiting_neuter_spay" and (
+        normalized in _YES_INPUTS or normalized in _NO_INPUTS
+    ):
+        return False
 
     # In supplements step, explicit negative replies are legitimate answers
     # to "Is <pet> on any supplements right now?" and must be processed.
@@ -751,13 +772,13 @@ async def _ai_extract_pet_name_correction(text: str, current_name: str | None = 
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
-            model="gpt-4.1-mini",
+            client.messages.create,
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=80,
         )
-        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        raw = _strip_json_fences(response.content[0].text.strip())
         data = json.loads(raw)
         corrected = str(data.get("corrected_name") or "").strip()
         if not corrected:
@@ -902,11 +923,14 @@ def _get_question_for_state(state: str, pet=None, onboarding_data: dict | None =
         "welcome": "What's your pet's name?",
         "awaiting_breed_age": (
             f"What breed is {pet_name} and how old are they? "
-            f"An approximate age is fine (e.g., golden retriever, 4)"
+            f"DOB or approximate age is fine (e.g., golden retriever, Nov 2024 or 2 years)"
         ),
         "awaiting_gender_weight": (
             f"What's {pet_name}'s gender and approximate weight? "
-            f"Are they neutered or spayed? (e.g., male, 22, neutered)"
+            f"(e.g., male, 22 kg)"
+        ),
+        "awaiting_neuter_spay": (
+            f"Is {pet_name} neutered or spayed?"
         ),
         "awaiting_food_type": (
             f"What does {pet_name} usually eat — home food, packaged, or a mix?"
@@ -923,9 +947,9 @@ def _get_question_for_state(state: str, pet=None, onboarding_data: dict | None =
             f"Any more details about {pet_name}'s preventive care?"
         ),
         "awaiting_documents": (
-            f"Do you have any health records handy — a vaccination card, "
-            f"vet prescription, or lab report? Share a photo or PDF and I'll pull "
-            f"the details in automatically. No worries if not, we can always add them later."
+            "Do you have any health records handy — a vaccination card, "
+            "vet prescription, or lab report? Share a photo or PDF and I'll pull "
+            "the details in automatically. No worries if not, we can always add them later."
         ),
     }
     return prompts.get(state, "Let's continue setting up your profile.")
@@ -979,8 +1003,7 @@ async def _step_welcome(db, user, text, send_fn, message_data: dict | None = Non
 
     await send_fn(
         db, mobile,
-        f"Love that name! 🐾 What breed is {pet_name} and how old are they? "
-        f"An approximate age is fine (e.g., golden retriever, 4)",
+        f"Love that name! 🐾 " + _get_question_for_state("awaiting_breed_age", pet),
     )
 
 
@@ -1021,7 +1044,7 @@ async def _step_breed_age(db, user, text, send_fn):
             await send_fn(
                 db, mobile,
                 f"Got it. What's {pet.name}'s gender and approximate weight? "
-                f"Are they neutered or spayed? (e.g., male, 22, neutered)",
+                f"(e.g., male, 22 kg)",
             )
             return
         if detected_species and detected_species != "dog":
@@ -1044,7 +1067,7 @@ async def _step_breed_age(db, user, text, send_fn):
         await send_fn(
             db, mobile,
             f"No worries! What's {pet.name}'s gender and approximate weight? "
-            f"Are they neutered or spayed? (e.g., male, 22, neutered)",
+            f"(e.g., male, 22 kg)",
         )
         return
 
@@ -1101,6 +1124,8 @@ async def _step_breed_age(db, user, text, send_fn):
     if not explicit_dob and age_years is not None:
         pet.age_text = age_text_raw or f"{age_years} years"
         # Compute approximate DOB for scheduling.
+        # When only age is provided, use first day of current month in the birth year.
+        # This ensures consistent age calculation and avoids day-of-month edge cases.
         approx_dob = date_type(
             date_type.today().year - int(age_years),
             max(1, min(12, date_type.today().month)),
@@ -1170,15 +1195,17 @@ async def _step_breed_age(db, user, text, send_fn):
     await send_fn(
         db, mobile,
         f"Got it. What's {pet.name}'s gender and approximate weight? "
-        f"Are they neutered or spayed? (e.g., male, 22, neutered)",
+        f"(e.g., male, 22 kg)",
     )
 
 
 async def _step_gender_weight(db, user, text, send_fn):
     """
-    Step 3: Collect gender + weight + neutered (combined input, GPT-parsed).
-    Clarifies once via AI if nothing can be parsed, then accepts whatever is provided.
-    Auto-sends life stage note + food question.
+    Step 3: Collect gender + weight only (GPT-parsed).
+    Clarifies once via AI if nothing can be parsed.
+    After collecting, an AI agent decides whether/how to ask about
+    neutering or spaying based on gender, age, and breed, then transitions
+    to awaiting_neuter_spay.
     """
     mobile = user._plaintext_mobile
     pet = _get_pending_pet(db, user.id)
@@ -1189,128 +1216,22 @@ async def _step_gender_weight(db, user, text, send_fn):
         return
 
     text_lower = text.strip().lower()
-
     od = _get_onboarding_data(user)
     gw_attempts = od.get("gender_weight_attempts", 0)
-    skip_current_parse = False
 
-    if od.get("gender_neuter_confirm_pending"):
-        confirm_reply = _resolve_binary_confirmation_reply(text_lower)
-        confirm_mode = od.get("gender_neuter_confirm_mode") or "binary"
-        payload = od.get("gender_neuter_confirm_payload")
-
-        if confirm_mode == "gender_choice":
-            normalized = re.sub(r"[.!?,]+$", "", text_lower).strip().lower()
-            if normalized in {"male", "boy", "he", "him", "his"}:
-                pet.gender = "male"
-            elif normalized in {"female", "girl", "she", "her", "hers"}:
-                pet.gender = "female"
-            else:
-                db.commit()
-                await send_fn(
-                    db,
-                    mobile,
-                    f"Please reply with just *male* or *female* for {pet.name}.",
-                )
-                return
-
-            if isinstance(payload, dict):
-                try:
-                    if payload.get("weight_kg") is not None:
-                        weight_value = float(payload.get("weight_kg"))
-                        if 0 < weight_value <= MAX_PET_WEIGHT_KG:
-                            pet.weight = weight_value
-                except (TypeError, ValueError):
-                    pass
-                if payload.get("neutered") is not None:
-                    pet.neutered = bool(payload.get("neutered"))
-
-            _set_onboarding_data(user, "gender_neuter_confirm_pending", False)
-            _set_onboarding_data(user, "gender_neuter_confirm_mode", None)
-            _set_onboarding_data(user, "gender_neuter_confirm_payload", None)
-            skip_current_parse = True
-        elif confirm_reply == "yes":
-            _set_onboarding_data(user, "gender_neuter_confirm_pending", False)
-            _set_onboarding_data(user, "gender_neuter_confirm_mode", None)
-            _set_onboarding_data(user, "gender_neuter_confirm_payload", None)
-            if isinstance(payload, dict):
-                if payload.get("gender") in {"male", "female"}:
-                    pet.gender = payload["gender"]
-                if payload.get("neutered") is not None:
-                    pet.neutered = bool(payload.get("neutered"))
-                try:
-                    if payload.get("weight_kg") is not None:
-                        weight_value = float(payload.get("weight_kg"))
-                        if 0 < weight_value <= MAX_PET_WEIGHT_KG:
-                            pet.weight = weight_value
-                except (TypeError, ValueError):
-                    pass
-            skip_current_parse = True
-        elif confirm_reply == "no":
-            _set_onboarding_data(user, "gender_neuter_confirm_pending", False)
-            _set_onboarding_data(user, "gender_neuter_confirm_mode", None)
-            _set_onboarding_data(user, "gender_neuter_confirm_payload", None)
-            db.commit()
-            await send_fn(
-                db,
-                mobile,
-                f"Thanks for clarifying. Could you share {pet.name}'s gender, "
-                f"approximate weight, and neutered/spayed status again? "
-                f"(e.g., male, 22 kg, neutered)",
-            )
-            return
-        else:
-            db.commit()
-            await send_fn(
-                db,
-                mobile,
-                f"Just reply *yes* or *no* so I can confirm {pet.name}'s details.",
-            )
-            return
-
-    if text_lower not in _SKIP_INPUTS and not skip_current_parse:
-        parsed = await _parse_gender_weight_neutered(text)
+    if text_lower not in _SKIP_INPUTS:
+        parsed = await _parse_gender_weight(text)
         gender = parsed.get("gender")
         weight_kg = parsed.get("weight_kg")
-        neutered = parsed.get("neutered")
 
-        consistency_prompt = _build_gender_neuter_confirmation(
-            text=text,
-            parsed_gender=gender,
-            parsed_neutered=neutered,
-            pet_name=pet.name,
-        )
-        if consistency_prompt is not None:
-            confirm_payload = consistency_prompt.get("confirm_payload")
-            if isinstance(confirm_payload, dict):
-                confirm_payload = dict(confirm_payload)
-                if weight_kg is not None:
-                    confirm_payload["weight_kg"] = weight_kg
-            elif weight_kg is not None:
-                confirm_payload = {"weight_kg": weight_kg}
-            _set_onboarding_data(user, "gender_neuter_confirm_pending", True)
-            _set_onboarding_data(
-                user,
-                "gender_neuter_confirm_mode",
-                consistency_prompt.get("confirm_mode") or "binary",
-            )
-            _set_onboarding_data(
-                user,
-                "gender_neuter_confirm_payload",
-                confirm_payload,
-            )
-            db.commit()
-            await send_fn(db, mobile, consistency_prompt["prompt"])
-            return
-
-        # If nothing at all was parsed and this is the first attempt, clarify.
-        if gender is None and weight_kg is None and neutered is None and gw_attempts < 1:
+        # If nothing parsed on the first attempt, ask AI to clarify once.
+        if gender is None and weight_kg is None and gw_attempts < 1:
             _set_onboarding_data(user, "gender_weight_attempts", 1)
             db.commit()
             clarification = await _ai_clarify_input(
                 user_message=text,
-                step_context="the pet's gender, approximate weight, and neutered/spayed status",
-                expected_format="e.g., male, 22 kg, neutered",
+                step_context="the pet's gender and approximate weight",
+                expected_format="e.g., male, 22 kg",
                 pet_name=pet.name,
             )
             await send_fn(db, mobile, clarification)
@@ -1327,7 +1248,7 @@ async def _step_gender_weight(db, user, text, send_fn):
                 if 0 < w <= MAX_PET_WEIGHT_KG:
                     pet.weight = w
                     pet.weight_flagged = False
-                    # AI weight check — non-blocking, just flag if unusual.
+                    # AI weight check — non-blocking, flag if unusual.
                     ai_result = await _ai_check_weight(
                         species=pet.species, breed=pet.breed,
                         dob=pet.dob, weight_kg=w,
@@ -1337,38 +1258,75 @@ async def _step_gender_weight(db, user, text, send_fn):
             except (ValueError, TypeError):
                 pass
 
-        # Store neutered.
-        if neutered is not None:
-            pet.neutered = bool(neutered)
+    # AI agent decides whether to ask about neutering/spaying and crafts the
+    # gender-appropriate question (neutered for males, spayed for females).
+    _set_onboarding_data(user, "gender_weight_attempts", 0)
+    neuter_decision = await _ai_decide_neuter_question(
+        pet_name=pet.name,
+        gender=pet.gender,
+        species=pet.species,
+        breed=pet.breed,
+        age_text=pet.age_text,
+    )
 
-    # Compute and send life stage note.
-    age_years = None
-    if pet.dob:
-        today = date.today()
-        age_years = (today - pet.dob).days / 365.25
-    elif pet.age_text:
-        # Try to extract age_years from age_text.
-        nums = re.findall(r"[\d.]+", pet.age_text)
-        if nums:
-            try:
-                age_years = float(nums[0])
-            except ValueError:
-                pass
-
-    life_stage = _compute_life_stage(age_years)
-    if life_stage:
-        stage_name, one_liner = life_stage
+    if neuter_decision.get("should_ask", True):
+        _set_onboarding_data(user, "neuter_spay_attempts", 0)
+        user.onboarding_state = "awaiting_neuter_spay"
+        db.commit()
+        await send_fn(db, mobile, neuter_decision["question"])
+    else:
+        # Pet is too young or neuter status is not relevant — skip to food.
+        user.onboarding_state = "awaiting_food_type"
+        _set_onboarding_data(user, "food_type_attempts", 0)
+        db.commit()
         await send_fn(
             db, mobile,
-            f"{pet.name} is a {stage_name} — {one_liner}",
+            f"What does {pet.name} usually eat — home food, packaged, or a mix?",
         )
 
+
+async def _step_neuter_spay(db, user, text, send_fn):
+    """
+    Step 3b: Collect neutered/spayed status via a binary yes/no reply.
+    The question was already phrased correctly for the pet's gender
+    (neutered for males, spayed for females) by _ai_decide_neuter_question.
+    """
+    mobile = user._plaintext_mobile
+    pet = _get_pending_pet(db, user.id)
+    if not pet:
+        user.onboarding_state = "welcome"
+        db.commit()
+        await send_fn(db, mobile, "Something went wrong. Let's start — what's your pet's name?")
+        return
+
+    text_lower = text.strip().lower()
+    od = _get_onboarding_data(user)
+    attempts = od.get("neuter_spay_attempts", 0)
+
+    if text_lower not in _SKIP_INPUTS:
+        reply = _resolve_binary_confirmation_reply(text_lower)
+
+        if reply == "yes":
+            pet.neutered = True
+        elif reply == "no":
+            pet.neutered = False
+        else:
+            # Unclear answer — clarify once, then default to None on second miss.
+            if attempts < 1:
+                _set_onboarding_data(user, "neuter_spay_attempts", 1)
+                db.commit()
+                # Re-ask with the gender-appropriate term.
+                term = "neutered" if pet.gender == "male" else "spayed"
+                await send_fn(
+                    db, mobile,
+                    f"Just reply *yes* or *no* — is {pet.name} {term}?",
+                )
+                return
+            # Second miss — leave neutered as None and continue.
+
     # Advance to food type question.
-    # Start at -1 so a queued message that arrives before the user sees the
-    # question gets one free pass (increments to 0) instead of triggering
-    # an immediate clarification.
     user.onboarding_state = "awaiting_food_type"
-    _set_onboarding_data(user, "food_type_attempts", -1)
+    _set_onboarding_data(user, "food_type_attempts", 0)
     db.commit()
 
     await send_fn(
@@ -1411,8 +1369,8 @@ async def _step_food_type(db, user, text, send_fn):
             food_type = ai_food_type
 
     if not food_type:
-        if attempts >= 1 or attempts < 0:
-            food_type = "mix"  # Default on grace pass (queued msg) or second unrecognized.
+        if attempts >= 1:
+            food_type = "mix"  # Default on second unrecognized attempt.
         else:
             _set_onboarding_data(user, "food_type_attempts", attempts + 1)
             db.commit()
@@ -1469,6 +1427,7 @@ async def _step_meal_details(db, user, text, send_fn):
     confirm_pending = od.get("meal_confirm_pending", False)
     example_shown = od.get("meal_example_shown", "")
     text_lower = text.strip().lower()
+
 
     # --- Handle confirmation reply (user was asked "Is this what X eats?") ---
     if confirm_pending:
@@ -1583,6 +1542,59 @@ async def _step_supplements_v2(db, user, text, send_fn):
         and normalized not in _NONE_KEYWORDS
         and normalized not in _NO_INPUTS
     ):
+        # Guard: if the user sent preventive care info (flea/tick brands, deworming
+        # medicines) during the supplements step, save it as a prefill for the upcoming
+        # preventive step rather than misclassifying it as a dietary supplement.
+        _PREVENTIVE_KEYWORDS = {
+            "flea", "tick", "deworming", "deworm", "worm", "simparica", "nexgard",
+            "bravecto", "frontline", "drontal", "milbemax", "panacur", "advocate",
+            "revolution", "credelio", "seresto", "advantix", "fipronil", "ivermectin",
+            "fenbendazole", "pyrantel", "albendazole", "prazitel", "verminator",
+            "blood test", "blood tests", "vaccine", "vaccination",
+        }
+        if any(kw in text_lower for kw in _PREVENTIVE_KEYWORDS):
+            prefill = await _parse_preventive_care(text)
+            existing_prefill = _get_onboarding_data(user).get("preventive_prefill") or {}
+            # Merge: only fill keys not already set.
+            for k, v in prefill.items():
+                if k != "missing" and v and not existing_prefill.get(k):
+                    existing_prefill[k] = v
+            _set_onboarding_data(user, "preventive_prefill", existing_prefill)
+            db.commit()
+            # Re-ask supplements so the user still gets a chance to answer it.
+            await send_fn(
+                db, mobile,
+                f"Got it, noted that for {pet.name}'s care plan! "
+                + _supplements_question_for_pet(pet.name, _get_onboarding_data(user)),
+            )
+            return
+
+        # Guard against late-arriving meal messages: if the user sent food items
+        # (e.g. "boiled egg whites") across multiple messages and the second message
+        # arrived after the state already advanced to awaiting_supplements, detect this
+        # and save as additional diet items instead of misclassifying as supplements.
+        is_food_not_supplement = await _ai_is_food_not_supplement(text)
+        if is_food_not_supplement:
+            od = _get_onboarding_data(user)
+            food_type = od.get("food_type", "mix")
+            extra_items = await _parse_diet_input(text)
+            await _store_meal_items(db, pet, extra_items, food_type)
+            extra_supp_labels = await _store_meal_supplement_items(db, pet, text)
+            existing_labels = od.get("meal_supplement_labels") or []
+            _set_onboarding_data(
+                user,
+                "meal_supplement_labels",
+                existing_labels + extra_supp_labels,
+            )
+            db.commit()
+            # Re-ask supplements so the user still gets a chance to answer.
+            await send_fn(
+                db, mobile,
+                f"Got it, added that to {pet.name}'s diet. "
+                + _supplements_question_for_pet(pet.name, _get_onboarding_data(user)),
+            )
+            return
+
         items = await _parse_diet_input(text)
         for entry in items:
             label = entry[0]
@@ -1601,17 +1613,30 @@ async def _step_supplements_v2(db, user, text, send_fn):
     )
 
     # Preventive care question.
+    # Start at -1 so a queued message that arrives before the user sees the
+    # question gets one free pass (increments to 0) instead of triggering
+    # an immediate clarification.
     _PREVENTIVE_EXAMPLE = "vaccines last Dec, deworming Jan, flea 2 months ago, no blood test yet"
     user.onboarding_state = "awaiting_preventive"
     _set_onboarding_data(user, "preventive_attempts", 0)
     _set_onboarding_data(user, "preventive_confirm_pending", False)
     _set_onboarding_data(user, "preventive_example_shown", _PREVENTIVE_EXAMPLE)
+    # Flag flea/tick as excluded from expectations when the puppy is under 8 weeks —
+    # most products are not safe at that age so we should not prompt for it.
+    _age_wks = _get_age_in_weeks(pet)
+    _set_onboarding_data(
+        user, "preventive_flea_excluded",
+        bool(_age_wks is not None and _age_wks < 8),
+    )
     db.commit()
 
+    _puppy_q = _age_appropriate_preventive_question(pet)
     await send_fn(
         db, mobile,
-        f"What do you remember about {pet.name}'s vaccines, deworming, flea & tick, "
-        f"and blood tests? (e.g., {_PREVENTIVE_EXAMPLE} — rough is fine).",
+        _puppy_q if _puppy_q else (
+            f"What do you remember about {pet.name}'s vaccines, deworming, flea & tick, "
+            f"and blood tests? (e.g., {_PREVENTIVE_EXAMPLE} — rough is fine)."
+        ),
     )
 
 
@@ -1634,6 +1659,7 @@ async def _step_preventive(db, user, text, send_fn):
     od = _get_onboarding_data(user)
     confirm_pending = od.get("preventive_confirm_pending", False)
     example_shown = od.get("preventive_example_shown", "")
+    flea_excluded = od.get("preventive_flea_excluded", False)
 
     # --- Handle confirmation reply (user was asked "Is this your pet's history?") ---
     if confirm_pending:
@@ -1642,10 +1668,15 @@ async def _step_preventive(db, user, text, send_fn):
             binary_reply = _resolve_binary_confirmation_reply(text_lower)
             if binary_reply == "no":
                 db.commit()
+                _preventive_items = (
+                    "vaccines, deworming, and blood tests"
+                    if flea_excluded
+                    else "vaccines, deworming, flea & tick, and blood tests"
+                )
                 await send_fn(
                     db, mobile,
                     f"No problem! Could you share what you remember about {pet.name}'s "
-                    f"vaccines, deworming, flea & tick, and blood tests?",
+                    f"{_preventive_items}?",
                 )
                 return
 
@@ -1658,15 +1689,36 @@ async def _step_preventive(db, user, text, send_fn):
             )
             if final_preventive == "__reject__":
                 db.commit()
+                _reject_items = (
+                    "vaccines, deworming, and blood tests"
+                    if flea_excluded
+                    else "vaccines, deworming, flea & tick, and blood tests"
+                )
                 await send_fn(
                     db, mobile,
                     f"No problem! Could you share what you remember about {pet.name}'s "
-                    f"vaccines, deworming, flea & tick, and blood tests?",
+                    f"{_reject_items}?",
                 )
                 return
             # Parse the confirmed/modified preventive text.
             parsed = await _parse_preventive_care(final_preventive)
-            await _store_preventive_data(db, pet, parsed)
+            conf_ambiguous = await _store_preventive_data(db, pet, parsed)
+            # If confirmed text still had unparseable dates, treat as missing for retry.
+            conf_attempts = od.get("preventive_attempts", 0)
+            if conf_ambiguous and conf_attempts < 1:
+                _set_onboarding_data(user, "preventive_attempts", 1)
+                user.onboarding_state = "awaiting_prev_retry"
+                _set_onboarding_data(user, "preventive_missing", conf_ambiguous)
+                db.commit()
+                _CONF_AMB_NAMES = {
+                    "vaccines": "vaccines",
+                    "deworming": "deworming",
+                    "flea_tick": "flea & tick treatment",
+                    "blood_test": "blood tests",
+                }
+                amb_str = " and ".join(_CONF_AMB_NAMES.get(k, k) for k in conf_ambiguous)
+                await send_fn(db, mobile, f"Got it! What about {amb_str}?")
+                return
 
         await _transition_to_documents(db, user, pet, send_fn)
         return
@@ -1680,6 +1732,27 @@ async def _step_preventive(db, user, text, send_fn):
     ):
         await _transition_to_documents(db, user, pet, send_fn)
         return
+
+    # Guard against late-arriving diet/supplement messages from prior steps.
+    # Run before the grace pass so that food/supplement data is saved rather than discarded.
+    prior_classification = await _classify_prior_step_input(text, "awaiting_preventive")
+    if prior_classification in ("food", "supplement"):
+        _reask_preventive_items = (
+            "vaccines, deworming, and blood tests"
+            if flea_excluded
+            else "vaccines, deworming, flea & tick, and blood tests"
+        )
+        reask = (
+            f"Got it, added that to {pet.name}'s "
+            f"{'diet' if prior_classification == 'food' else 'supplements'}. "
+            f"What do you remember about {pet.name}'s {_reask_preventive_items}? (rough is fine)."
+        )
+        await _save_prior_step_dietary_input(
+            db, user, pet, text, prior_classification, send_fn, reask
+        )
+        return
+
+    attempts = od.get("preventive_attempts", 0)
 
     # Detect "same as example" intent.
     if example_shown and _is_same_as_example_intent(text_lower):
@@ -1697,18 +1770,50 @@ async def _step_preventive(db, user, text, send_fn):
     # GPT parse preventive care.
     parsed = await _parse_preventive_care(text)
 
+    # Merge any preventive care data saved as prefill from an earlier step
+    # (e.g. user mentioned flea/tick brand during the supplements step).
+    prefill = od.get("preventive_prefill") or {}
+    if prefill:
+        for k, v in prefill.items():
+            if k != "missing" and v and not parsed.get(k):
+                parsed[k] = v
+        # Recalculate missing after merge.
+        # Exclude flea_tick for puppies under 8 weeks (products not safe yet).
+        all_fields_check = (
+            {"vaccines", "deworming", "blood_test"}
+            if flea_excluded
+            else {"vaccines", "deworming", "flea_tick", "blood_test"}
+        )
+        parsed["missing"] = [
+            f for f in all_fields_check if not parsed.get(f) or parsed.get(f) == "none"
+        ]
+        _set_onboarding_data(user, "preventive_prefill", {})
+
     missing = parsed.get("missing", [])
-    attempts = od.get("preventive_attempts", 0)
 
     # If ALL fields are missing (nothing parsed at all), clarify with AI first.
-    all_fields = {"vaccines", "deworming", "flea_tick", "blood_test"}
+    all_fields = (
+        {"vaccines", "deworming", "blood_test"}
+        if flea_excluded
+        else {"vaccines", "deworming", "flea_tick", "blood_test"}
+    )
     if set(missing) == all_fields and attempts < 1:
         _set_onboarding_data(user, "preventive_attempts", 1)
         db.commit()
+        _clarify_context = (
+            "the pet's preventive care history — vaccines, deworming, and blood tests"
+            if flea_excluded
+            else "the pet's preventive care history — vaccines, deworming, flea & tick treatment, and blood tests"
+        )
+        _default_fmt = (
+            "e.g., vaccines last Dec, deworming Jan, no blood test yet"
+            if flea_excluded
+            else "e.g., vaccines last Dec, deworming Jan, flea 2 months ago, no blood test yet"
+        )
         clarification = await _ai_clarify_input(
             user_message=text,
-            step_context="the pet's preventive care history — vaccines, deworming, flea & tick treatment, and blood tests",
-            expected_format=f"e.g., {example_shown}" if example_shown else "e.g., vaccines last Dec, deworming Jan, flea 2 months ago, no blood test yet",
+            step_context=_clarify_context,
+            expected_format=f"e.g., {example_shown}" if example_shown else _default_fmt,
             pet_name=pet.name,
         )
         await send_fn(db, mobile, clarification)
@@ -1726,7 +1831,14 @@ async def _step_preventive(db, user, text, send_fn):
         _set_onboarding_data(user, "preventive_missing", missing)
         user.onboarding_state = "awaiting_vaccine_type"
         db.commit()
-        await send_fn(db, mobile, _vaccine_type_question(pet.name))
+        # Use a puppy-series question for dogs under 1 year; adults get the standard question.
+        _vax_age_wks = _get_age_in_weeks(pet)
+        _vax_q = (
+            _puppy_vaccine_question(pet.name, _vax_age_wks)
+            if _vax_age_wks is not None and _vax_age_wks < 52
+            else _vaccine_type_question(pet.name)
+        )
+        await send_fn(db, mobile, _vax_q)
         return
 
     if needs_flea_brand_q:
@@ -1740,12 +1852,17 @@ async def _step_preventive(db, user, text, send_fn):
         await send_fn(db, mobile, _flea_brand_question(pet.name))
         return
 
-    # Store whatever was parsed.
-    await _store_preventive_data(db, pet, parsed)
+    # Store whatever was parsed; collect categories that had a value but unparseable date.
+    ambiguous = await _store_preventive_data(db, pet, parsed)
+    # Treat ambiguous like missing so they get re-asked in the retry step.
+    for key in ambiguous:
+        if key not in missing:
+            missing.append(key)
 
-    # If some fields are missing and this is the first attempt, re-ask once.
+    # If some fields are missing (or ambiguous) and this is the first attempt, re-ask once.
     if missing and attempts < 1:
         _set_onboarding_data(user, "preventive_attempts", 1)
+        _set_onboarding_data(user, "preventive_missing", missing)
         user.onboarding_state = "awaiting_prev_retry"
         db.commit()
 
@@ -1809,13 +1926,13 @@ async def _extract_meal_supplement_items(text: str) -> list[tuple[str, str]]:
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
-            model="gpt-4.1-mini",
+            client.messages.create,
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=350,
         )
-        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        raw = _strip_json_fences(response.content[0].text.strip())
         data = json.loads(raw)
         items = data.get("supplements", [])
         return [
@@ -1856,13 +1973,46 @@ async def _step_prev_retry(db, user, text, send_fn):
     text_lower = text.strip().lower()
     normalized = re.sub(r"[.!?,]+$", "", text_lower)
 
+    # Read onboarding data once at the top — needed in both skip and non-skip paths.
+    od = _get_onboarding_data(user)
+
     # Even if skip / none, just proceed.
     if (
         normalized not in _SKIP_INPUTS
         and normalized not in _NONE_KEYWORDS
         and normalized not in _NO_INPUTS
     ):
-        parsed = await _parse_preventive_care(text)
+        # Guard against late-arriving diet/supplement messages from prior steps.
+        prior_classification = await _classify_prior_step_input(text, "awaiting_prev_retry")
+        if prior_classification in ("food", "supplement"):
+            missing = list(od.get("preventive_missing") or [])
+            _MISSING_NAMES = {
+                "vaccines": "vaccines",
+                "deworming": "deworming",
+                "flea_tick": "flea & tick treatment",
+                "blood_test": "blood tests",
+            }
+            missing_str = " and ".join(_MISSING_NAMES.get(m, m) for m in missing)
+            reask = (
+                f"Got it, added that to {pet.name}'s "
+                f"{'diet' if prior_classification == 'food' else 'supplements'}. "
+            ) + (f"What about {missing_str}?" if missing_str else "Any other preventive care details?")
+            await _save_prior_step_dietary_input(
+                db, user, pet, text, prior_classification, send_fn, reask
+            )
+            return
+
+        # Pass the missing categories as context so GPT can attribute an ambiguous
+        # positive reply (e.g. "done this month") to the right categories.
+        missing_context = list(od.get("preventive_missing") or [])
+        _CONTEXT_NAMES = {
+            "vaccines": "vaccines",
+            "deworming": "deworming",
+            "flea_tick": "flea & tick treatment",
+            "blood_test": "blood tests",
+        }
+        context_labels = [_CONTEXT_NAMES.get(m, m) for m in missing_context]
+        parsed = await _parse_preventive_care(text, context_categories=context_labels or None)
 
         # Apply the same generic vaccine / flea-without-brand detection as
         # in _step_preventive, but since this is the final retry step we
@@ -1890,7 +2040,27 @@ async def _step_prev_retry(db, user, text, send_fn):
             await send_fn(db, mobile, _flea_brand_question(pet.name))
             return
 
-        await _store_preventive_data(db, pet, parsed)
+        ambiguous = await _store_preventive_data(db, pet, parsed)
+
+        # If user mentioned categories but date was unparseable, ask once for a
+        # clearer date.  The `preventive_date_clarify_sent` flag prevents looping.
+        date_clarify_sent = od.get("preventive_date_clarify_sent", False)
+        if ambiguous and not date_clarify_sent:
+            _set_onboarding_data(user, "preventive_date_clarify_sent", True)
+            db.commit()
+            _AMB_NAMES = {
+                "vaccines": "vaccines",
+                "deworming": "deworming",
+                "flea_tick": "flea & tick treatment",
+                "blood_test": "blood tests",
+            }
+            amb_str = " and ".join(_AMB_NAMES.get(k, k) for k in ambiguous)
+            await send_fn(
+                db, mobile,
+                f"Got it — just need a clearer date for {amb_str}. "
+                f"Could you share it as 'Month YYYY'? E.g., 'April 2026' or 'March 2026'.",
+            )
+            return  # stay in awaiting_prev_retry; next reply re-enters this handler
 
     await _transition_to_documents(db, user, pet, send_fn)
 
@@ -1946,6 +2116,35 @@ def _vaccine_type_question(pet_name: str) -> str:
     )
 
 
+def _puppy_vaccine_question(pet_name: str, age_weeks: float) -> str:
+    """Build a vaccine question tuned for the puppy dose-series stage (< 52 weeks)."""
+    if age_weeks < 10:
+        return (
+            f"Which DHPP dose has {pet_name} received so far?\n\n"
+            f"The typical puppy vaccine schedule:\n"
+            f"• 1st dose: 6–8 weeks\n"
+            f"• 2nd booster: 10 weeks\n"
+            f"• 3rd dose + Rabies: 14–16 weeks\n\n"
+            f"Reply with:\n"
+            f"1️⃣ 1st dose given\n"
+            f"2️⃣ 1st + 2nd doses given\n"
+            f"3️⃣ All three doses + Rabies completed\n"
+            f"4️⃣ Not started yet"
+        )
+    if age_weeks < 16:
+        return (
+            f"Which vaccines has {pet_name} received?\n\n"
+            f"At this age, the 3rd DHPP dose and first Rabies are typically due.\n\n"
+            f"Reply with:\n"
+            f"1️⃣ 1st dose only\n"
+            f"2️⃣ 1st + 2nd doses\n"
+            f"3️⃣ All three DHPP doses + Rabies completed\n"
+            f"4️⃣ Not started yet"
+        )
+    # 16 weeks to < 1 year — series likely complete; use the standard question.
+    return _vaccine_type_question(pet_name)
+
+
 def _flea_brand_question(pet_name: str) -> str:
     """Build the flea/tick brand question for the given pet name."""
     return (
@@ -1971,6 +2170,40 @@ def _is_pending_vaccine_intent(raw: str | None) -> bool:
     if not n:
         return False
     return any(phrase in n for phrase in _PENDING_VACCINE_PHRASES)
+
+
+def _looks_like_vaccine_selection(text: str) -> bool:
+    """Return True if the text is a deliberate vaccine type selection (options 1-4 or keywords).
+
+    Used in _step_vaccine_type to distinguish a vaccine selection reply from
+    additional free-text health data the user sends before answering the question.
+    """
+    t = text.strip().lower()
+    t = re.sub(r"[.!?,]+$", "", t)
+
+    # Explicit numeric options.
+    never_keywords = {
+        "never", "never done", "not vaccinated", "no vaccine", "no vaccines",
+        "none", "nope", "n/a", "na", "skip", "not done", "not sure",
+    }
+    # Named vaccine-selection phrases.
+    vaccine_phrases = {
+        "mandatory", "mandatory only", "only mandatory",
+        "rabies and dhppi", "rabies + dhppi", "dhppi and rabies",
+        "mandatory + corona", "corona", "mandatory + coronavirus",
+        "mandatory + kennel cough", "kennel cough", "mandatory + kennel",
+        "all", "all four", "all 4", "all vaccines", "all four vaccines",
+    }
+    # Vaccine-name keywords present in the text.
+    vaccine_keywords = any(kw in t for kw in ("kennel", "corona", "rabies", "dhppi", "bordetella"))
+
+    return (
+        t in {"1", "2", "3", "4"}
+        or t in never_keywords
+        or _is_pending_vaccine_intent(t)
+        or t in vaccine_phrases
+        or vaccine_keywords
+    )
 
 
 def _resolve_vaccine_type_selection(text: str) -> list[str]:
@@ -2059,6 +2292,36 @@ async def _step_vaccine_type(db, user, text, send_fn):
     missing = od.get("preventive_missing", [])
     attempts = od.get("preventive_attempts", 0)
 
+    # If the user sent additional health data instead of a vaccine selection, parse and
+    # merge it, then re-ask the vaccine type question — never silently discard health info.
+    if not _looks_like_vaccine_selection(text):
+        # Guard: detect late-arriving diet/supplement before attempting preventive merge.
+        prior_classification = await _classify_prior_step_input(text, "awaiting_vaccine_type")
+        if prior_classification in ("food", "supplement"):
+            reask = (
+                f"Got it, added that to {pet.name}'s "
+                f"{'diet' if prior_classification == 'food' else 'supplements'}. "
+                + _vaccine_type_question(pet.name)
+            )
+            await _save_prior_step_dietary_input(
+                db, user, pet, text, prior_classification, send_fn, reask
+            )
+            return
+
+        additional = await _parse_preventive_care(text)
+        for key in ("deworming", "flea_tick", "blood_test"):
+            if additional.get(key) and parsed.get(key) is None:
+                parsed[key] = additional[key]
+        # Recalculate missing: remove categories now present in parsed.
+        missing = [cat for cat in missing if parsed.get(cat) is None]
+        needs_flea_brand_q = _is_flea_without_brand(parsed)
+        _set_onboarding_data(user, "pending_preventive_parsed", parsed)
+        _set_onboarding_data(user, "pending_flea_brand_needed", needs_flea_brand_q)
+        _set_onboarding_data(user, "preventive_missing", missing)
+        db.commit()
+        await send_fn(db, mobile, _vaccine_type_question(pet.name))
+        return
+
     # Resolve which vaccine names the user selected.
     vaccine_names = _resolve_vaccine_type_selection(text)
     parsed["vaccine_names_to_update"] = vaccine_names
@@ -2075,7 +2338,11 @@ async def _step_vaccine_type(db, user, text, send_fn):
         return
 
     # No flea brand needed — store and proceed.
-    await _store_preventive_data(db, pet, parsed)
+    ambiguous = await _store_preventive_data(db, pet, parsed)
+    # Treat ambiguous like missing so they get re-asked in the retry step.
+    for key in ambiguous:
+        if key not in missing:
+            missing.append(key)
 
     if missing and attempts < 1:
         _set_onboarding_data(user, "preventive_attempts", 1)
@@ -2115,6 +2382,19 @@ async def _step_flea_brand(db, user, text, send_fn):
     missing = od.get("preventive_missing", [])
     attempts = od.get("preventive_attempts", 0)
 
+    # Guard against late-arriving diet/supplement messages from prior steps.
+    prior_classification = await _classify_prior_step_input(text, "awaiting_flea_brand")
+    if prior_classification in ("food", "supplement"):
+        reask = (
+            f"Got it, added that to {pet.name}'s "
+            f"{'diet' if prior_classification == 'food' else 'supplements'}. "
+            + _flea_brand_question(pet.name)
+        )
+        await _save_prior_step_dietary_input(
+            db, user, pet, text, prior_classification, send_fn, reask
+        )
+        return
+
     # Inject brand into flea_tick entry (unless user said "not sure").
     brand = text.strip()
     skip_keywords = {"not sure", "don't know", "dont know", "no idea", "skip", "n/a", "na"}
@@ -2127,7 +2407,11 @@ async def _step_flea_brand(db, user, text, send_fn):
             # Convert plain-string date to dict form with medicine.
             parsed["flea_tick"] = {"date": flea_tick, "medicine": brand}
 
-    await _store_preventive_data(db, pet, parsed)
+    ambiguous = await _store_preventive_data(db, pet, parsed)
+    # Treat ambiguous like missing so they get re-asked in the retry step.
+    for key in ambiguous:
+        if key not in missing:
+            missing.append(key)
 
     if missing and attempts < 1:
         _set_onboarding_data(user, "preventive_attempts", 1)
@@ -2233,6 +2517,7 @@ def _upsert_pending_preventive_record(db, pet, master) -> None:
     Caller is responsible for committing.
     """
     from datetime import date as _date
+
     from app.services.preventive_calculator import compute_status
 
     reminder_before_days = master.reminder_before_days or 30
@@ -2274,15 +2559,9 @@ def _normalize_custom_vaccine_name(name: str | None) -> str:
 def _prefer_user_scoped_custom_vaccine(name: str | None) -> bool:
     """Return True when a vaccine should be stored as a user-scoped custom item."""
     normalized = (name or "").strip().lower()
-    if not normalized:
-        return True
-
     # Combo labels like 5-in-1/7-in-1 are user phrasing and should not fan out
     # into shared core masters unless explicitly mapped by product evidence.
-    if re.search(r"\b\d+\s*[- ]?in\s*[- ]?1\b", normalized):
-        return True
-
-    return False
+    return not normalized or bool(re.search(r"\b\d+\s*[- ]?in\s*[- ]?1\b", normalized))
 
 
 def _upsert_user_custom_vaccine_record(db: Session, pet: Pet, vaccine_name: str, parsed_date: date) -> None:
@@ -2519,7 +2798,7 @@ def _ensure_preventive_master_seeded_for_store() -> None:
             logger.debug("Preventive seeding session close failed: %s", str(close_err))
 
 
-async def _store_preventive_data(db, pet, parsed: dict):
+async def _store_preventive_data(db, pet, parsed: dict) -> list[str]:
     """
     Store parsed preventive care data as preventive records.
 
@@ -2532,6 +2811,11 @@ async def _store_preventive_data(db, pet, parsed: dict):
 
     Other categories (deworming, flea_tick, blood_test) each have exactly
     one master per species, so they continue to use the single-match loop.
+
+    Returns a list of category keys (e.g. ["flea_tick", "blood_test"]) where
+    the user provided a non-null value but the date could not be parsed.
+    Callers can use this to ask a targeted clarification rather than silently
+    dropping the data.
     """
     # Self-heal before lookups if preventive_master was truncated or partly missing.
     # Runs in a separate session so onboarding transaction boundaries stay intact.
@@ -2549,9 +2833,12 @@ async def _store_preventive_data(db, pet, parsed: dict):
             pet.species,
             str(pet.id),
         )
-        return
+        return []
 
     parsed = _enrich_preventive_categories_from_catalog(db, parsed)
+
+    # Tracks categories where user provided a value but date could not be parsed.
+    ambiguous: list[str] = []
 
     # --- Generic vaccine mention → update all essential annual vaccines ---
     # If user provided specific vaccine name+date entries, do NOT fan out the
@@ -2606,6 +2893,9 @@ async def _store_preventive_data(db, pet, parsed: dict):
                         "No master for selected vaccine '%s' species=%s",
                         vname, pet.species,
                     )
+        else:
+            # User mentioned vaccines but the date couldn't be parsed — flag for clarification.
+            ambiguous.append("vaccines")
 
     # --- Specific vaccines → update only the named master(s) ---
     for spec in parsed.get("vaccine_specifics") or []:
@@ -2645,6 +2935,9 @@ async def _store_preventive_data(db, pet, parsed: dict):
 
         parsed_date = await _parse_preventive_date_value(value, pet)
         if parsed_date is None:
+            # User mentioned this category but the date couldn't be parsed.
+            # Track it so callers can ask a targeted clarification.
+            ambiguous.append(key)
             continue
 
         master = (
@@ -2672,6 +2965,8 @@ async def _store_preventive_data(db, pet, parsed: dict):
             db.rollback()
         except Exception:
             pass
+
+    return ambiguous
 
 
 async def _transition_to_documents(db, user, pet, send_fn):
@@ -2720,9 +3015,9 @@ async def _transition_to_documents(db, user, pet, send_fn):
 
     await send_fn(
         db, mobile,
-        f"Do you have any health records handy — a vaccination card, vet prescription, "
-        f"or lab report? Share a photo or PDF and I'll pull the details in automatically. "
-        f"No worries if not, we can always add them later.",
+        "Do you have any health records handy — a vaccination card, vet prescription, "
+        "or lab report? Share a photo or PDF and I'll pull the details in automatically. "
+        "No worries if not, we can always add them later.",
     )
 
 
@@ -2764,13 +3059,13 @@ async def _ai_clarify_input(
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
-            model="gpt-4.1-mini",
+            client.messages.create,
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
             max_tokens=150,
         )
-        clarification = response.choices[0].message.content.strip()
+        clarification = response.content[0].text.strip()
         if clarification:
             return clarification
     except Exception as e:
@@ -2795,12 +3090,8 @@ _SAME_AS_EXAMPLE_PHRASES = frozenset({
 def _is_same_as_example_intent(text_lower: str) -> bool:
     """Return True if the user is referencing the example shown to them."""
     normalized = re.sub(r"[.!?,]+$", "", text_lower.strip())
-    if normalized in _SAME_AS_EXAMPLE_PHRASES:
-        return True
     # Partial match for "same as ..." patterns.
-    if normalized.startswith("same") and len(normalized) < 30:
-        return True
-    return False
+    return normalized in _SAME_AS_EXAMPLE_PHRASES or (normalized.startswith("same") and len(normalized) < 30)
 
 
 async def _ai_resolve_example_confirmation(
@@ -2840,13 +3131,13 @@ async def _ai_resolve_example_confirmation(
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
-            model="gpt-4.1-mini",
+            client.messages.create,
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=300,
         )
-        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        raw = _strip_json_fences(response.content[0].text.strip())
         data = json.loads(raw)
         return data.get("result", example_text)
     except Exception as e:
@@ -2880,10 +3171,12 @@ async def _store_meal_items(db, pet, items: list, food_type: str):
     """
     Store parsed diet items for a pet.
 
-    Strict mode: only items classified as kind="brand" are persisted.
-    Ingredients (chicken, rice, carrots) and generic treats are dropped —
-    per product requirement, the diet list must only contain identifiable
-    commercial brands/products.
+    Rules by food_type:
+    - "packaged": Only brand items saved (non-brand ingredients dropped).
+    - "home": All items saved as homemade type, regardless of kind.
+    - "mix": All items saved — brands as packaged, home-cooked as homemade (by keyword).
+
+    This ensures all food the user describes is persisted to the DB.
     """
     for entry in items:
         # Support both new (label, detail, kind) triples and legacy (label, detail) tuples.
@@ -2893,23 +3186,182 @@ async def _store_meal_items(db, pet, items: list, food_type: str):
             label, detail = entry
             kind = "brand"  # Legacy callers — assume brand.
 
-        if kind != "brand":
+        label_lower = label.lower()
+
+        # Determine item type: packaged or homemade
+        is_homemade_keyword = any(kw in label_lower for kw in HOMEMADE_KW)
+        item_type = food_type if food_type != "mix" else "packaged"
+        if is_homemade_keyword or food_type == "home":
+            item_type = "homemade"
+
+        # Skip non-brand items only for pure packaged food (no home component).
+        # For "home" and "mix" food types, save all items — the user explicitly
+        # described what their pet eats, including home-cooked ingredients.
+        if kind != "brand" and food_type == "packaged":
             logger.debug(
-                "Dropping non-brand diet item for pet_id=%s: label=%r kind=%r",
+                "Dropping non-brand diet item for pet_id=%s: label=%r kind=%r (packaged food only allows brands)",
                 str(pet.id), label, kind,
             )
             continue
 
-        item_type = food_type if food_type != "mix" else "packaged"
-        label_lower = label.lower()
-        if any(kw in label_lower for kw in HOMEMADE_KW):
-            item_type = "homemade"
-        elif food_type == "home":
-            item_type = "homemade"
         try:
             await add_diet_item(db, pet.id, item_type, label, detail or None)
         except Exception as e:
             logger.error("Failed to save diet item for pet %s: %s", str(pet.id), str(e))
+
+
+async def _ai_is_food_not_supplement(text: str) -> bool:
+    """
+    Use GPT to decide if the text describes regular food/meal items (not supplements).
+
+    Called in the supplements step to catch late-arriving meal messages — e.g. a user
+    who typed their diet across multiple messages where the second message arrives after
+    the state has already advanced to awaiting_supplements.
+
+    Returns True  → the text is food/meal (treat as additional diet, re-ask supplements).
+    Returns False → the text is a supplement, "none", or ambiguous (proceed normally).
+    """
+    client = _get_openai_onboarding_client()
+    prompt = (
+        "A pet parent was asked: 'Is your pet on any supplements right now? "
+        "(e.g., joint support, Omega-3, calcium — or just say None)'\n"
+        f"They replied: \"{text}\"\n\n"
+        "Determine if this reply describes regular food or meal items (eggs, chicken, "
+        "curd, kibble, rice, vegetables, etc.) rather than health supplements "
+        "(capsules, oils, powders, tablets, Omega-3, probiotics, joint support, etc.).\n\n"
+        "Answer YES if the reply is clearly food/meals with no supplement content.\n"
+        "Answer NO if it mentions supplements, says none/no/skip, or is ambiguous.\n\n"
+        'Return ONLY valid JSON: {"is_food": true|false}'
+    )
+    try:
+        response = await retry_openai_call(
+            client.messages.create,
+            model=OPENAI_QUERY_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=50,
+        )
+        raw = _strip_json_fences(response.content[0].text.strip())
+        data = json.loads(raw)
+        return bool(data.get("is_food", False))
+    except Exception as e:
+        logger.warning("AI supplement-vs-food check failed: %s", str(e))
+        return False  # Default: treat as supplement answer to avoid blocking the flow.
+
+
+async def _classify_prior_step_input(text: str, current_step: str) -> str:
+    """
+    Classify whether text belongs to a prior onboarding step rather than the current one.
+
+    Used from awaiting_preventive onwards to catch late-arriving diet or supplement
+    messages — e.g. a user who types across multiple WhatsApp messages where a later
+    message arrives after state has already advanced past the diet steps.
+
+    Returns:
+        "food"       — text is regular food/meal (belongs to awaiting_meal_details)
+        "supplement" — text is a health supplement (belongs to awaiting_supplements)
+        "on_topic"   — text appears to address the current step (default on failure)
+    """
+    _STEP_CONTEXT = {
+        "awaiting_preventive": (
+            "the pet's vaccination, deworming, flea & tick treatment, and blood test history"
+        ),
+        "awaiting_prev_retry": (
+            "any remaining vaccination, deworming, flea & tick, or blood test information"
+        ),
+        "awaiting_vaccine_type": (
+            "which type of vaccine the pet received (e.g. Rabies, DHPP, Bordetella)"
+        ),
+        "awaiting_flea_brand": (
+            "the brand/name of flea & tick treatment the pet uses (e.g. Simparica, NexGard)"
+        ),
+        "awaiting_documents": "uploading or skipping vaccine/vet documents",
+    }
+    step_context = _STEP_CONTEXT.get(current_step, "the current onboarding question")
+    client = _get_openai_onboarding_client()
+    prompt = (
+        f"During pet onboarding, the current question is about: {step_context}.\n"
+        f"The user replied: \"{text}\"\n\n"
+        "The user might have sent this message late — it could belong to an earlier "
+        "question about diet or supplements. Classify this reply:\n"
+        "- 'food': clearly describes regular food or meal items a pet eats "
+        "(kibble, chicken, rice, eggs, vegetables, curd, etc.) — NOT health supplements\n"
+        "- 'supplement': clearly describes a DIETARY supplement the pet takes "
+        "(Omega-3, joint support, probiotics, calcium, fish oil capsule, multivitamin, etc.) "
+        "— NOT regular food, and NOT preventive care medicines. "
+        "IMPORTANT: flea/tick treatments (Simparica, NexGard, Bravecto, Frontline, Credelio, "
+        "Seresto, Advantix, Revolution, Advocate, Fipronil) and deworming medicines "
+        "(Drontal, Milbemax, Panacur, Prazitel, Verminator, Ivermectin, Fenbendazole, "
+        "Pyrantel, Albendazole) are NOT dietary supplements — classify these as 'on_topic'.\n"
+        "- 'on_topic': appears to address the current question, mentions preventive care "
+        "(flea/tick treatment, deworming, vaccines, blood tests), OR is ambiguous\n\n"
+        "Only return 'food' or 'supplement' when CERTAIN it is diet-related. "
+        "Default to 'on_topic' if unsure.\n\n"
+        'Return ONLY valid JSON: {"classification": "food"|"supplement"|"on_topic"}'
+    )
+    try:
+        response = await retry_openai_call(
+            client.messages.create,
+            model=OPENAI_QUERY_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=50,
+        )
+        raw = _strip_json_fences(response.content[0].text.strip())
+        data = json.loads(raw)
+        classification = data.get("classification", "on_topic")
+        if classification not in ("food", "supplement", "on_topic"):
+            return "on_topic"
+        return classification
+    except Exception as e:
+        logger.warning("Prior-step input classification failed: %s", str(e))
+        return "on_topic"  # Default: treat as on-topic to avoid blocking the flow.
+
+
+async def _save_prior_step_dietary_input(
+    db,
+    user,
+    pet,
+    text: str,
+    classification: str,
+    send_fn,
+    reask_message: str,
+) -> None:
+    """
+    Persist a late-arriving diet or supplement message from a prior onboarding step,
+    then re-ask the current step's question so the user can still answer it.
+
+    Args:
+        classification: "food" or "supplement" (as returned by _classify_prior_step_input).
+        reask_message:  The question text to send after saving.
+    """
+    mobile = user._plaintext_mobile
+    od = _get_onboarding_data(user)
+    food_type = od.get("food_type", "mix")
+
+    if classification == "food":
+        extra_items = await _parse_diet_input(text)
+        await _store_meal_items(db, pet, extra_items, food_type)
+        # Also persist any supplement hidden inside the food message.
+        extra_supp_labels = await _store_meal_supplement_items(db, pet, text)
+        existing_labels = list(od.get("meal_supplement_labels") or [])
+        _set_onboarding_data(
+            user, "meal_supplement_labels", existing_labels + extra_supp_labels
+        )
+    else:  # supplement
+        items = await _parse_diet_input(text)
+        for entry in items:
+            label = entry[0]
+            detail = entry[1] if len(entry) > 1 else ""
+            try:
+                await add_diet_item(db, pet.id, "supplement", label, detail or None)
+            except Exception as e:
+                logger.error(
+                    "Failed to save supplement for pet %s: %s", str(pet.id), str(e)
+                )
+
+    db.commit()
+    await send_fn(db, mobile, reask_message)
 
 
 async def _ai_check_diet_relevance(text: str, pet_name: str) -> bool:
@@ -2931,13 +3383,13 @@ async def _ai_check_diet_relevance(text: str, pet_name: str) -> bool:
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
-            model="gpt-4.1-mini",
+            client.messages.create,
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=50,
         )
-        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        raw = _strip_json_fences(response.content[0].text.strip())
         data = json.loads(raw)
         return bool(data.get("is_diet", True))
     except Exception as e:
@@ -2968,13 +3420,13 @@ async def _ai_parse_food_type(text: str, pet_name: str) -> str | None:
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
-            model="gpt-4.1-mini",
+            client.messages.create,
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=100,
         )
-        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        raw = _strip_json_fences(response.content[0].text.strip())
         data = json.loads(raw)
         result = data.get("food_type")
         if result in ("home", "packaged", "mix"):
@@ -3032,13 +3484,13 @@ async def _parse_diet_input(text: str) -> list[tuple[str, str, str]]:
 
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
-            model="gpt-4.1-mini",
+            client.messages.create,
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=500,
         )
-        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        raw = _strip_json_fences(response.content[0].text.strip())
         data = json.loads(raw)
         items = data.get("items", [])
         result: list[tuple[str, str, str]] = []
@@ -3092,6 +3544,72 @@ def _age_text_from_dob(dob: date) -> str:
     return f"{years} year{'s' if years != 1 else ''} {months} month{'s' if months != 1 else ''}"
 
 
+def _get_age_in_weeks(pet) -> float | None:
+    """Return pet's age in weeks from pet.dob. Returns None if DOB is unknown."""
+    if not pet.dob:
+        return None
+    return max(0.0, (date.today() - pet.dob).days / 7)
+
+
+def _age_appropriate_preventive_question(pet) -> str | None:
+    """
+    Return an age-contextualised initial preventive question for puppies (< 52 weeks).
+
+    Returns None for adults (>= 52 weeks) or unknown age so the caller falls
+    through to the existing generic question unchanged.
+    """
+    age_weeks = _get_age_in_weeks(pet)
+    if age_weeks is None or age_weeks >= 52:
+        return None  # Adult / unknown — use existing question
+
+    name = pet.name
+    age_label = pet.age_text or "at this age"
+
+    if age_weeks < 2:
+        return (
+            f"{name} is very young, so most preventive care hasn't started yet. "
+            f"Has any deworming or vaccination been given so far? "
+            f"(Most vets begin deworming from 2 weeks.)"
+        )
+    if age_weeks < 6:
+        # 2–6 weeks: deworming only; vaccines and flea/tick not yet due
+        return (
+            f"At {age_label}, deworming is the key priority — typically every 2 weeks until "
+            f"8 weeks. Has {name}'s deworming been started?\n\n"
+            f"(Vaccination and flea & tick prevention are not yet due at this stage.)"
+        )
+    if age_weeks < 8:
+        # 6–8 weeks: first DHPP due + deworming ongoing; flea/tick not yet safe
+        return (
+            f"At {age_label}, the first DHPP vaccination is typically started, and deworming "
+            f"continues every 2 weeks.\n\n"
+            f"Has {name}'s first DHPP dose been given? Is deworming ongoing?\n\n"
+            f"_(Flea & tick prevention is not yet safe — safe options start from 8 weeks.)_"
+        )
+    if age_weeks < 10:
+        # 8–10 weeks: first DHPP if not done + monthly deworming + flea/tick now safe
+        return (
+            f"At {age_label}, {name} should have the first DHPP dose (if not already done), "
+            f"be on monthly deworming, and flea & tick prevention can now start safely.\n\n"
+            f"What do you remember? (e.g., DHPP 1st dose done, deworming ongoing, "
+            f"no flea product yet — rough is fine.)"
+        )
+    if age_weeks < 14:
+        # 10–14 weeks: 2nd DHPP booster due
+        return (
+            f"At {age_label}, the 2nd DHPP booster is typically due.\n\n"
+            f"Has it been given? Also, is {name} on monthly deworming and flea & tick prevention? "
+            f"(e.g., 2nd DHPP given, deworming last month, Bravecto started — rough is fine.)"
+        )
+    # 14 weeks – 1 year: 3rd DHPP + first Rabies due
+    return (
+        f"At {age_label}, the 3rd DHPP dose and first Rabies vaccine are typically due "
+        f"(if not already given).\n\n"
+        f"Has {name} received these? Also note deworming and flea & tick status. "
+        f"(e.g., 3rd DHPP + Rabies done, deworming monthly, Nexgard ongoing — rough is fine.)"
+    )
+
+
 async def _parse_breed_age(text: str) -> dict:
     """
     Use GPT-4.1-mini to extract breed and approximate age from combined input.
@@ -3123,13 +3641,13 @@ async def _parse_breed_age(text: str) -> dict:
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
-            model="gpt-4.1-mini",
+            client.messages.create,
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=200,
         )
-        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        raw = _strip_json_fences(response.content[0].text.strip())
         data = json.loads(raw)
         return {
             "breed": data.get("breed"),
@@ -3142,6 +3660,111 @@ async def _parse_breed_age(text: str) -> dict:
     except Exception as e:
         logger.warning("Breed/age GPT parse failed: %s", str(e))
         return {"breed": None, "species": None, "age_years": None, "age_text": None, "dob": None, "confident": False}
+
+
+async def _parse_gender_weight(text: str) -> dict:
+    """
+    Use GPT to extract gender and weight (kg) from user input.
+
+    Returns dict with keys:
+        gender ("male"|"female"|None), weight_kg (float|None)
+    """
+    client = _get_openai_onboarding_client()
+    prompt = (
+        "Extract the pet's gender and weight in kg from this message. "
+        'Return ONLY valid JSON, no markdown: '
+        '{"gender": "male"|"female"|null, "weight_kg": number|null}. '
+        "Accept colloquial inputs: 'boy'/'he'/'him'='male', 'girl'/'she'/'her'='female'. "
+        "If weight is given without units, assume kg.\n\n"
+        f"User message: {text}"
+    )
+    try:
+        response = await retry_openai_call(
+            client.messages.create,
+            model=OPENAI_QUERY_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=80,
+        )
+        raw = _strip_json_fences(response.content[0].text.strip())
+        data = json.loads(raw)
+        return {
+            "gender": data.get("gender"),
+            "weight_kg": data.get("weight_kg"),
+        }
+    except Exception as e:
+        logger.warning("Gender/weight GPT parse failed: %s", str(e))
+        return {"gender": None, "weight_kg": None}
+
+
+async def _ai_decide_neuter_question(
+    pet_name: str,
+    gender: str | None,
+    species: str | None,
+    breed: str | None,
+    age_text: str | None,
+) -> dict:
+    """
+    AI agent that decides whether to ask about neutering/spaying and crafts the
+    gender-appropriate question.
+
+    Uses the pet's gender, species, breed, and age to:
+    - Ask "Is <name> neutered?" for males.
+    - Ask "Is <name> spayed?" for females.
+    - Ask "Is <name> neutered or spayed?" when gender is unknown.
+    - Set should_ask=False only if the pet is clearly under ~3 months old
+      (too young for the procedure to be relevant yet).
+
+    Returns dict: {"should_ask": bool, "question": str}
+    """
+    client = _get_openai_onboarding_client()
+    prompt = (
+        "You are helping onboard a pet on a health tracking app. "
+        "Decide whether to ask the owner about their pet's neutering or spaying status.\n\n"
+        f"Pet name: {pet_name}\n"
+        f"Gender: {gender or 'unknown'}\n"
+        f"Species: {species or 'unknown'}\n"
+        f"Breed: {breed or 'unknown'}\n"
+        f"Age/DOB: {age_text or 'unknown'}\n\n"
+        "Rules:\n"
+        "- Use the word 'neutered' for males and 'spayed' for females.\n"
+        "- If gender is unknown, use 'neutered or spayed'.\n"
+        "- Set should_ask to false ONLY if the pet is clearly under 3 months old "
+        "(too young for the procedure to be relevant). Otherwise always true.\n"
+        "- Keep the question short and conversational.\n\n"
+        'Return ONLY valid JSON, no markdown: {"should_ask": true|false, "question": "..."}'
+    )
+    try:
+        response = await retry_openai_call(
+            client.messages.create,
+            model=OPENAI_QUERY_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=120,
+        )
+        raw = _strip_json_fences(response.content[0].text.strip())
+        data = json.loads(raw)
+        should_ask = bool(data.get("should_ask", True))
+        question = data.get("question") or ""
+        # Fallback question if AI returned empty.
+        if should_ask and not question:
+            if gender == "male":
+                question = f"Is {pet_name} neutered?"
+            elif gender == "female":
+                question = f"Is {pet_name} spayed?"
+            else:
+                question = f"Is {pet_name} neutered or spayed?"
+        return {"should_ask": should_ask, "question": question}
+    except Exception as e:
+        logger.warning("Neuter question AI decision failed: %s", str(e))
+        # Safe fallback — always ask with a generic question.
+        if gender == "male":
+            question = f"Is {pet_name} neutered?"
+        elif gender == "female":
+            question = f"Is {pet_name} spayed?"
+        else:
+            question = f"Is {pet_name} neutered or spayed?"
+        return {"should_ask": True, "question": question}
 
 
 async def _parse_gender_weight_neutered(text: str) -> dict:
@@ -3163,13 +3786,13 @@ async def _parse_gender_weight_neutered(text: str) -> dict:
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
-            model="gpt-4.1-mini",
+            client.messages.create,
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=100,
         )
-        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        raw = _strip_json_fences(response.content[0].text.strip())
         data = json.loads(raw)
         return {
             "gender": data.get("gender"),
@@ -3181,9 +3804,20 @@ async def _parse_gender_weight_neutered(text: str) -> dict:
         return {"gender": None, "weight_kg": None, "neutered": None}
 
 
-async def _parse_preventive_care(text: str) -> dict:
+async def _parse_preventive_care(
+    text: str,
+    context_categories: list[str] | None = None,
+) -> dict:
     """
     Use GPT-4.1-mini to extract preventive care dates and medicine names from combined input.
+
+    Args:
+        text: The user's free-text message.
+        context_categories: Optional list of human-readable category names the user
+            is specifically responding about (e.g. ["flea & tick treatment", "blood tests"]).
+            When provided, a hint is injected into the GPT prompt so that an ambiguous
+            positive reply like "done this month" gets attributed to the right categories
+            rather than returning null.
 
     Returns dict with keys:
         vaccines (str|None)         — generic "vaccines done" date
@@ -3225,7 +3859,10 @@ async def _parse_preventive_care(text: str) -> dict:
         "- Return deworming and flea_tick as objects with 'date', 'medicine', and "
         "'prevention_targets' keys.\n"
         "- prevention_targets must be an array containing one or both of: 'deworming', "
-        "'flea_tick', based on what the medicine covers.\n"
+        "'flea_tick'. Always include ALL categories listed for that medicine in the "
+        "MEDICINE COVERAGE GUIDE below, regardless of how the user described it. "
+        "For example, if the guide says a medicine covers both flea_tick and deworming, "
+        "include both even if the user only mentioned one.\n"
         f"{medicine_guide}\n"
         "- If no medicine is provided, use an empty prevention_targets array.\n\n"
         'Return ONLY valid JSON, no markdown: '
@@ -3239,17 +3876,25 @@ async def _parse_preventive_care(text: str) -> dict:
         'set it to "none" (not null). '
         "Null means not mentioned at all. "
         "'missing' should list category names that were not mentioned.\n\n"
-        f"User message: {text}"
+        + (
+            f"NOTE: The user is specifically responding about: "
+            f"{', '.join(context_categories)}. "
+            f"If their response is ambiguous (e.g. 'done', 'done this month', 'yes, both'), "
+            f"attribute it to these categories and convert any relative timeframe to 'Month YYYY'.\n\n"
+            if context_categories
+            else ""
+        )
+        + f"User message: {text}"
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
-            model="gpt-4.1-mini",
+            client.messages.create,
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=500,
         )
-        raw = _strip_json_fences(response.choices[0].message.content.strip())
+        raw = _strip_json_fences(response.content[0].text.strip())
         data = json.loads(raw)
         # Defensive parse: vaccine_specifics must be a list of dicts with name+date.
         raw_specifics = data.get("vaccine_specifics") or []
@@ -3318,10 +3963,7 @@ def _contains_all_preventive_categories_intent(text: str) -> bool:
         r"\bnot\s+(vaccines?|deworm(ing)?|worms?|flea|tick|"
         r"flea\s*(and|&)\s*tick|blood\s*tests?)\b"
     )
-    if re.search(negated_category_pattern, lowered):
-        return False
-
-    return True
+    return not re.search(negated_category_pattern, lowered)
 
 
 def _infer_preventive_timeframe_from_text(text: str) -> str | None:
@@ -3474,9 +4116,7 @@ def _normalize_preventive_medicine_categories(parsed: dict) -> dict:
             return False
         target_date = _as_text(target.get("date"))
         source_date_text = _as_text(source_date)
-        if source_date_text and not target_date:
-            return False
-        return True
+        return not (source_date_text and not target_date)
 
     normalized = dict(parsed or {})
 
@@ -3507,7 +4147,7 @@ def _normalize_preventive_medicine_categories(parsed: dict) -> dict:
                 elif token in {"deworm", "deworming", "worm", "worms"}:
                     explicit_categories.add("deworming")
 
-        categories = explicit_categories or _get_preventive_categories_for_medicine(medicine)
+        categories = explicit_categories | _get_preventive_categories_for_medicine(medicine)
         if not categories:
             continue
 
@@ -3530,9 +4170,8 @@ def _normalize_preventive_medicine_categories(parsed: dict) -> dict:
                     deworming["date"] = source_date
                 if not _as_text(deworming.get("medicine")):
                     deworming["medicine"] = source_medicine
-                if before_date != deworming.get("date") or before_medicine != deworming.get("medicine"):
-                    source_rehomed = True
-                elif _absorbed_by_target(deworming, source_date, source_medicine):
+                if (before_date != deworming.get("date") or before_medicine != deworming.get("medicine")
+                    or _absorbed_by_target(deworming, source_date, source_medicine)):
                     source_rehomed = True
 
         if "flea_tick" in categories:
@@ -3550,9 +4189,8 @@ def _normalize_preventive_medicine_categories(parsed: dict) -> dict:
                     flea_tick["date"] = source_date
                 if not _as_text(flea_tick.get("medicine")):
                     flea_tick["medicine"] = source_medicine
-                if before_date != flea_tick.get("date") or before_medicine != flea_tick.get("medicine"):
-                    source_rehomed = True
-                elif _absorbed_by_target(flea_tick, source_date, source_medicine):
+                if (before_date != flea_tick.get("date") or before_medicine != flea_tick.get("medicine")
+                    or _absorbed_by_target(flea_tick, source_date, source_medicine)):
                     source_rehomed = True
 
         # Clear source bucket only when it was actually rehomed into compatible bucket(s).
@@ -3576,25 +4214,6 @@ def _normalize_preventive_medicine_categories(parsed: dict) -> dict:
     return normalized
 
 
-def _compute_life_stage(age_years: float | None) -> tuple[str, str] | None:
-    """
-    Compute life stage and warm one-liner from age in years.
-
-    Returns (stage_name, one_liner) or None if age is unknown.
-    """
-    if age_years is None:
-        return None
-
-    if age_years < 1:
-        return ("Puppy", "still finding their feet and learning fast!")
-    elif age_years < 2:
-        return ("Junior", "growing into themselves — curious, energetic, and full of surprises!")
-    elif age_years < 7:
-        return ("Adult", "right in their prime and full of energy!")
-    else:
-        return ("Senior", "been around long enough to know exactly how to wrap you around their paw. 🐾")
-
-
 def _infer_species_from_breed(breed_key: str) -> str | None:
     """
     Infer species from a breed name using the breed_normalizer dictionaries.
@@ -3605,8 +4224,9 @@ def _infer_species_from_breed(breed_key: str) -> str | None:
     Returns:
         "dog", "cat", or None if breed is not in either dictionary.
     """
-    from app.utils.breed_normalizer import _DOG_BREEDS, _CAT_BREEDS
     import re as _re
+
+    from app.utils.breed_normalizer import _CAT_BREEDS, _DOG_BREEDS
     key = _re.sub(r"[^a-z\s]", "", breed_key.lower().strip()).strip()
     if key in _DOG_BREEDS:
         return "dog"
@@ -3637,13 +4257,13 @@ async def _parse_grooming_input(text: str) -> list[tuple[str, int, str]]:
 
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
-            model="gpt-4.1-mini",
+            client.messages.create,
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             max_tokens=500,
         )
-        raw = response.choices[0].message.content.strip()
+        raw = response.content[0].text.strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
             if raw.endswith("```"):
@@ -3679,22 +4299,27 @@ async def _generate_doc_upload_reply(
         f"- Files already uploaded: {docs_uploaded}\n"
         f"- Files they can still upload: {remaining}\n"
         f"- Accepted formats: JPEG, PNG, PDF\n\n"
-        f"The user said: \"{user_message}\"\n\n"
-        "Reply in 1-2 short, warm sentences. Address what they said naturally. "
-        f"If they're asking whether they can add more, tell them they can send {remaining} more. "
-        "If remaining is 0, let them know they've hit the upload limit. "
+        f"The user sent a TEXT message (not a file): \"{user_message}\"\n\n"
+        "CRITICAL RULES:\n"
+        "- The user has NOT uploaded or shared anything — this is a text message only.\n"
+        "- NEVER say 'Thanks for sharing', 'Got it', 'Great', 'Awesome', or any phrase that implies they already shared a file.\n"
+        "- Do NOT treat words like 'sharing', 'sending', 'uploading' in their text as if they already did it.\n"
+        "- If they seem to be indicating they will upload soon (e.g. 'sharing', 'sending now'), simply encourage them to go ahead and send the file.\n"
+        f"- If they're asking whether they can add more, tell them they can send {remaining} more.\n"
+        "- If remaining is 0, let them know they've hit the upload limit.\n\n"
+        "Reply in 1-2 short, warm sentences that match the actual context. "
         "Do NOT mention 'skip', 'skipping', or any way to exit/continue the upload step. "
         "Do NOT use markdown headings. Use *bold* sparingly for key info only."
     )
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
-            model="gpt-4.1-mini",
+            client.messages.create,
+            model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.7,
             max_tokens=150,
         )
-        return response.choices[0].message.content.strip()
+        return response.content[0].text.strip()
     except Exception as e:
         logger.warning("Doc upload reply GPT failed, using fallback: %s", str(e))
         if remaining > 0:
@@ -3781,11 +4406,27 @@ async def _step_awaiting_documents(db, user, text_lower, send_fn):
         )
         return
 
+    # Guard against late-arriving diet/supplement messages from prior onboarding steps.
+    # Fetch pet early here; the variable is re-used below for upload-count logic.
+    pet = db.query(Pet).filter(Pet.user_id == user.id).order_by(Pet.created_at.desc()).first()
+    pet_name = pet.name if pet else "your pet"
+    if pet:
+        prior_classification = await _classify_prior_step_input(text_lower, "awaiting_documents")
+        if prior_classification in ("food", "supplement"):
+            reask = (
+                f"Got it, added that to {pet_name}'s "
+                f"{'diet' if prior_classification == 'food' else 'supplements'}. "
+                f"You can now send any vaccination, deworming, or vet documents — "
+                f"or reply *skip* to continue."
+            )
+            await _save_prior_step_dietary_input(
+                db, user, pet, text_lower, prior_classification, send_fn, reask
+            )
+            return
+
     # Count uploads using BOTH the DB and the in-memory batch tracker.
     # The in-memory count avoids a race where a text message arrives before
     # the async upload pipeline has committed the Document rows.
-    pet = db.query(Pet).filter(Pet.user_id == user.id).order_by(Pet.created_at.desc()).first()
-    pet_name = pet.name if pet else "your pet"
     db_count = 0
     in_memory_count = 0
     if pet:
@@ -4067,13 +4708,12 @@ async def _ai_supplement_recommendation(
     conditions: list | None,
 ) -> str | None:
     """
-    Generate a personalised supplement recommendation via gpt-4.1-mini.
+    Generate a personalised supplement recommendation via GPT.
 
     Returns a single conversational sentence (no bullet points, no headers)
     or None on failure so the caller can use a deterministic fallback.
     """
     try:
-        from app.core.constants import OPENAI_QUERY_MODEL
         client = _get_openai_onboarding_client()
 
         # Build compact context from available data.
@@ -4103,6 +4743,9 @@ async def _ai_supplement_recommendation(
             )
 
         prompt = (
+            f"STRICT RULE: Never mention any supplement brand or product name "
+            f"(e.g. do NOT say 'Nordic Naturals', 'Zesty Paws', 'Nutramax', or any brand). "
+            f"Only use the micronutrient name (e.g. Omega-3, Vitamin D3, probiotics).\n\n"
             f"Pet profile:\n"
             f"Name: {name}\n"
             f"Species: {species}\n"
@@ -4114,21 +4757,22 @@ async def _ai_supplement_recommendation(
             f"Current supplements: {supplements_summary}\n"
             f"Health conditions: {condition_names}\n\n"
             f"{already_taking_clause}"
-            f"Write ONE short, warm WhatsApp message sentence (max 25 words) "
-            f"recommending 1-2 specific supplements for this pet based on their "
-            f"profile. Be specific to their breed, age, and diet. "
+            f"Write ONE short, warm WhatsApp message sentence (max 30 words) "
+            f"identifying 1-2 micronutrients that are likely missing from this pet's diet "
+            f"based on their breed, age, and health conditions, and briefly explain why those "
+            f"micronutrients matter for this specific pet. "
             f"No bullet points. No headers. No asterisks. No markdown. "
             f"Start with 'We'd suggest' or 'Based on [name]'s profile, we'd recommend'."
         )
 
         async def _call() -> str:
-            response = await client.chat.completions.create(
+            response = await client.messages.create(
                 model=OPENAI_QUERY_MODEL,
                 temperature=0.4,
                 max_tokens=80,
                 messages=[{"role": "user", "content": prompt}],
             )
-            return (response.choices[0].message.content or "").strip()
+            return (response.content[0].text or "").strip()
 
         result = await retry_openai_call(_call)
         return result or None
@@ -4163,8 +4807,9 @@ async def _generate_care_plan_message(
     """
     # Build flags for deterministic variation selection.
     split_items = split_diet_items_by_type(diet_items or [])
-    # Care plan only references packaged/commercial pet food products — not homemade meals.
-    has_food = bool(split_items["packaged"])
+    # "What's Found" (WhatsApp) references ALL food items — both packaged and homemade.
+    # Note: care plan dashboard only shows packaged items (handled by care_plan_engine).
+    has_food = bool(split_items["foods"])  # includes both packaged and homemade
     has_preventive = record_count > 0
     has_breed = bool(pet.breed)
     has_age = bool(pet.age_text or pet.dob)
@@ -4172,7 +4817,7 @@ async def _generate_care_plan_message(
     # Build "x vaccines and y preventive care items" label for care plan message.
     if vaccine_count > 0 and other_preventive_count > 0:
         _preventive_label = (
-            f"{vaccine_count} vaccine{'s' if vaccine_count != 1 else ''} and "
+            f"{vaccine_count} vaccine{'s' if vaccine_count != 1 else ''} & "
             f"{other_preventive_count} preventive care item"
             f"{'s' if other_preventive_count != 1 else ''}"
         )
@@ -4227,19 +4872,22 @@ async def _generate_care_plan_message(
                 for existing in existing_supp_labels
             )
 
-        top_names = [
-            str(m.get("name", "")).strip()
-            for m in missing_micros
+        top_micros = [
+            m for m in missing_micros
             if m.get("name") and not _already_covered_by_existing_supplements(str(m.get("name", "")).strip())
         ][:2]
+        top_names = [str(m.get("name", "")).strip() for m in top_micros]
         if top_names:
+            age_basis = f"{name}'s age & conditions" if has_conditions else f"{name}'s age"
             if len(top_names) == 1:
                 supplement_rec = (
-                    f"We'd suggest adding {top_names[0]} supplement based on {name}'s current diet analysis."
+                    f"{name}'s current diet is wholesome. Based on {age_basis}, "
+                    f"{top_names[0]} may be missing."
                 )
             else:
                 supplement_rec = (
-                    f"We'd suggest adding {top_names[0]} and {top_names[1]} supplements based on {name}'s current diet analysis."
+                    f"{name}'s current diet is wholesome. Based on {age_basis}, "
+                    f"{top_names[0]} and {top_names[1]} may be missing."
                 )
         elif missing_micros and existing_supp_labels:
             supplement_rec = (
@@ -4279,8 +4927,8 @@ async def _generate_care_plan_message(
             fallback_supp = missing_candidates[0]
             if has_food:
                 supplement_rec = (
-                    f"We'd suggest adding {fallback_supp} based on {name}'s "
-                    f"diet and life stage."
+                    f"{name}'s current diet is wholesome, based on {name}'s "
+                    f"age & conditions we recommend adding {fallback_supp}"
                 )
             else:
                 supplement_rec = (
@@ -4288,11 +4936,11 @@ async def _generate_care_plan_message(
                     f"age and breed for coat health, joint support, and overall immunity."
                 )
         else:
-            fallback_supp = f"{missing_candidates[0]} and {missing_candidates[1]}"
+            fallback_supp = f"{missing_candidates[0]} & {missing_candidates[1]}"
             if has_food:
                 supplement_rec = (
-                    f"We'd suggest adding {fallback_supp} based on {name}'s "
-                    f"diet and life stage."
+                    f"{name}'s current diet is wholesome, based on {name}'s "
+                    f"age & conditions we recommend adding {fallback_supp}"
                 )
             else:
                 supplement_rec = (
@@ -4371,7 +5019,7 @@ async def _ai_check_weight(
         age_months = max(0, (today.year - dob.year) * 12 + (today.month - dob.month))
         age_years = round(age_months / 12, 2)
 
-    if not getattr(settings, "OPENAI_API_KEY", None):
+    if not getattr(settings, "ANTHROPIC_API_KEY", None):
         return None
 
     try:
@@ -4390,42 +5038,19 @@ async def _ai_check_weight(
             "If uncertain, prefer conservative veterinary ranges and explain briefly."
         )
 
-        responses_api = getattr(client, "responses", None)
-        if responses_api and hasattr(responses_api, "create"):
-            async def _make_call():
-                return await responses_api.create(
-                    model="gpt-4.1-mini",
-                    input=prompt,
-                    temperature=0,
-                    max_output_tokens=140,
-                )
-
-            response = await retry_openai_call(_make_call)
-            raw = (getattr(response, "output_text", "") or "").strip()
-        else:
-            async def _make_call_chat():
-                return await client.chat.completions.create(
-                    model="gpt-4.1-mini",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You validate pet weights and return strict JSON only."
-                            ),
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=0,
-                    max_tokens=140,
-                )
-
-            response = await retry_openai_call(_make_call_chat)
-            raw = (
-                response.choices[0].message.content
-                if response and getattr(response, "choices", None)
-                else ""
+        async def _make_call_chat():
+            return await client.messages.create(
+                model=OPENAI_QUERY_MODEL,
+                system="You validate pet weights and return strict JSON only.",
+                messages=[
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0,
+                max_tokens=140,
             )
-            raw = (raw or "").strip()
+
+        response = await retry_openai_call(_make_call_chat)
+        raw = response.content[0].text.strip()
 
         data = json.loads(raw)
 
@@ -4452,7 +5077,7 @@ async def _ai_identify_pet_from_photo(file_bytes: bytes, mime_type: str) -> dict
             - species: "dog", "cat", or None
             - breed: normalized breed string or None
     """
-    if not getattr(settings, "OPENAI_API_KEY", None):
+    if not getattr(settings, "ANTHROPIC_API_KEY", None):
         return {"species": None, "breed": None}
 
     if mime_type not in {"image/jpeg", "image/png"}:
@@ -4460,6 +5085,15 @@ async def _ai_identify_pet_from_photo(file_bytes: bytes, mime_type: str) -> dict
 
     client = _get_openai_onboarding_client()
     data_uri = encode_image_base64(file_bytes, mime_type)
+
+    # Strip data URI prefix to get raw base64 and media type for Anthropic vision API.
+    b64_data = data_uri
+    img_media_type = mime_type
+    if data_uri.startswith("data:"):
+        header, _, b64_data = data_uri.partition(",")
+        mime_part = header.split(";")[0].replace("data:", "")
+        if mime_part:
+            img_media_type = mime_part
 
     prompt = (
         "Identify the main pet in this photo. "
@@ -4469,26 +5103,29 @@ async def _ai_identify_pet_from_photo(file_bytes: bytes, mime_type: str) -> dict
     )
 
     async def _make_call() -> str:
-        response = await client.chat.completions.create(
-            model="gpt-4.1-mini",
+        response = await client.messages.create(
+            model=OPENAI_QUERY_MODEL,
             temperature=0,
             max_tokens=80,
-            response_format={"type": "json_object"},
+            system="You classify pet photos and return strict JSON only.",
             messages=[
-                {
-                    "role": "system",
-                    "content": "You classify pet photos and return strict JSON only.",
-                },
                 {
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": data_uri, "detail": "high"}},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": img_media_type,
+                                "data": b64_data,
+                            },
+                        },
                     ],
                 },
             ],
         )
-        return response.choices[0].message.content
+        return response.content[0].text
 
     raw = await retry_openai_call(_make_call)
     try:
@@ -4737,9 +5374,24 @@ def seed_preventive_records_for_pet(db: Session, pet: Pet) -> int:
         if row[0] is not None
     }
 
+    # Compute pet age for age-gated seeding decisions.
+    _seed_age_weeks = (
+        (date.today() - pet.dob).days / 7 if pet.dob else None
+    )
+
     count = 0
     for master in masters:
         if master.id in existing_master_ids:
+            continue
+        # Tick/Flea products are not safe for dogs younger than 8 weeks.
+        # Skip seeding the record so the care plan does not surface it.
+        # It will be seeded on the next seed run once the pet reaches 8 weeks.
+        if (
+            master.item_name == "Tick/Flea"
+            and pet.species == "dog"
+            and _seed_age_weeks is not None
+            and _seed_age_weeks < 8
+        ):
             continue
         try:
             # Use a savepoint so individual failures only roll back this insert,

@@ -116,7 +116,7 @@ async def parse_date_with_ai(raw_date: str) -> date:
     Use OpenAI to parse an ambiguous date string into a Python date.
 
     Called as a fallback when standard format parsing fails.
-    Uses gpt-4.1-mini for cost efficiency.
+    Uses GPT (gpt-4.1) via OPENAI_QUERY_MODEL.
 
     Args:
         raw_date: The raw date string that couldn't be parsed.
@@ -127,38 +127,35 @@ async def parse_date_with_ai(raw_date: str) -> date:
     Raises:
         ValueError: If AI also cannot parse the date.
     """
-    from openai import AsyncOpenAI
+    from anthropic import AsyncAnthropic
 
     from app.config import settings
     from app.core.constants import OPENAI_QUERY_MODEL
 
-    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
 
     today_str = date.today().isoformat()
     try:
-        response = await client.chat.completions.create(
+        response = await client.messages.create(
             model=OPENAI_QUERY_MODEL,
             temperature=0.0,
             max_tokens=20,
+            system=(
+                f"You are a date parser. Today's date is {today_str}. "
+                "Extract the date from the user's input "
+                "and return ONLY the date in YYYY-MM-DD format. "
+                "If only month and year are given, use 01 as the day. "
+                "If only a year is given, use 01-01 as month and day. "
+                "For relative dates like 'last Dec', '2 months ago', 'last year', "
+                "resolve them to absolute dates using today's date as reference. "
+                "If you cannot determine a valid date, respond with ERROR."
+            ),
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        f"You are a date parser. Today's date is {today_str}. "
-                        "Extract the date from the user's input "
-                        "and return ONLY the date in YYYY-MM-DD format. "
-                        "If only month and year are given, use 01 as the day. "
-                        "If only a year is given, use 01-01 as month and day. "
-                        "For relative dates like 'last Dec', '2 months ago', 'last year', "
-                        "resolve them to absolute dates using today's date as reference. "
-                        "If you cannot determine a valid date, respond with ERROR."
-                    ),
-                },
                 {"role": "user", "content": raw_date},
             ],
         )
 
-        result = response.choices[0].message.content.strip()
+        result = response.content[0].text.strip()
         if result == "ERROR":
             raise ValueError(f"AI could not parse date: '{raw_date}'")
 
@@ -189,7 +186,7 @@ def format_date_for_db(d: date) -> str:
 
 def format_date_for_user(value) -> str:
     """
-    Format dates for user-facing output as DD-MM-YYYY.
+    Format dates for user-facing output as DD/MM/YY.
 
     Accepts date, datetime, or common date-string forms.
     Returns "N/A" for missing values.
@@ -198,10 +195,10 @@ def format_date_for_user(value) -> str:
         return "N/A"
 
     if isinstance(value, datetime):
-        return value.date().strftime("%d-%m-%Y")
+        return value.date().strftime("%d/%m/%y")
 
     if isinstance(value, date):
-        return value.strftime("%d-%m-%Y")
+        return value.strftime("%d/%m/%y")
 
     text = str(value).strip()
     if not text:
@@ -210,11 +207,11 @@ def format_date_for_user(value) -> str:
     # ISO date or datetime string: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS
     match = re.match(r"^(\d{4})-(\d{2})-(\d{2})", text)
     if match:
-        y, m, d = match.groups()
-        return f"{d}-{m}-{y}"
+        y, m, d_val = match.groups()
+        return f"{d_val}/{m}/{y[2:]}"
 
-    # Already user format.
-    if re.match(r"^\d{2}-\d{2}-\d{4}$", text):
+    # Already user format (legacy DD-MM-YYYY or DD/MM/YY).
+    if re.match(r"^\d{2}[/-]\d{2}[/-]\d{2,4}$", text):
         return text
 
     return text

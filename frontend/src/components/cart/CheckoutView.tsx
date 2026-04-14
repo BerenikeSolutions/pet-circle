@@ -16,6 +16,9 @@ interface CheckoutViewProps {
   total: number;
   initialName: string;
   initialPhone?: string;
+  initialPincode?: string;
+  initialAddress?: string;
+  initialPaymentMethod?: PaymentMethod;
   onBack: () => void;
   onPlaceOrder: (details: CheckoutDetails) => Promise<void>;
 }
@@ -24,20 +27,27 @@ export default function CheckoutView({
   total,
   initialName,
   initialPhone,
+  initialPincode,
+  initialAddress,
+  initialPaymentMethod,
   onBack,
   onPlaceOrder,
 }: CheckoutViewProps) {
   const [name, setName] = useState(initialName || "");
   const [phone, setPhone] = useState(initialPhone || "");
-  const [address, setAddress] = useState("");
-  const [pincode, setPincode] = useState("");
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("cod");
+  const [address, setAddress] = useState(initialAddress || "");
+  const [pincode, setPincode] = useState(initialPincode || "");
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>(initialPaymentMethod || "cod");
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState("");
 
-  const canPlaceOrder = useMemo(() => {
-    return Boolean(name.trim() && address.trim()) && phone.trim().length === 10 && pincode.trim().length === 6;
-  }, [name, phone, address, pincode]);
+  const canPlaceOrder = useMemo(
+    () =>
+      Boolean(name.trim() && address.trim()) &&
+      phone.trim().length === 10 &&
+      pincode.trim().length === 6,
+    [name, phone, address, pincode]
+  );
 
   const submit = async () => {
     if (!canPlaceOrder || submitting) return;
@@ -63,7 +73,7 @@ export default function CheckoutView({
       <div className="app">
         <div className="vh">
           <button className="back-btn" onClick={onBack} type="button" aria-label="Back to cart">
-            Back
+            &#8592;
           </button>
           <div className="vh-title">Checkout</div>
         </div>
@@ -144,9 +154,17 @@ export default function CheckoutView({
                 checked={paymentMethod === "card"}
                 onChange={() => setPaymentMethod("card")}
               />
-              Card
+              Debit / Credit Card
             </label>
           </div>
+
+          {(paymentMethod === "upi" || paymentMethod === "card") && (
+            <p style={{ marginTop: 12, fontSize: 12, color: "var(--t3)" }}>
+              {paymentMethod === "upi"
+                ? "You will enter your UPI ID in the payment screen."
+                : "You will enter your card details in the payment screen."}
+            </p>
+          )}
         </div>
 
         <div className="card" style={{ marginBottom: 80 }}>

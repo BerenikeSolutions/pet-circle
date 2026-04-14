@@ -17,6 +17,19 @@ import HealthTrendsView from "./trends/HealthTrendsView";
 
 type ViewState = "dashboard" | "trends" | "reminders" | "cart" | "checkout" | "confirm" | "records" | "nudges";
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+function loadRazorpayScript(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if ((window as any).Razorpay) { resolve(); return; }
+    const script = document.createElement("script");
+    script.src = "https://checkout.razorpay.com/v1/checkout.js";
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("Failed to load payment gateway."));
+    document.body.appendChild(script);
+  });
+}
+
 const MAX_STALE_RETRIES = 10;
 const STALE_RETRY_BASE_MS = 10000;
 const STALE_RETRY_FACTOR = 1.5;
@@ -141,18 +154,73 @@ function DashboardInner({ token }: { token: string }) {
     mrp: number,
     icon: string,
     section: string,
+    quantity = 1,
+    medicine_type?: string,
   ) => {
     setCart((prev) => {
       const existing = prev.find((entry) => entry.id === skuId);
       if (existing) {
         return prev.map((entry) =>
-          entry.id === skuId ? { ...entry, quantity: entry.quantity + 1 } : entry
+          entry.id === skuId ? { ...entry, quantity: entry.quantity + quantity } : entry
         );
       }
-      return [
-        ...prev,
-        { id: skuId, name, quantity: 1, price, mrp: mrp > price ? mrp : undefined, icon, section },
-      ];
+      // Add the new item first
+      const newItem = { id: skuId, name, quantity, price, mrp: mrp > price ? mrp : undefined, icon, section, medicine_type };
+      const updated = [...prev, newItem];
+
+      // Combined-medicine overlap detection:
+      // If adding a combined medicine that covers deworming, annotate any existing
+      // single-purpose deworming item in the cart — and vice versa.
+      if (!medicine_type) return updated;
+
+      const isCombined = (mt: string) => mt.includes("Combined");
+      const coversDeworming = (mt: string) => mt.toLowerCase().includes("deworm");
+
+      return updated.map((item) => {
+        if (item.id === skuId || !item.medicine_type) return item;
+
+        // Newly added is combined + covers deworming, existing is single deworming
+        if (
+          isCombined(medicine_type) &&
+          coversDeworming(medicine_type) &&
+          !isCombined(item.medicine_type) &&
+          coversDeworming(item.medicine_type)
+        ) {
+          return { ...item, note: `${name} also covers deworming — consider removing this` };
+        }
+
+        // Newly added is single deworming, existing is combined covering deworming
+        if (
+          !isCombined(medicine_type) &&
+          coversDeworming(medicine_type) &&
+          isCombined(item.medicine_type) &&
+          coversDeworming(item.medicine_type)
+        ) {
+          // Annotate the just-added item (skuId) not the existing combined one
+          return item;
+        }
+
+        return item;
+      }).map((item) => {
+        // Annotate the newly added single deworming if a combined is already present
+        if (
+          item.id === skuId &&
+          medicine_type &&
+          !isCombined(medicine_type) &&
+          coversDeworming(medicine_type)
+        ) {
+          const hasCombined = prev.some(
+            (e) => e.medicine_type && isCombined(e.medicine_type) && coversDeworming(e.medicine_type)
+          );
+          if (hasCombined) {
+            const combinedItem = prev.find(
+              (e) => e.medicine_type && isCombined(e.medicine_type) && coversDeworming(e.medicine_type)
+            );
+            return { ...item, note: `${combinedItem?.name || "Your combined medicine"} already covers deworming` };
+          }
+        }
+        return item;
+      });
     });
   }, []);
 
@@ -201,11 +269,96 @@ function DashboardInner({ token }: { token: string }) {
   );
 
   const handlePlaceOrder = useCallback(async (details: CheckoutDetails) => {
-    void details;
-    setConfirmedItems(cart);
-    setConfirmedTotal(cartTotal);
-    setView("confirm");
-  }, [cart, cartTotal]);
+    const address = {
+      name: details.name,
+      phone: details.phone,
+      address: details.address,
+      pincode: details.pincode,
+    };
+
+    if (details.paymentMethod === "cod") {
+      const res = await fetch(`${API_BASE}/dashboard/${token}/place-order`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ payment_method: "cod", address }),
+      });
+      if (!res.ok) throw new Error("Could not place order. Please try again.");
+      setConfirmedItems(cart);
+      setConfirmedTotal(cartTotal);
+      setView("confirm");
+      return;
+    }
+
+    // UPI or card → Razorpay
+    const createRes = await fetch(`${API_BASE}/dashboard/${token}/create-payment`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ payment_method: details.paymentMethod, address }),
+    });
+    if (!createRes.ok) throw new Error("Could not initiate payment. Please try again.");
+    const { razorpay_order_id, amount, currency, key_id, order_db_id } =
+      await createRes.json() as {
+        razorpay_order_id: string; amount: number; currency: string;
+        key_id: string; order_db_id: string;
+      };
+
+    await loadRazorpayScript();
+
+    // Pre-fill saved UPI VPA so the user doesn't retype it.
+    // Razorpay's modal will still show and the user can change it.
+    const savedVpa = data?.owner.saved_upi_id ?? "";
+
+    await new Promise<void>((resolve, reject) => {
+      const options = {
+        key: key_id,
+        amount,
+        currency,
+        order_id: razorpay_order_id,
+        name: "PetCircle",
+        description: "Pet care order",
+        prefill: {
+          name: details.name,
+          contact: details.phone,
+          ...(details.paymentMethod === "upi" && savedVpa ? { vpa: savedVpa } : {}),
+        },
+        method:
+          details.paymentMethod === "upi"
+            ? { upi: true, card: false, netbanking: false, wallet: false }
+            : { card: true, upi: false, netbanking: false, wallet: false },
+        handler: async (response: {
+          razorpay_payment_id: string;
+          razorpay_order_id: string;
+          razorpay_signature: string;
+        }) => {
+          try {
+            const verifyRes = await fetch(
+              `${API_BASE}/dashboard/${token}/verify-payment`,
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  order_db_id,
+                  razorpay_order_id: response.razorpay_order_id,
+                  razorpay_payment_id: response.razorpay_payment_id,
+                  razorpay_signature: response.razorpay_signature,
+                }),
+              }
+            );
+            if (!verifyRes.ok) throw new Error("Payment verification failed.");
+            setConfirmedItems(cart);
+            setConfirmedTotal(cartTotal);
+            setView("confirm");
+            resolve();
+          } catch (e) {
+            reject(e);
+          }
+        },
+        modal: { ondismiss: () => reject(new Error("Payment cancelled.")) },
+      };
+      const rzp = new (window as any).Razorpay(options);
+      rzp.open();
+    });
+  }, [token, cart, cartTotal, data]);
 
   if (!isOnline && !data && !loading) {
     return (
@@ -324,6 +477,10 @@ function DashboardInner({ token }: { token: string }) {
           <CheckoutView
             total={cartTotal}
             initialName={data.owner.full_name || ""}
+            initialPhone={data.owner.mobile_display || ""}
+            initialPincode={data.owner.pincode || ""}
+            initialAddress={data.owner.delivery_address || ""}
+            initialPaymentMethod={data.owner.payment_method_pref || undefined}
             onBack={() => setView("cart")}
             onPlaceOrder={handlePlaceOrder}
           />

@@ -12,7 +12,7 @@ import logging
 import re
 from datetime import date, datetime, timedelta
 
-from openai import AsyncOpenAI
+from anthropic import AsyncAnthropic
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -36,15 +36,15 @@ DEFAULT_HYGIENE = {
 # Cache staleness — regenerate tips after this many days
 HYGIENE_TIP_CACHE_DAYS = 365
 
-# Lazy-initialised OpenAI client
+# Lazy-initialised Anthropic client
 _openai_client = None
 
 
 def _get_openai_client():
-    """Lazy-init OpenAI client."""
+    """Lazy-init Anthropic client."""
     global _openai_client
     if _openai_client is None:
-        _openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        _openai_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
     return _openai_client
 
 
@@ -131,21 +131,18 @@ async def _generate_hygiene_tips(
         client = _get_openai_client()
 
         async def _call():
-            return await client.chat.completions.create(
+            return await client.messages.create(
                 model=OPENAI_QUERY_MODEL,
                 temperature=0.4,
                 max_tokens=600,
+                system=(
+                    "You are a veterinary grooming expert. For each hygiene activity, "
+                    "write ONE short sentence (max 20 words) explaining why it's important "
+                    "for this specific breed and age. Be specific to the breed's traits "
+                    "(coat type, ear shape, skin folds, etc). No generic advice.\n\n"
+                    "Return ONLY a JSON object mapping item_id to tip string. No markdown."
+                ),
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a veterinary grooming expert. For each hygiene activity, "
-                            "write ONE short sentence (max 20 words) explaining why it's important "
-                            "for this specific breed and age. Be specific to the breed's traits "
-                            "(coat type, ear shape, skin folds, etc). No generic advice.\n\n"
-                            "Return ONLY a JSON object mapping item_id to tip string. No markdown."
-                        ),
-                    },
                     {
                         "role": "user",
                         "content": (
@@ -159,7 +156,7 @@ async def _generate_hygiene_tips(
             )
 
         resp = await retry_openai_call(_call)
-        raw = resp.choices[0].message.content.strip()
+        raw = resp.content[0].text.strip()
         # Strip markdown code fences if present
         if raw.startswith("```"):
             raw = re.sub(r"^```(?:json)?\s*", "", raw)

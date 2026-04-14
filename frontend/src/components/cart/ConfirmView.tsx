@@ -11,7 +11,7 @@ interface ConfirmViewProps {
 export default function ConfirmView({ items, totalPaid, onBackToDashboard }: ConfirmViewProps) {
   return (
     <div className="min-h-screen" style={{ background: "var(--bg-app)" }}>
-      <div className="app" style={{ paddingTop: 32 }}>
+      <div className="app" style={{ paddingTop: 32, paddingBottom: 32 }}>
         <div className="card" style={{ textAlign: "center" }}>
           <div
             style={{
@@ -61,9 +61,11 @@ export default function ConfirmView({ items, totalPaid, onBackToDashboard }: Con
           </div>
         </div>
 
-        <button className="btn btn-or" type="button" onClick={onBackToDashboard}>
-          Back to Dashboard
-        </button>
+        <div style={{ marginTop: 8 }}>
+          <button className="btn btn-or" type="button" onClick={onBackToDashboard}>
+            Back to Dashboard
+          </button>
+        </div>
       </div>
     </div>
   );

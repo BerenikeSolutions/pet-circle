@@ -19,7 +19,7 @@ import logging
 import statistics
 from dataclasses import dataclass
 from datetime import date, timedelta
-from enum import Enum
+from enum import StrEnum
 from typing import NotRequired, TypedDict
 from uuid import UUID
 
@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class BreedSize(str, Enum):
+class BreedSize(StrEnum):
     """Five-category breed size classification by weight."""
 
     MINI_TOY = "mini_toy"
@@ -58,7 +58,7 @@ class BreedSize(str, Enum):
     EXTRA_LARGE = "extra_large"
 
 
-class LifeStage(str, Enum):
+class LifeStage(StrEnum):
     """Four life-stage classification for preventive baselines."""
 
     PUPPY = "puppy"
@@ -67,7 +67,7 @@ class LifeStage(str, Enum):
     SENIOR = "senior"
 
 
-class Classification(str, Enum):
+class Classification(StrEnum):
     """
     Result of the 7-step classification algorithm.
 
@@ -896,6 +896,26 @@ def _resolve_diet_item_signals(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def get_preventive_baseline_days(pet: Pet, test_type: str) -> int:
+    """Return life-stage-adjusted baseline recurrence days for a preventive test type.
+
+    Mirrors the same logic used inside compute_care_plan so that the care-cadence
+    view and the care-plan view always agree on the expected interval.
+
+    Args:
+        pet:       Pet model instance.
+        test_type: Canonical test_type string (e.g. "deworming", "tick_flea").
+
+    Returns:
+        Interval in days.
+    """
+    age_months = _get_pet_age_months(pet)
+    weight_kg = _get_weight_kg(pet)
+    breed_size = _get_breed_size(weight_kg, pet.breed)
+    life_stage = _get_life_stage(age_months, breed_size)
+    return _get_baseline_protocol(life_stage, test_type)
+
+
 def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
     """
     Compute the full care plan for a pet.
@@ -977,8 +997,20 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
         # non-puppy pets.  Adults should only see the annual DHPPi + Rabies.
         _skip_puppy_series = life_stage != LifeStage.PUPPY
 
+        # Tick/Flea prevention is not safe for dogs younger than 8 weeks.
+        # Hide it from the care plan so we do not prompt owners to apply
+        # products that are contraindicated at this age.
+        _pet_age_days = (date.today() - pet.dob).days if pet.dob else None
+        _skip_flea_tick = (
+            getattr(pet, "species", None) == "dog"
+            and _pet_age_days is not None
+            and _pet_age_days < 56  # 8 weeks × 7 days
+        )
+
         for record, master, custom_item in record_rows:
             if master and _skip_puppy_series and master.recurrence_days and master.recurrence_days >= 36500:
+                continue
+            if _skip_flea_tick and master and master.item_name == "Tick/Flea":
                 continue
 
             item_name = (
@@ -998,14 +1030,15 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
                 # historical completion evidence or an active prescription.
                 continue
 
-            # Non-core vaccines (e.g. Leptospirosis, Canine Influenza) should
-            # only appear when the user has logged a completion date.  Without
-            # this guard they show up with a NO_HISTORY classification and a
-            # rolling "next_due = today + 365" that looks like a phantom update.
+            # Non-mandatory vaccines (e.g. Kennel Cough, CCoV, Leptospirosis)
+            # should only appear when the user has logged a completion date.
+            # Without this guard they show up with a NO_HISTORY classification
+            # and a rolling "next_due = today + 365" that looks like a phantom
+            # quick-fix recommendation the user never asked for.
             if (
                 test_type == "vaccine"
                 and record.last_done_date is None
-                and not bool(getattr(master, "is_core", False))
+                and not bool(getattr(master, "is_mandatory", False))
             ):
                 continue
 
@@ -1106,6 +1139,9 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
         for master in mandatory_masters:
             if _skip_puppy_series and master.recurrence_days and master.recurrence_days >= 36500:
                 continue
+            # Do not surface Tick/Flea as a mandatory "Quick Fix" for dogs < 8 weeks.
+            if _skip_flea_tick and master.item_name == "Tick/Flea":
+                continue
             test_type = _normalize_item_name(master.item_name)
             if test_type not in _mandatory_phantom_types:
                 continue
@@ -1182,7 +1218,7 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
                 "name": name,
                 "test_type": test_type,
                 "freq": freq_label,
-                "next_due": next_due.isoformat() if next_due else None,
+                "next_due": next_due.strftime("%d/%m/%y") if next_due else None,
                 "status_tag": status_tag,
                 "classification": classification.value,
                 "reason": None,
@@ -1229,6 +1265,21 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
                 if item_key not in attend_items and item_key not in continue_items:
                     add_items[item_key] = item
 
+        # ── Make tick_flea / deworming items in Quick Fixes orderable ────────
+        # These items land in add_items with orderable=False and reason=None by
+        # default. Enabling orderable here (after conflict resolution is settled)
+        # causes the dashboard to show an "Order Now" button that opens the
+        # medicine ProductSelectorCard — matching the UX for food/supplements.
+        _MEDICINE_REASONS: dict[str, str] = {
+            "tick_flea": "Monthly prevention protects against ticks, fleas, and related infections.",
+            "deworming": "Regular deworming maintains gut health and prevents parasite transmission.",
+        }
+        for it in add_items.values():
+            tt = it.get("test_type", "")
+            if tt in _MEDICINE_REASONS and not it.get("orderable"):
+                it["orderable"] = True
+                it["reason"] = _MEDICINE_REASONS[tt]
+
         # ── Add orderable food / supplements to Continue bucket ──────────────
         # Requirement 9.12: place ongoing food and supplements in Continue.
         try:
@@ -1253,22 +1304,9 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
                 tt = "supplement" if diet_item.type == "supplement" else "food"
                 item_key = f"diet_{diet_item.id}"
 
-                # Homemade food: skip signal resolution, no CTA.
+                # Homemade food: stored in DB and shown in WhatsApp but excluded from dashboard care plan.
+                # Only packaged food and supplements are shown in the care plan (orderable items).
                 if diet_item.type == "homemade":
-                    continue_items[item_key] = {
-                        "name": diet_item.label,
-                        "test_type": tt,
-                        "freq": "Daily",
-                        "next_due": None,
-                        "status_tag": _STATUS_ACTIVE,
-                        "classification": Classification.PERIODIC.value,
-                        "reason": None,
-                        "orderable": False,
-                        "cta_label": None,
-                        "signal_level": None,
-                        "info_prompt": None,
-                        "diet_item_id": None,
-                    }
                     continue
 
                 # Packaged food / supplements — resolve via signal resolver.

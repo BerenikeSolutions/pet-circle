@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import ProductSelectorCard, { type ResolvedProduct } from "./dashboard/ProductSelectorCard";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -11,7 +12,7 @@ interface CartViewProps {
   onUpdateQuantity: (id: string, quantity: number) => void;
   onRemoveItem: (id: string) => void;
   onProceedToCheckout: () => void;
-  onAddBySku: (skuId: string, name: string, price: number, mrp: number, icon: string, section: string) => void;
+  onAddBySku: (skuId: string, name: string, price: number, mrp: number, icon: string, section: string, quantity?: number, medicine_type?: string) => void;
 }
 
 export interface CartItem {
@@ -22,17 +23,21 @@ export interface CartItem {
   quantity: number;
   icon?: string;
   section?: string;
+  note?: string;
+  medicine_type?: string;
 }
 
 interface SearchResult {
   sku_id: string;
-  category: "food" | "supplement";
+  category: "food" | "supplement" | "medicine";
   brand_name: string;
   name: string;
   pack_size: string;
   mrp: number;
   discounted_price: number;
   in_stock: boolean;
+  medicine_type?: string;
+  notes?: string;
 }
 
 const DELIVERY_FEE = 49;
@@ -61,8 +66,11 @@ export default function CartView({
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
-  const [addingSkus, setAddingSkus] = useState<Record<string, boolean>>({});
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ProductSelectorCard state
+  const [selectorOpen, setSelectorOpen] = useState(false);
+  const [selectorProducts, setSelectorProducts] = useState<ResolvedProduct[]>([]);
 
   const runSearch = useCallback(async (q: string) => {
     if (q.length < 2) {
@@ -94,25 +102,67 @@ export default function CartView({
     };
   }, [searchQuery, runSearch]);
 
-  const handleSearchAdd = useCallback(async (result: SearchResult) => {
-    if (!result.in_stock) return;
-    setAddingSkus((prev) => ({ ...prev, [result.sku_id]: true }));
+  // Group search results by brand_name — show one row per brand
+  const groupedResults = useMemo(() => {
+    const groups: Record<string, SearchResult[]> = {};
+    for (const r of searchResults) {
+      if (!groups[r.brand_name]) groups[r.brand_name] = [];
+      groups[r.brand_name].push(r);
+    }
+    return Object.entries(groups).map(([brand, skus]) => ({ brand, skus }));
+  }, [searchResults]);
+
+  // Open the variant picker for the chosen brand
+  const handleSearchGroupAdd = useCallback((skus: SearchResult[]) => {
+    const products: ResolvedProduct[] = skus.map((r) => ({
+      sku_id: r.sku_id,
+      category: r.category,
+      brand_name: r.brand_name,
+      // food uses product_line for display; supplement/medicine use product_name
+      product_line: r.category === "food" ? r.name : undefined,
+      product_name: r.category !== "food" ? r.name : undefined,
+      pack_size: r.pack_size,
+      mrp: r.mrp,
+      discounted_price: r.discounted_price,
+      price_per_unit: 0,
+      unit_label: "",
+      in_stock: r.in_stock,
+      vet_diet_flag: false,
+      is_highlighted: false,
+      medicine_type: r.medicine_type,
+      notes: r.notes,
+    }));
+    setSelectorProducts(products);
+    setSelectorOpen(true);
+  }, []);
+
+  // Add selected SKU+qty from popup to cart, then return to cart page
+  const handleSelectorAdd = useCallback(async (skuId: string, quantity: number) => {
+    const product = selectorProducts.find((p) => p.sku_id === skuId);
+
+    // Optimistic update — close popup and add to cart immediately using local product data
+    const icon = product?.category === "food" ? "🥣" : "💊";
+    const name = product?.category === "food"
+      ? (product.product_line || product.brand_name || skuId)
+      : (product?.product_name || product?.brand_name || skuId);
+    const price = product?.discounted_price ?? 0;
+    const mrp = product?.mrp ?? price;
+    onAddBySku(skuId, name, price, mrp, icon, "Search", quantity, product?.medicine_type);
+    setSelectorOpen(false);
+    setSearchQuery("");
+    setSearchResults([]);
+
+    // Sync with backend in background (best-effort)
     try {
-      const res = await fetch(`${API_BASE}/dashboard/${token}/cart/add`, {
+      await fetch(`${API_BASE}/dashboard/${token}/cart/add`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sku_id: result.sku_id, quantity: 1 }),
+        body: JSON.stringify({ sku_id: skuId, quantity }),
       });
-      if (!res.ok) throw new Error("add failed");
-      const data = await res.json();
-      const icon = result.category === "food" ? "🥣" : "💊";
-      onAddBySku(result.sku_id, data.name, data.price, result.mrp, icon, "Search");
     } catch (e) {
-      console.error("Failed to add search result to cart:", e);
-    } finally {
-      setAddingSkus((prev) => ({ ...prev, [result.sku_id]: false }));
+      console.error("Failed to sync cart with backend:", e);
     }
-  }, [token, onAddBySku]);
+  }, [token, selectorProducts, onAddBySku]);
 
   const changeQuantity = (itemId: string, nextQty: number) => {
     if (nextQty <= 0) {
@@ -127,15 +177,53 @@ export default function CartView({
   return (
     <div className="min-h-screen" style={{ background: "var(--bg-app)" }}>
       <div className="app">
-        <div className="vh">
-          <button className="back-btn" onClick={onBack} type="button" aria-label="Back to dashboard">
-            Back
+        <div
+          style={{
+            padding: '14px 16px',
+            borderBottom: '1px solid var(--border, #e0e0e0)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            background: 'var(--white, #fff)',
+          }}
+        >
+          <button
+            onClick={onBack}
+            style={{
+              width: 34,
+              height: 34,
+              borderRadius: '50%',
+              border: '1.5px solid var(--border, #e0e0e0)',
+              background: 'var(--white, #fff)',
+              fontSize: 16,
+              cursor: 'pointer',
+              fontWeight: 600,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: 'var(--t1, #111)',
+              lineHeight: 1,
+            }}
+            type="button"
+            aria-label="Back"
+          >
+            &larr;
           </button>
-          <div className="vh-title">Your Cart</div>
+          <div
+            style={{
+              fontSize: 28,
+              fontWeight: 700,
+              color: 'var(--t1, #000)',
+              letterSpacing: '-0.01em',
+              lineHeight: 1.1,
+            }}
+          >
+            Your Cart
+          </div>
         </div>
 
         {/* Search bar */}
-        <div className="card" style={{ marginBottom: 12 }}>
+        <div className="card" style={{ marginTop: 12, marginBottom: 12 }}>
           <div style={{ position: "relative" }}>
             <input
               type="text"
@@ -147,7 +235,7 @@ export default function CartView({
                 padding: "10px 36px 10px 12px",
                 borderRadius: 10,
                 border: "1.5px solid var(--border)",
-                fontSize: 14,
+                fontSize: 16,
                 color: "var(--t1)",
                 background: "var(--white)",
                 boxSizing: "border-box",
@@ -171,21 +259,25 @@ export default function CartView({
               />
             )}
           </div>
-
-          {searchQuery.length >= 2 && !searchLoading && searchResults.length === 0 && (
+          {searchQuery.length >= 2 && !searchLoading && groupedResults.length === 0 && (
             <div style={{ marginTop: 10, fontSize: 13, color: "var(--t3)", textAlign: "center" }}>
               No products found
             </div>
           )}
 
-          {searchResults.length > 0 && (
+          {/* Show one row per brand — clicking Add opens the variant popup */}
+          {groupedResults.length > 0 && (
             <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-              {searchResults.map((r) => {
-                const alreadyInCart = cartSkuIds.has(r.sku_id);
-                const hasDiscount = r.mrp > r.discounted_price;
+              {groupedResults.map(({ brand, skus }) => {
+                const firstSku = skus[0];
+                const allOutOfStock = skus.every((s) => !s.in_stock);
+                const alreadyInCart = skus.some((s) => cartSkuIds.has(s.sku_id));
+                const minPrice = Math.min(...skus.map((s) => s.discounted_price));
+                const maxMrp = Math.max(...skus.map((s) => s.mrp));
+                const hasDiscount = maxMrp > minPrice;
                 return (
                   <div
-                    key={r.sku_id}
+                    key={brand}
                     style={{
                       display: "flex",
                       alignItems: "center",
@@ -194,38 +286,39 @@ export default function CartView({
                       borderBottom: "1px solid var(--border)",
                     }}
                   >
-                    <div style={{ fontSize: 20 }}>{r.category === "food" ? "🥣" : "💊"}</div>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--t1)" }}>{r.name}</div>
-                      <div style={{ fontSize: 11, color: "var(--t3)" }}>{r.pack_size}</div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--t1)" }}>{brand}</div>
+                      <div style={{ fontSize: 11, color: "var(--t3)" }}>
+                        {(() => { const available = skus.filter(s => s.in_stock).length; return skus.length === 1 ? firstSku.pack_size : available === 1 ? `1 option available` : `${available} options available`; })()}
+                      </div>
                       <div style={{ display: "flex", alignItems: "baseline", gap: 5, marginTop: 2 }}>
                         {hasDiscount && (
                           <span style={{ fontSize: 11, color: "var(--t3)", textDecoration: "line-through" }}>
-                            Rs {r.mrp.toLocaleString("en-IN")}
+                            Rs {maxMrp.toLocaleString("en-IN")}
                           </span>
                         )}
                         <span style={{ fontSize: 13, fontWeight: 700, color: "var(--brand-primary)" }}>
-                          Rs {r.discounted_price.toLocaleString("en-IN")}
+                          from Rs {minPrice.toLocaleString("en-IN")}
                         </span>
                       </div>
                     </div>
                     <button
                       type="button"
-                      disabled={!r.in_stock || alreadyInCart || addingSkus[r.sku_id]}
-                      onClick={() => handleSearchAdd(r)}
+                      disabled={allOutOfStock || alreadyInCart}
+                      onClick={() => handleSearchGroupAdd(skus)}
                       style={{
                         padding: "7px 14px",
                         borderRadius: 8,
                         border: "none",
-                        background: alreadyInCart ? "var(--border)" : r.in_stock ? "var(--brand-primary)" : "var(--border)",
+                        background: alreadyInCart ? "var(--border)" : allOutOfStock ? "var(--border)" : "var(--brand-primary)",
                         color: "var(--white)",
                         fontSize: 12,
                         fontWeight: 700,
-                        cursor: r.in_stock && !alreadyInCart ? "pointer" : "default",
+                        cursor: allOutOfStock || alreadyInCart ? "default" : "pointer",
                         flexShrink: 0,
                       }}
                     >
-                      {alreadyInCart ? "In Cart" : !r.in_stock ? "Out of Stock" : addingSkus[r.sku_id] ? "..." : "Add"}
+                      {alreadyInCart ? "In Cart" : allOutOfStock ? "Out of Stock" : "Add"}
                     </button>
                   </div>
                 );
@@ -241,15 +334,17 @@ export default function CartView({
           )}
 
           {inCartItems.map((item) => {
-            const sku = item.id;
             const section = item.section || "Care";
             const hasDiscount = item.mrp !== undefined && item.mrp > item.price;
             return (
               <div className="cart-row" key={item.id}>
-                <div className="cart-icon" style={{ background: "var(--to)" }}>{item.icon || "PKG"}</div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 14, fontWeight: 700, color: "var(--t1)" }}>{item.name}</div>
-                  <div style={{ fontSize: 11, color: "var(--t3)" }}>SKU: {sku}</div>
+                  {item.note && (
+                    <div style={{ fontSize: 11, color: "#E65100", marginTop: 2, fontStyle: "italic", lineHeight: 1.4 }}>
+                      ⚠ {item.note}
+                    </div>
+                  )}
                   <div style={{ fontSize: 11, color: "var(--t3)" }}>Section: {section}</div>
                   <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 4 }}>
                     {hasDiscount && (
@@ -261,6 +356,11 @@ export default function CartView({
                       Rs {item.price.toLocaleString("en-IN")}
                     </span>
                   </div>
+                  {item.quantity > 0 && (
+                    <div style={{ fontSize: 11, color: "var(--t3)", marginTop: 3 }}>
+                      Qty: {item.quantity}
+                    </div>
+                  )}
                 </div>
                 <div className="qty">
                   <button className="qty-btn" type="button" onClick={() => changeQuantity(item.id, item.quantity - 1)}>
@@ -316,6 +416,18 @@ export default function CartView({
           </button>
         </div>
       </div>
+
+      {/* Product variant popup — same pattern as dashboard */}
+      <ProductSelectorCard
+        open={selectorOpen}
+        onClose={() => setSelectorOpen(false)}
+        products={selectorProducts}
+        signalLevel=""
+        vetDietWarning={false}
+        packSizeSuggestion={null}
+        onAddToCart={handleSelectorAdd}
+        hideSearchMore
+      />
     </div>
   );
 }

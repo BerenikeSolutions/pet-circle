@@ -32,9 +32,9 @@ from app.core.constants import (
     ORDER_CAT_MEDICINES,
     ORDER_CAT_SUPPLEMENTS,
 )
-from app.models.order_recommendation import OrderRecommendation
 from app.models.condition import Condition
 from app.models.diet_item import DietItem
+from app.models.order_recommendation import OrderRecommendation
 from app.models.pet import Pet
 from app.models.pet_preference import PetPreference
 from app.models.preventive_master import PreventiveMaster
@@ -48,11 +48,11 @@ _openai_recommendation_client = None
 
 
 def _get_openai_client():
-    """Return a cached AsyncOpenAI client for recommendations."""
+    """Return a cached AsyncAnthropic client for recommendations."""
     global _openai_recommendation_client
     if _openai_recommendation_client is None:
-        from openai import AsyncOpenAI
-        _openai_recommendation_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        from anthropic import AsyncAnthropic
+        _openai_recommendation_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
     return _openai_recommendation_client
 
 
@@ -189,6 +189,7 @@ async def get_or_generate_recommendations(
             age_range,
             category,
             profile_context,
+            db=db,
         )
 
         # Store in database for future reuse
@@ -222,6 +223,7 @@ async def _generate_recommendations_via_ai(
     age_range: str,
     category: str,
     profile_context: dict,
+    db: Session | None = None,
 ) -> list:
     """
     Call OpenAI to generate recommendations.
@@ -233,24 +235,22 @@ async def _generate_recommendations_via_ai(
     category_display = _get_category_description(category)
 
     prompt = _build_recommendation_prompt(
-        species, breed, age_range, category_display, profile_context
+        species, breed, age_range, category_display, profile_context,
+        db=db, category=category,
     )
 
     try:
         response = await retry_openai_call(
-            client.chat.completions.create,
+            client.messages.create,
             model=OPENAI_QUERY_MODEL,
             temperature=0.7,  # Slightly higher for more varied recommendations
             max_tokens=1500,
+            system=(
+                "You are a veterinary expert recommending pet products. "
+                "Always respond with valid JSON. "
+                "Never include explanations outside the JSON."
+            ),
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a veterinary expert recommending pet products. "
-                        "Always respond with valid JSON. "
-                        "Never include explanations outside the JSON."
-                    ),
-                },
                 {
                     "role": "user",
                     "content": prompt,
@@ -259,7 +259,7 @@ async def _generate_recommendations_via_ai(
         )
 
         # Parse the response
-        response_text = response.choices[0].message.content.strip()
+        response_text = response.content[0].text.strip()
 
         # Try to extract JSON from response
         items = _extract_json_from_response(response_text)
@@ -298,12 +298,36 @@ async def _generate_recommendations_via_ai(
         return []
 
 
+def _fetch_catalog_medicines(db: Session | None, species: str, category: str) -> list[str]:
+    """Return top product names from product_medicines for the given species and category."""
+    if db is None:
+        return []
+    try:
+        from app.models.product_medicines import ProductMedicines
+        from sqlalchemy import or_
+
+        query = db.query(ProductMedicines.product_name).filter(
+            ProductMedicines.active == True,
+            ProductMedicines.life_stage_tags.ilike(f"%{species}%"),
+        )
+        if category == ORDER_CAT_MEDICINES or "medicine" in category.lower():
+            # Return a representative mix: flea/tick + deworming
+            results = query.order_by(ProductMedicines.popularity_rank.asc()).limit(10).all()
+        else:
+            results = []
+        return [r[0] for r in results]
+    except Exception:
+        return []
+
+
 def _build_recommendation_prompt(
     species: str,
     breed: str | None,
     age_range: str,
     category_display: str,
     profile_context: dict,
+    db: Session | None = None,
+    category: str = "",
 ) -> str:
     """Build the prompt for AI recommendation generation."""
     breed_info = f" ({breed})" if breed else ""
@@ -314,14 +338,25 @@ def _build_recommendation_prompt(
     preventive = ", ".join(profile_context.get("preventive", [])[:5]) or "none"
     history = ", ".join(profile_context.get("order_history", [])[:5]) or "none"
 
+    # For medicine category, include catalog products so GPT picks real SKUs
+    catalog_section = ""
+    if "medicine" in category_display.lower() or category == ORDER_CAT_MEDICINES:
+        catalog_medicines = _fetch_catalog_medicines(db, species, category)
+        if catalog_medicines:
+            catalog_section = (
+                f"Available medicines in our catalog (prefer these): "
+                f"{', '.join(catalog_medicines[:8])}\n"
+            )
+
     return (
         f"Recommend 5-7 {category_display.lower()} for a {age_range} {species}{breed_info}.\n\n"
         f"Current foods: {foods}\n"
         f"Current supplements: {supplements}\n"
         f"Active conditions: {conditions}\n"
         f"Preventive care already tracked: {preventive}\n"
-        f"Recent order history: {history}\n\n"
-        f"Return ONLY a JSON array with no markdown formatting, like this:\n"
+        f"Recent order history: {history}\n"
+        f"{catalog_section}"
+        f"\nReturn ONLY a JSON array with no markdown formatting, like this:\n"
         f"[\n"
         f'  {{"name": "Product Name", "description": "Short description", "reason": "Why recommended"}},\n'
         f"  ...\n"

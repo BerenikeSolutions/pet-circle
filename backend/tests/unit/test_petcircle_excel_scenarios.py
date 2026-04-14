@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 from openpyxl import load_workbook
 
-
 REPO_ROOT = Path(__file__).resolve().parents[3]
 TEST_CASES_XLSX = REPO_ROOT / "project details" / "petcircle_test_cases.xlsx"
 ALL_TEST_CASES_SHEET = "All Test Cases"

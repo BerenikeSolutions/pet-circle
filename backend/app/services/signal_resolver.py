@@ -37,10 +37,10 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date
-from enum import Enum
-from typing import Iterable
+from enum import StrEnum
 
 from sqlalchemy.orm import Session
 
@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-class SignalLevel(str, Enum):
+class SignalLevel(StrEnum):
     """How precisely the system can resolve a pet's diet item."""
 
     L5 = "L5"    # Exact SKU (brand + line + size)
@@ -701,27 +701,60 @@ def _build_result(level: SignalLevel, products: list[ProductFood]) -> SignalResu
 # Longest-matching keyword wins so "fish oil" beats "oil", and
 # "multivitamin" beats "vitamin".
 SUPPLEMENT_TYPE_KEYWORDS: dict[str, str] = {
+    # ── Omega / fish oil ────────────────────────────────────────────────────
     "fish oil": "fish_oil",
     "salmon oil": "fish_oil",
     "omega": "fish_oil",
+    # ── Joint support ───────────────────────────────────────────────────────
     "joint": "joint_supplement",
     "glucosamine": "joint_supplement",
     "mobility": "joint_supplement",
+    # ── Vitamins / multivitamin ──────────────────────────────────────────────
     "multivitamin": "multivitamin",
     "vitamin": "multivitamin",
+    "methylcobalamin": "multivitamin",   # B12 supplement without "vitamin" in label
+    "cobalamin": "multivitamin",
+    # ── Probiotics / digestive ───────────────────────────────────────────────
     "probiotic": "probiotic",
+    "prebiotic": "probiotic",
     "gut": "probiotic",
+    "lactobacillus": "probiotic",
+    "enterococcus": "probiotic",
+    "bacillus": "probiotic",
+    "saccharomyces": "probiotic",
+    "psyllium": "digestive_supplement",
+    "pectin": "digestive_supplement",
+    # ── Coat / skin ─────────────────────────────────────────────────────────
     "coat": "coat_supplement",
     "skin": "skin_supplement",
+    # ── Kidney / urinary ────────────────────────────────────────────────────
     "kidney": "kidney_supplement",
-    "renal": "kidney_supplement",
+    "renal": "kidney_supplement",        # word-boundary checked in extractor
     "urinary": "urinary_supplement",
     "bladder": "urinary_supplement",
+    # ── Calming ─────────────────────────────────────────────────────────────
     "calming": "calming",
     "anxiety": "calming",
     "cbd": "calming",
-    "milk": "milk_replacer",
+    "chamomile": "calming",
+    "valerian": "calming",
+    "ashwagandha": "calming",
+    # ── Liver support ───────────────────────────────────────────────────────
+    "milk thistle": "liver_supplement",  # longer than "milk"; wins longest-match
+    "silymarin": "liver_supplement",
+    "silybum": "liver_supplement",
+    "ursodeoxycholic": "liver_supplement",
+    # ── Bone / mineral ──────────────────────────────────────────────────────
+    "calcium": "bone_supplement",
+    "phosphorus": "bone_supplement",
+    # ── Anti-inflammatory ───────────────────────────────────────────────────
+    "curcumin": "anti_inflammatory",
+    "turmeric": "anti_inflammatory",
+    # ── Milk replacer ───────────────────────────────────────────────────────
+    "milk": "milk_replacer",             # "milk thistle" entry above wins first
+    # ── Growth / performance ────────────────────────────────────────────────
     "growth": "growth_supplement",
+    "creatine": "performance_supplement",
 }
 
 # Generic tokens that indicate L1 (user mentioned "supplement" with no
@@ -752,11 +785,15 @@ def _extract_supplement_type(diet_item: DietItem) -> str | None:
     if not haystack:
         return None
 
-    # Longest-match wins — sort keywords by length descending.
+    # Longest whole-word match wins (word-boundary check prevents "renal"
+    # firing inside "adrenal", and "milk" firing inside "milk thistle").
     best_type: str | None = None
     best_len = 0
     for keyword, canonical in SUPPLEMENT_TYPE_KEYWORDS.items():
-        if keyword in haystack and len(keyword) > best_len:
+        if len(keyword) <= best_len:
+            continue
+        pattern = r"\b" + re.escape(keyword) + r"\b"
+        if re.search(pattern, haystack):
             best_type = canonical
             best_len = len(keyword)
     return best_type
@@ -863,7 +900,9 @@ def _serialize_supplement_product(
         "price_per_unit": int(product.price_per_unit) if product.price_per_unit else None,
         "unit_label": "per unit",
         "in_stock": bool(product.in_stock),
+        "vet_diet_flag": False,  # Supplements do not require vet-diet warning
         "is_highlighted": is_highlighted,
+        "highlight_reason": "Most Popular" if is_highlighted else None,
     }
 
 

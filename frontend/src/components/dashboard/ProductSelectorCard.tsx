@@ -1,11 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import BottomSheet from "@/components/ui/BottomSheet";
 
 export interface ResolvedProduct {
   sku_id: string;
-  category: "food" | "supplement";
+  category: "food" | "supplement" | "medicine";
   brand_name: string;
   product_line?: string;
   product_name?: string;
@@ -18,6 +18,8 @@ export interface ResolvedProduct {
   vet_diet_flag: boolean;
   is_highlighted: boolean;
   highlight_reason?: string;
+  medicine_type?: string;
+  notes?: string;
 }
 
 interface ProductSelectorCardProps {
@@ -41,32 +43,57 @@ export default function ProductSelectorCard({
   onAddToCart,
   hideSearchMore,
 }: ProductSelectorCardProps) {
-  const firstInStock = products.find((p) => p.in_stock);
-  const [selectedSku, setSelectedSku] = useState<string>(firstInStock?.sku_id || products[0]?.sku_id || "");
+  const [selectedSku, setSelectedSku] = useState<string>("");
   const [qty, setQty] = useState(1);
 
-  // Reset selection when products change
-  const resetKey = products.map((p) => p.sku_id).join(",");
-  const [prevKey, setPrevKey] = useState(resetKey);
-  if (resetKey !== prevKey) {
-    setPrevKey(resetKey);
+  // Reset selection whenever the product list changes (e.g. popup opens with new products)
+  useEffect(() => {
     const first = products.find((p) => p.in_stock) || products[0];
     setSelectedSku(first?.sku_id || "");
     setQty(1);
-  }
+  }, [products]);
+
+  // Fallback: if useEffect hasn't fired yet, derive the active SKU directly from props
+  const activeSku = selectedSku || products.find((p) => p.in_stock)?.sku_id || products[0]?.sku_id || "";
 
   const handleAdd = () => {
-    if (selectedSku) onAddToCart(selectedSku, qty);
+    if (activeSku) onAddToCart(activeSku, qty);
   };
 
   const displayName = (p: ResolvedProduct) =>
     p.category === "food" ? p.product_line || p.brand_name : p.product_name || p.brand_name;
 
+  // ── No products in catalog ─────────────────────────────────────────────────
+  if (products.length === 0) {
+    return (
+      <BottomSheet open={open} onClose={onClose} title="Select Product">
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            textAlign: "center",
+            padding: "24px 16px 40px",
+            gap: 12,
+          }}
+        >
+          <div style={{ fontSize: 36 }}>📦</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "var(--t1)" }}>
+            Not available right now
+          </div>
+          <div style={{ fontSize: 13, color: "var(--t2)", lineHeight: 1.6, maxWidth: 260 }}>
+            This item isn&apos;t in our catalog yet. We&apos;ll have it in stock soon — check back shortly!
+          </div>
+        </div>
+      </BottomSheet>
+    );
+  }
+
   return (
     <BottomSheet open={open} onClose={onClose} title="Select Product">
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {products.map((p) => {
-          const isSelected = p.sku_id === selectedSku;
+          const isSelected = p.sku_id === activeSku;
           const hasDiscount = p.mrp > p.discounted_price;
 
           return (
@@ -91,7 +118,7 @@ export default function ProductSelectorCard({
                 value={p.sku_id}
                 checked={isSelected}
                 disabled={!p.in_stock}
-                onChange={() => setSelectedSku(p.sku_id)}
+                onChange={() => { setSelectedSku(p.sku_id); }}
                 style={{ marginTop: 3, accentColor: "var(--brand-primary)" }}
               />
 
@@ -136,6 +163,12 @@ export default function ProductSelectorCard({
                 <div style={{ fontSize: 11, color: "var(--t3)", marginTop: 1 }}>
                   {p.pack_size}
                 </div>
+
+                {p.notes && (
+                  <div style={{ fontSize: 11, color: "var(--t3)", marginTop: 2, fontStyle: "italic", lineHeight: 1.4 }}>
+                    {p.notes}
+                  </div>
+                )}
 
                 <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 4 }}>
                   {hasDiscount && (
@@ -252,6 +285,7 @@ export default function ProductSelectorCard({
           justifyContent: hideSearchMore ? "flex-end" : "space-between",
           gap: 10,
           marginTop: 12,
+          marginBottom: 70,
         }}
       >
         {!hideSearchMore && (
@@ -274,16 +308,16 @@ export default function ProductSelectorCard({
         <button
           type="button"
           onClick={handleAdd}
-          disabled={!selectedSku}
+          disabled={!activeSku}
           style={{
             padding: "10px 24px",
             borderRadius: 10,
             border: "none",
-            background: selectedSku ? "var(--brand-primary)" : "var(--border)",
+            background: activeSku ? "var(--brand-primary)" : "var(--border)",
             fontSize: 14,
             fontWeight: 700,
             color: "var(--white)",
-            cursor: selectedSku ? "pointer" : "default",
+            cursor: activeSku ? "pointer" : "default",
           }}
         >
           Add to cart

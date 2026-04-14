@@ -15,8 +15,7 @@ Caching rules:
     - force=True bypasses the cache regardless of age (used by the regenerate
       endpoint triggered from the dashboard).
 
-Model: OPENAI_QUERY_MODEL (gpt-4.1-mini) — sufficient for structured text
-generation; cheaper than the extraction model.
+Model: OPENAI_QUERY_MODEL (gpt-4.1) — used for structured text generation.
 
 Failure behaviour: If GPT or the DB call fails, the error is logged and a
 sensible default payload is returned so the dashboard never crashes.
@@ -67,7 +66,7 @@ NUTRITION_IMPORTANCE_CACHE_DAYS = 30
 #  Lazy OpenAI client                                                           #
 # --------------------------------------------------------------------------- #
 
-_openai_client = None
+_openai_client = None  # Anthropic AsyncAnthropic client (lazy-initialised)
 
 
 class Bullet(TypedDict):
@@ -181,46 +180,75 @@ def _extract_main_food_items(*texts: str, apply_noise_filter: bool = True) -> li
 
 
 def _format_found_diet_summary(food_items: list[DietItem], supplement_items: list[DietItem]) -> str:
-    """Format the What We Found diet line with only main food items and supplements."""
-    supp_names: list[str] = []
-    if supplement_items:
-        for supp in supplement_items:
-            main = _sentence_case((supp.label or "").strip())
-            if main and main.lower() not in {x.lower() for x in supp_names}:
-                supp_names.append(main)
+    """Format the What We Found diet line as a natural sentence with quantities.
 
-    main_foods: list[str] = []
+    Example output: "Royal Canin hypoallergenic (280g x 2/day) and Fur+ along
+    with Vitamin D3 and Glucosamine supplements"
+    """
+    # Build food descriptions using label + detail (for quantity/portion info).
+    seen_foods: set[str] = set()
+    food_descriptions: list[str] = []
     for food in food_items:
-        # Keep primary labels intact (no noise filtering), then clean free-form detail.
-        main_foods.extend(_extract_main_food_items(food.label or "", apply_noise_filter=False))
-        main_foods.extend(_extract_main_food_items(food.detail or "", apply_noise_filter=True))
-
-    deduped_foods: list[str] = []
-    for item in main_foods:
-        if _is_food_item_covered_by_supplements(item, supp_names):
+        label = (food.label or "").strip()
+        if not label:
             continue
-        if item.lower() not in {x.lower() for x in deduped_foods}:
-            deduped_foods.append(item)
-
-    parts: list[str] = [f"{item}." for item in deduped_foods]
-
-    if supplement_items:
-        if supp_names:
-            parts.append(f"Supplements - {', '.join(supp_names)}.")
+        key = label.lower()
+        if key in seen_foods:
+            continue
+        seen_foods.add(key)
+        detail = (food.detail or "").strip()
+        if detail and detail.lower() != label.lower():
+            food_descriptions.append(f"{label} ({detail})")
         else:
-            parts.append("No supplements.")
-    else:
-        parts.append("No supplements.")
+            food_descriptions.append(label)
 
-    return " ".join(parts).strip()
+    # Build supplement descriptions.
+    seen_supps: set[str] = set()
+    supp_descriptions: list[str] = []
+    for supp in supplement_items:
+        label = (supp.label or "").strip()
+        if not label:
+            continue
+        key = label.lower()
+        if key in seen_supps:
+            continue
+        seen_supps.add(key)
+        # Skip supplements that are already covered by food item names.
+        supp_names_for_check = [s for s in supp_descriptions]
+        if _is_food_item_covered_by_supplements(label, supp_names_for_check):
+            continue
+        supp_descriptions.append(label)
+
+    # Join foods into a natural sentence.
+    if len(food_descriptions) == 0:
+        food_str = "No food items recorded"
+    elif len(food_descriptions) == 1:
+        food_str = food_descriptions[0]
+    elif len(food_descriptions) == 2:
+        food_str = f"{food_descriptions[0]} and {food_descriptions[1]}"
+    else:
+        food_str = ", ".join(food_descriptions[:-1]) + f" and {food_descriptions[-1]}"
+
+    # Append supplements.
+    if supp_descriptions:
+        if len(supp_descriptions) == 1:
+            supp_str = supp_descriptions[0]
+        elif len(supp_descriptions) == 2:
+            supp_str = f"{supp_descriptions[0]} and {supp_descriptions[1]}"
+        else:
+            supp_str = ", ".join(supp_descriptions[:-1]) + f" and {supp_descriptions[-1]}"
+        suffix = "supplement" if len(supp_descriptions) == 1 else "supplements"
+        return f"{food_str} along with {supp_str} {suffix}"
+
+    return food_str
 
 
 def _get_openai_client():
-    """Lazy-initialise AsyncOpenAI client (avoids import-time errors)."""
+    """Lazy-initialise AsyncAnthropic client (avoids import-time errors)."""
     global _openai_client
     if _openai_client is None:
-        from openai import AsyncOpenAI
-        _openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        from anthropic import AsyncAnthropic
+        _openai_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
     return _openai_client
 
 
@@ -260,17 +288,16 @@ async def _generate_conditions_summary_gpt(pet_context: str) -> dict:
     user_prompt = f"Pet health context:\n{pet_context}"
 
     async def _call() -> str:
-        response = await client.chat.completions.create(
+        response = await client.messages.create(
             model=OPENAI_QUERY_MODEL,
             temperature=0,
             max_tokens=300,
-            response_format={"type": "json_object"},
+            system=system_prompt,
             messages=[
-                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         )
-        return response.choices[0].message.content or "{}"
+        return response.content[0].text or "{}"
 
     raw = await retry_openai_call(_call)
     try:
@@ -312,17 +339,16 @@ async def _generate_health_summary_gpt(pet_context: str) -> dict:
     user_prompt = f"Pet health context:\n{pet_context}"
 
     async def _call() -> str:
-        response = await client.chat.completions.create(
+        response = await client.messages.create(
             model=OPENAI_QUERY_MODEL,
             temperature=0,
             max_tokens=500,
-            response_format={"type": "json_object"},
+            system=system_prompt,
             messages=[
-                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         )
-        return response.choices[0].message.content or "{}"
+        return response.content[0].text or "{}"
 
     raw = await retry_openai_call(_call)
     try:
@@ -364,16 +390,16 @@ async def _generate_vet_questions_gpt(pet_context: str) -> list:
     user_prompt = f"Pet health context:\n{pet_context}"
 
     async def _call() -> str:
-        response = await client.chat.completions.create(
+        response = await client.messages.create(
             model=OPENAI_QUERY_MODEL,
             temperature=0,
             max_tokens=800,
+            system=system_prompt,
             messages=[
-                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         )
-        return response.choices[0].message.content or "[]"
+        return response.content[0].text or "[]"
 
     raw = await retry_openai_call(_call)
     try:
@@ -609,13 +635,14 @@ async def _generate_nutrition_importance_gpt(pet: Pet) -> dict:
     client = _get_openai_client()
 
     async def _call() -> str:
-        response = await client.chat.completions.create(
+        response = await client.messages.create(
             model=OPENAI_QUERY_MODEL,
             temperature=0.6,
             max_tokens=200,
-            messages=[{"role": "system", "content": system_prompt}],
+            system=system_prompt,
+            messages=[{"role": "user", "content": "Generate the nutrition importance note."}],
         )
-        return response.choices[0].message.content or ""
+        return response.content[0].text or ""
 
     try:
         note = await retry_openai_call(_call)
@@ -812,23 +839,48 @@ async def generate_care_plan_reasons(
     db: Session,
     pet: Pet,
     orderable_items: list[dict[str, Any]],
+    diet_summary: dict | None = None,
 ) -> dict[str, str]:
     """
     Generate one-sentence reasons for orderable care plan items.
 
-    Reasons are generated fresh on every load and are never cached.
-    On GPT failure, return {} so the UI can render items without reasons.
+    Results are cached in pet_ai_insights with a 1-hour TTL.  Using a short
+    TTL (rather than the 7-day insight TTL) ensures reasons stay current when
+    care-plan items change, while preventing every dashboard load from hitting
+    the Claude API concurrently.
 
     Args:
         db: SQLAlchemy session.
         pet: Pet model instance.
         orderable_items: List of orderable item payloads with id/name fields.
+        diet_summary: Pre-computed diet summary dict; if provided, skips the
+            get_diet_summary() OpenAI call to avoid a redundant round-trip.
 
     Returns:
         Mapping of item_id -> reason sentence.
     """
     if not pet or not orderable_items:
         return {}
+
+    _CARE_PLAN_REASONS_CACHE_HOURS = 1
+    _CARE_PLAN_REASONS_INSIGHT_TYPE = "care_plan_reasons"
+
+    # --- Cache check (1-hour TTL) ---
+    stale_cutoff = datetime.utcnow() - timedelta(hours=_CARE_PLAN_REASONS_CACHE_HOURS)
+    try:
+        cached = (
+            db.query(PetAiInsight)
+            .filter(
+                PetAiInsight.pet_id == pet.id,
+                PetAiInsight.insight_type == _CARE_PLAN_REASONS_INSIGHT_TYPE,
+                PetAiInsight.generated_at >= stale_cutoff,
+            )
+            .first()
+        )
+        if cached and isinstance(cached.content_json, dict):
+            return cached.content_json.get("reasons", {})
+    except Exception as exc:
+        logger.warning("care_plan_reasons cache read failed for pet %s: %s", pet.id, exc)
 
     try:
         item_map: dict[str, str] = {}
@@ -860,7 +912,9 @@ async def generate_care_plan_reasons(
         breed_size = _get_breed_size(weight_kg, pet.breed)
         life_stage = _get_life_stage(age_months, breed_size).value
 
-        nutrition_summary = await get_diet_summary(db, pet)
+        # Use caller-supplied diet_summary to avoid a redundant OpenAI call when
+        # the dashboard has already fetched it in the parallel enrichment phase.
+        nutrition_summary = diet_summary if diet_summary is not None else await get_diet_summary(db, pet)
         missing_micros = nutrition_summary.get("missing_micros", [])
         nutrition_gap_names = [
             str(gap.get("name"))
@@ -895,17 +949,16 @@ async def generate_care_plan_reasons(
     client = _get_openai_client()
 
     async def _call() -> str:
-        response = await client.chat.completions.create(
+        response = await client.messages.create(
             model=OPENAI_QUERY_MODEL,
             temperature=0,
             max_tokens=500,
-            response_format={"type": "json_object"},
+            system=system_prompt,
             messages=[
-                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         )
-        return response.choices[0].message.content or "{}"
+        return response.content[0].text or "{}"
 
     try:
         raw = await retry_openai_call(_call)
@@ -924,6 +977,29 @@ async def generate_care_plan_reasons(
             if not one_line_reason.endswith((".", "!", "?")):
                 one_line_reason = f"{one_line_reason}."
             reasons[item_id] = one_line_reason
+
+        # --- Persist to cache (only if GPT returned usable reasons) ---
+        if reasons:
+            try:
+                db.execute(
+                    text("""
+                        INSERT INTO pet_ai_insights (pet_id, insight_type, content_json, generated_at)
+                        VALUES (:pet_id, :insight_type, CAST(:content_json AS jsonb), NOW())
+                        ON CONFLICT (pet_id, insight_type)
+                        DO UPDATE SET content_json = EXCLUDED.content_json,
+                                      generated_at = NOW()
+                    """),
+                    {
+                        "pet_id": str(pet.id),
+                        "insight_type": _CARE_PLAN_REASONS_INSIGHT_TYPE,
+                        "content_json": json.dumps({"reasons": reasons}),
+                    },
+                )
+                db.commit()
+            except Exception as cache_exc:
+                logger.warning("care_plan_reasons cache write failed for pet %s: %s", pet.id, cache_exc)
+                db.rollback()
+
         return reasons
     except Exception as exc:
         logger.warning("care_plan_reasons generation failed for pet %s: %s", pet.id, exc)

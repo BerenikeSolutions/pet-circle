@@ -8,21 +8,14 @@ All tests are pure-Python with no DB or external dependencies.
 
 import os
 from datetime import date, timedelta
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 os.environ.setdefault("APP_ENV", "test")
 
 from app.services.care_plan_engine import (
-    BASELINE_PROTOCOL,
-    BREED_SIZE_BOUNDARIES,
     BreedSize,
-    CarePlanV2,
     Classification,
     LifeStage,
-    _Prescription,
-    _Report,
     _classify_test,
     _compute_next_due,
     _days_to_freq_label,
@@ -31,6 +24,8 @@ from app.services.care_plan_engine import (
     _get_breed_size,
     _get_life_stage,
     _normalize_item_name,
+    _Prescription,
+    _Report,
     _status_tag,
     _to_sections,
 )
