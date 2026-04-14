@@ -740,6 +740,10 @@ def _extract_pet_name_correction(text: str) -> str | None:
     patterns = (
         r"\b(?:actually\s+)?(?:his|her|their)\s+name\s+is\s+([a-zA-Z][a-zA-Z\s'\-]{0,49})",
         r"\b(?:i\s+typed\s+(?:it\s+)?wrong[, ]*)?(?:actually\s+)?name\s+is\s+([a-zA-Z][a-zA-Z\s'\-]{0,49})",
+        r"\b(?:pet'?s?\s+)?name\s+(?:should\s+be|is\s+actually)\s+([a-zA-Z][a-zA-Z\s'\-]{0,49})",
+        r"\brename\s+(?:him|her|them|it|to\s+)?([a-zA-Z][a-zA-Z\s'\-]{0,49})",
+        r"\bchange\s+(?:the\s+)?name\s+to\s+([a-zA-Z][a-zA-Z\s'\-]{0,49})",
+        r"\bcall\s+(?:him|her|them|it)\s+([a-zA-Z][a-zA-Z\s'\-]{0,49})",
     )
     for pattern in patterns:
         match = re.search(pattern, normalized, flags=re.IGNORECASE)
@@ -772,6 +776,18 @@ def _looks_like_name_correction_intent(text_lower: str) -> bool:
         "instead",
         "correction",
         "correct name",
+        "meant",
+        "actually",
+        "call him",
+        "call her",
+        "call them",
+        "rename",
+        "change name",
+        "change the name",
+        "should be",
+        "it's ",
+        "its ",
+        "sorry",
     )
     return any(signal in normalized for signal in signals)
 
