@@ -24,6 +24,7 @@ Rules:
     - "skip" accepted for optional fields.
 """
 
+import calendar
 import json
 import logging
 import re
@@ -3961,6 +3962,129 @@ async def _parse_gender_weight_neutered(text: str) -> dict:
         return {"gender": None, "weight_kg": None, "neutered": None}
 
 
+def _keyword_parse_preventive_care(text: str) -> dict:
+    """
+    Rule-based fallback for preventive care parsing when the GPT API call fails.
+
+    Splits the user's message into comma/conjunction-separated segments, detects
+    which preventive category each segment mentions, and extracts an approximate
+    date using common relative-date patterns.  This preserves data the user
+    already provided rather than marking all categories as missing when the API
+    is temporarily unavailable.
+
+    Returns a dict with the same shape as _parse_preventive_care().
+    """
+    t = (text or "").lower()
+    today_d = date.today()
+
+    _MONTH_NUMS: dict[str, int] = {
+        "jan": 1, "january": 1, "feb": 2, "february": 2,
+        "mar": 3, "march": 3, "apr": 4, "april": 4,
+        "may": 5, "jun": 6, "june": 6,
+        "jul": 7, "july": 7, "aug": 8, "august": 8,
+        "sep": 9, "september": 9, "oct": 10, "october": 10,
+        "nov": 11, "november": 11, "dec": 12, "december": 12,
+    }
+
+    def _extract_date(seg: str) -> str | None:
+        """Return an absolute date string from a segment, or None."""
+        if re.search(r"\btoday\b|\bthis\s+month\b|\bjust\s+now\b|\bnow\b", seg):
+            return today_d.strftime("%d %B %Y")
+        if re.search(r"\byesterday\b", seg):
+            return (today_d - timedelta(days=1)).strftime("%d %B %Y")
+        m = re.search(r"(\d+)\s+months?\s+(?:ago|back|earlier)", seg)
+        if m:
+            n = int(m.group(1))
+            yr, mo = today_d.year, today_d.month - n
+            while mo <= 0:
+                mo += 12
+                yr -= 1
+            return f"{calendar.month_name[mo]} {yr}"
+        m = re.search(r"(\d+)\s+weeks?\s+(?:ago|back|earlier)", seg)
+        if m:
+            d = today_d - timedelta(weeks=int(m.group(1)))
+            return d.strftime("%d %B %Y")
+        m = re.search(r"(\d+)\s+days?\s+(?:ago|back|earlier)", seg)
+        if m:
+            d = today_d - timedelta(days=int(m.group(1)))
+            return d.strftime("%d %B %Y")
+        if re.search(r"\blast\s+month\b", seg):
+            yr, mo = today_d.year, today_d.month - 1
+            if mo == 0:
+                mo = 12
+                yr -= 1
+            return f"{calendar.month_name[mo]} {yr}"
+        # Match month names: "last dec", "in jan", or just "jan".
+        # Use strict less-than so "last april" when today is April → previous year.
+        for name, num in sorted(_MONTH_NUMS.items(), key=lambda x: -len(x[0])):
+            if re.search(rf"\b{re.escape(name)}\b", seg):
+                yr = today_d.year if num < today_d.month else today_d.year - 1
+                return f"{calendar.month_name[num]} {yr}"
+        return None
+
+    _vaccine_re = re.compile(
+        r"\b(?:vaccine|vaccin|vaccinat|jabs?|shots?|rabies|dhppi?|bordetella|"
+        r"core\s+vaccine|kennel\s+cough|leptospirosis|corona(?:virus)?|fvrcp|felv)\b"
+    )
+    _deworm_re = re.compile(r"\b(?:deworm(?:ing)?|worming|worm(?:ed|ing)?)\b")
+    _flea_re = re.compile(
+        r"\b(?:flea|tick|simparica|nexgard|bravecto|frontline|advocate|"
+        r"revolution|credelio|seresto|advantix|fipronil|ivermectin)\b"
+    )
+    _blood_re = re.compile(r"\b(?:blood\s*test|blood\s*work|cbc|complete\s*blood|haemato)\b")
+    _none_re = re.compile(
+        r"\b(?:none|not\s+done|never|no\s+(?:vaccine|deworm|flea|tick|blood)|haven'?t|not\s+yet)\b"
+    )
+
+    result: dict = {
+        "vaccines": None,
+        "vaccine_specifics": [],
+        "deworming": None,
+        "flea_tick": None,
+        "blood_test": None,
+        "missing": [],
+    }
+    found: set[str] = set()
+
+    # Split on commas, semicolons, and conjunctions to get per-category segments.
+    segments = re.split(r"[,;]|\band\b|\bthen\b|\bbut\b", t)
+    segments = [s.strip() for s in segments if s.strip()]
+
+    for seg in segments:
+        is_none = bool(_none_re.search(seg))
+
+        if _vaccine_re.search(seg):
+            found.add("vaccines")
+            if result["vaccines"] is None:
+                result["vaccines"] = "none" if is_none else (
+                    _extract_date(seg) or today_d.strftime("%B %Y")
+                )
+
+        if _deworm_re.search(seg):
+            found.add("deworming")
+            if result["deworming"] is None:
+                dt = "none" if is_none else (_extract_date(seg) or today_d.strftime("%B %Y"))
+                result["deworming"] = {"date": dt, "medicine": None, "prevention_targets": []}
+
+        if _flea_re.search(seg):
+            found.add("flea_tick")
+            if result["flea_tick"] is None:
+                dt = "none" if is_none else (_extract_date(seg) or today_d.strftime("%B %Y"))
+                result["flea_tick"] = {"date": dt, "medicine": None, "prevention_targets": []}
+
+        if _blood_re.search(seg):
+            found.add("blood_test")
+            if result["blood_test"] is None:
+                result["blood_test"] = "none" if is_none else (
+                    _extract_date(seg) or today_d.strftime("%B %Y")
+                )
+
+    result["missing"] = [
+        k for k in ("vaccines", "deworming", "flea_tick", "blood_test") if k not in found
+    ]
+    return result
+
+
 async def _parse_preventive_care(
     text: str,
     context_categories: list[str] | None = None,
@@ -4103,18 +4227,18 @@ async def _parse_preventive_care(
         parsed = _apply_all_preventive_categories_intent(text, parsed)
         return _normalize_preventive_medicine_categories(parsed)
     except Exception as e:
-        logger.warning("Preventive care GPT parse failed: %s", str(e))
-        # Return all categories as missing so the caller re-asks rather than
-        # silently skipping vaccine type / flea brand questions and moving to
-        # documents with nothing stored.
-        return {
-            "vaccines": None,
-            "vaccine_specifics": [],
-            "deworming": None,
-            "flea_tick": None,
-            "blood_test": None,
-            "missing": ["vaccines", "deworming", "flea_tick", "blood_test"],
-        }
+        logger.warning(
+            "Preventive care GPT parse failed (%s: %s); falling back to keyword extraction",
+            type(e).__name__,
+            str(e),
+        )
+        # Use keyword/regex extraction so data the user already provided is
+        # not silently discarded when the API is temporarily unavailable.
+        # Only categories NOT detected by keyword will appear in missing[].
+        # Apply the same post-processors as the main path for semantic equivalence.
+        fallback = _keyword_parse_preventive_care(text)
+        fallback = _apply_all_preventive_categories_intent(text, fallback)
+        return _normalize_preventive_medicine_categories(fallback)
 
 
 def _contains_all_preventive_categories_intent(text: str) -> bool:
