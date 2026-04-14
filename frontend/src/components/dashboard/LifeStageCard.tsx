@@ -39,7 +39,8 @@ function markerPositionPct(
   const end   = stageBounds[stageIndex + 1];
   const progress = Math.max(0, Math.min(1, (ageMonths - start) / Math.max(1, end - start)));
   const raw = starts[stageIndex] + progress * STAGE_WIDTHS[stageIndex];
-  return Math.max(3, Math.min(raw, 97));
+  // Keep the 18px circle + 2px shadow fully inside the bar on all screen widths
+  return Math.max(4, Math.min(raw, 94));
 }
 
 export default function LifeStageCard({ data, compact = false }: LifeStageCardProps) {
@@ -89,30 +90,39 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
       </div>
 
       {/* Progress bar */}
-      <div style={{ position: "relative", marginBottom: 3 }}>
-        {/* Segments clipped to rounded bar shape */}
-        <div className="stage-bar" style={{ overflow: "hidden" }}>
-          {STAGE_LABELS.map((label, index) => (
-            <div
-              key={label}
-              style={{
-                position: "absolute",
-                left: `${starts[index]}%`,
-                width: `${STAGE_WIDTHS[index]}%`,
-                top: 0,
-                bottom: 0,
-                background: index === stageIndex ? "linear-gradient(90deg,#FF8C5A,#FF6B35)" : "#E0DDD9",
-                opacity: index === stageIndex ? 1 : 0.5,
-              }}
-            />
-          ))}
-        </div>
-        {/* Marker sits outside overflow:hidden so it can extend above/below the bar */}
+      <div className="stage-bar" style={{ marginBottom: 3 }}>
+        {STAGE_LABELS.map((label, index) => (
+          <div
+            key={label}
+            style={{
+              position: "absolute",
+              left: `${starts[index]}%`,
+              width: `${STAGE_WIDTHS[index]}%`,
+              top: 0,
+              bottom: 0,
+              background: index === stageIndex ? "linear-gradient(90deg,#FF8C5A,#FF6B35)" : "#E0DDD9",
+              opacity: index === stageIndex ? 1 : 0.5,
+              borderRadius: index === 0 ? "6px 0 0 6px" : index === STAGE_LABELS.length - 1 ? "0 6px 6px 0" : 0,
+            }}
+          />
+        ))}
         <div className="stage-marker" style={{ left: `${markerPct}%` }} />
       </div>
 
-      <div className="stage-caption" style={{ fontSize: 11, marginTop: 4, marginBottom: 12 }}>
-        {data.pet.name} is here · {ageLabel}
+      {/* Caption centred under the marker dot */}
+      <div style={{ position: "relative", height: 20, marginBottom: 12 }}>
+        <span
+          className="stage-caption"
+          style={{
+            position: "absolute",
+            fontSize: 11,
+            left: `${markerPct}%`,
+            transform: "translateX(-50%)",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {data.pet.name} is here · {ageLabel}
+        </span>
       </div>
 
       {/* Full-sentence insight cards */}
