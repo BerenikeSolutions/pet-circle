@@ -112,13 +112,30 @@ export default function CarePlanCard({
                   const id = itemId(item, section.title);
                   const inCartQty = cartQtyByItem[id] || 0;
                   const isAdded = !!addedIds[id];
-                  const canOrder = bucketKey !== "attend" && item.orderable && !!item.reason;
+                  // Food and supplement items don't display their reason text in the
+                  // continue bucket (hidden by the condition below), so requiring a
+                  // reason before showing the Order button would block newly-added
+                  // items (e.g. "omega") that haven't had a GPT reason generated yet.
+                  const isFoodOrSupplement = item.test_type === "food" || item.test_type === "supplement";
+                  const canOrder = bucketKey !== "attend" && (item.orderable || isFoodOrSupplement);
                   const ctaText = (item.cta_label || "Order Now").replace(/\s*[→>-]+\s*$/, "");
+
+                  // Format supplement names: capitalize first letter and append
+                  // "Supplement" suffix so "omega" renders as "Omega Supplement".
+                  // Guard against double-suffixing if the label already ends with it.
+                  const displayName = item.test_type === "supplement"
+                    ? (() => {
+                        const capitalized = item.name.charAt(0).toUpperCase() + item.name.slice(1);
+                        return /supplement$/i.test(capitalized.trim())
+                          ? capitalized
+                          : `${capitalized} Supplement`;
+                      })()
+                    : item.name;
 
                   return (
                     <div key={id} className="care-item">
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div className="care-name">{item.name}</div>
+                        <div className="care-name">{displayName}</div>
                         <div className="care-meta">
                           {item.test_type === "food" || item.test_type === "supplement"
                             ? item.freq

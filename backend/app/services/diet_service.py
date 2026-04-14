@@ -67,6 +67,59 @@ HOMEMADE_KW = [
     "apple", "banana", "watermelon", "papaya", "mango",
 ]
 
+# ── Supplement ambiguity resolution ─────────────────────────────────
+SUPPLEMENT_AMBIGUITY_MAP: dict[str, list[str]] = {
+    "omega": ["Omega-3", "Omega-6", "Omega-9"],
+    "vitamin b": ["B1", "B2", "B3", "B5", "B6", "B7", "B9", "B12", "B-complex"],
+    "collagen": ["Type I", "Type II", "Type III"],
+    "probiotics": ["Lactobacillus spp.", "Bifidobacterium spp.", "Enterococcus spp.", "multi-strain blends"],
+    "joint supplement": ["Glucosamine", "Chondroitin", "MSM", "Hyaluronic acid", "combination formulas"],
+    "calming supplement": ["L-theanine", "Melatonin", "Chamomile", "Valerian root", "Tryptophan blends"],
+    "skin & coat supplement": ["Omega fatty acids", "Biotin", "Zinc", "Vitamin E", "combination formulas"],
+    "digestive supplement": ["Probiotics", "Prebiotics", "Digestive enzymes", "fiber blends"],
+    "immune support": ["Beta-glucans", "Colostrum", "Vitamins", "Herbal blends"],
+    "herbal supplement": ["Ginseng types", "Ashwagandha extracts", "Turmeric/curcumin forms"],
+}
+
+
+def resolve_supplement_coverage(label: str) -> list[str] | None:
+    """Return covered sub-types for a generic supplement label, or None if specific.
+
+    Matching rule: normalized label equals a key, OR starts with a key where
+    the next character is NOT a hyphen or digit (which indicates a specific
+    variant, e.g. "Omega-3" or "B12").
+    Keys are tested longest-first to avoid shorter keys shadowing longer ones.
+    """
+    normalized = label.strip().lower()
+    for key in sorted(SUPPLEMENT_AMBIGUITY_MAP, key=len, reverse=True):
+        if normalized == key:
+            return SUPPLEMENT_AMBIGUITY_MAP[key]
+        if normalized.startswith(key) and len(normalized) > len(key):
+            next_char = normalized[len(key)]
+            if next_char != "-" and not next_char.isdigit():
+                return SUPPLEMENT_AMBIGUITY_MAP[key]
+    return None
+
+
+def expand_supplement_labels(labels: list[str]) -> list[str]:
+    """Expand ambiguous generic supplement labels to their covered sub-types.
+
+    Specific labels are kept as-is. Result is deduplicated (insertion order).
+    Example: ["Omega", "Omega-3"] → ["Omega-3", "Omega-6", "Omega-9"]
+    ("Omega-3" is dropped because it was already added when "Omega" expanded.)
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for label in labels:
+        expanded = resolve_supplement_coverage(label)
+        entries = expanded if expanded is not None else [label]
+        for entry in entries:
+            if entry not in seen:
+                seen.add(entry)
+                result.append(entry)
+    return result
+
+
 # ── Frequency word → multiplier and period ──────────────────────────
 _FREQ_WORDS: dict[str, tuple[int, str]] = {
     "daily": (1, "day"),

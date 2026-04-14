@@ -37,7 +37,11 @@ from app.models.diet_item import DietItem
 from app.models.food_nutrition_cache import FoodNutritionCache
 from app.models.nutrition_target_cache import NutritionTargetCache
 from app.models.pet import Pet
-from app.services.diet_service import split_diet_items_by_type
+from app.services.diet_service import (
+    expand_supplement_labels,
+    resolve_supplement_coverage,
+    split_diet_items_by_type,
+)
 from app.services.weight_service import DEFAULT_RANGE as DEFAULT_IDEAL_WEIGHT_RANGE
 from app.services.weight_service import get_ideal_range
 from app.utils.retry import retry_openai_call
@@ -684,6 +688,12 @@ async def _call_openai_combined_meal_estimation(
             line += f" — Quantity: not specified{vet_suffix}"
         else:
             line += " — Quantity: not specified"
+        # Append coverage note for ambiguous generic supplement names so the
+        # LLM does not flag covered sub-types (e.g. Omega-3/6/9) as missing.
+        if item.type == "supplement":
+            coverage = resolve_supplement_coverage(item.label or "")
+            if coverage:
+                line += f" [covers: {', '.join(coverage)}]"
         prompt_parts.append(line)
 
     user_prompt = "\n".join(prompt_parts)
@@ -1005,7 +1015,7 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
 
     split_items = split_diet_items_by_type(diet_items)
     food_labels = split_items["foods"] + split_items["other"]
-    supplement_labels = split_items["supplements"]
+    supplement_labels = expand_supplement_labels(split_items["supplements"])
 
     recommendation = await generate_recommendation(
         pet.name,
