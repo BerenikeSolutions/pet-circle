@@ -26,6 +26,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.core.constants import MAX_CONCURRENT_MESSAGE_PROCESSING, MAX_QUEUED_MESSAGES
 from app.core.log_sanitizer import mask_phone, sanitize_payload
 from app.core.rate_limiter import rate_limiter
 from app.core.security import verify_webhook_signature
@@ -33,6 +34,70 @@ from app.database import get_db
 from app.models.message_log import MessageLog
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Entry-point concurrency control
+#
+# Every inbound WhatsApp message — text, button, image, document — spawns a
+# background task via asyncio.create_task(). Without a gate here, a traffic
+# spike of 200 messages creates 200 concurrent coroutines all immediately
+# opening a DB session, exhausting the pool (ceiling: 25 connections) and
+# triggering SSL termination on Supabase's pooler.
+#
+# _message_processing_semaphore caps active tasks at MAX_CONCURRENT_MESSAGE_PROCESSING.
+# _message_queue_depth tracks active + waiting tasks so we can reject new ones
+# once the queue is full (backpressure), rather than letting them pile up
+# indefinitely on the semaphore.
+#
+# Inner semaphores (_upload_processing_semaphore, _extraction_semaphore) still
+# apply per-stage limits within this outer bound — they are not replaced by this.
+# ---------------------------------------------------------------------------
+_message_processing_semaphore = asyncio.Semaphore(MAX_CONCURRENT_MESSAGE_PROCESSING)
+_message_queue_depth: int = 0
+
+
+async def _safe_process_message(message_data: dict) -> None:
+    """
+    Entry-point wrapper for _process_message_background.
+
+    Acquires the global message processing semaphore before starting work,
+    ensuring at most MAX_CONCURRENT_MESSAGE_PROCESSING tasks run concurrently
+    across all message types. Rejects the task immediately if the queue is
+    already at capacity (MAX_QUEUED_MESSAGES), sending the user a retry prompt
+    instead of queuing another waiting coroutine.
+    """
+    global _message_queue_depth
+
+    from_number = message_data.get("from_number", "unknown")
+
+    if _message_queue_depth >= MAX_QUEUED_MESSAGES:
+        logger.warning(
+            "Message queue full (%d/%d) — dropping message from %s",
+            _message_queue_depth, MAX_QUEUED_MESSAGES, mask_phone(from_number),
+        )
+        # Best-effort reply — if this also fails we log and move on.
+        try:
+            from app.database import get_fresh_session
+            from app.services.whatsapp_sender import send_text_message
+            _db = get_fresh_session()
+            try:
+                await send_text_message(
+                    _db, from_number,
+                    "We're a bit busy right now. Please try again in a moment.",
+                )
+            finally:
+                _db.close()
+        except Exception as _err:
+            logger.error("Failed to send queue-full reply to %s: %s", mask_phone(from_number), _err)
+        return
+
+    _message_queue_depth += 1
+    try:
+        async with _message_processing_semaphore:
+            await _process_message_background(message_data)
+    finally:
+        _message_queue_depth -= 1
+
 
 # --- Message deduplication cache ---
 # Meta may deliver the same webhook multiple times (retries, network issues).
@@ -110,7 +175,7 @@ async def _flush_user_messages(mobile: str) -> None:
         return
 
     if len(messages) == 1:
-        asyncio.create_task(_process_message_background(messages[0]))
+        asyncio.create_task(_safe_process_message(messages[0]))
         return
 
     # Combine all buffered text into a single message.
@@ -126,7 +191,7 @@ async def _flush_user_messages(mobile: str) -> None:
         len(messages),
         mask_phone(mobile),
     )
-    asyncio.create_task(_process_message_background(merged))
+    asyncio.create_task(_safe_process_message(merged))
 
 
 def _enqueue_text_or_dispatch(message_data: dict, debounce_seconds: float = _DEBOUNCE_SECONDS) -> None:
@@ -142,7 +207,7 @@ def _enqueue_text_or_dispatch(message_data: dict, debounce_seconds: float = _DEB
 
     # Non-text messages bypass debounce — process immediately.
     if msg_type != "text" or not mobile:
-        asyncio.create_task(_process_message_background(message_data))
+        asyncio.create_task(_safe_process_message(message_data))
         return
 
     # Cancel any pending flush for this user (they're still typing).

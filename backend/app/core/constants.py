@@ -60,6 +60,31 @@ MAX_CONCURRENT_EXTRACTIONS: int = 8
 # Peak load: 15 uploads + 8 extractions = 23 sessions — within pool ceiling of 25.
 MAX_CONCURRENT_UPLOAD_PROCESSING: int = 15
 
+# Maximum number of upload tasks allowed to queue (waiting on the semaphore)
+# system-wide at any one time. Once this threshold is hit, new upload tasks are
+# rejected immediately with a user-friendly retry message rather than being
+# queued. This prevents event loop overload from hundreds of waiting coroutines
+# during traffic spikes.
+# Rationale: MAX_CONCURRENT_UPLOAD_PROCESSING (15) active + 30 queued = 45 max
+# in-flight coroutines. Each waiting coroutine is ~2KB on the heap, so 45 costs
+# ~90KB — negligible. Above this we're likely under a DoS pattern, not real use.
+MAX_QUEUED_UPLOADS: int = 30
+
+# Maximum number of concurrent background message processing tasks system-wide.
+# This is the ENTRY-POINT semaphore — it gates every message type (text, button,
+# image, document) before any DB session is opened. Inner semaphores
+# (MAX_CONCURRENT_UPLOAD_PROCESSING, MAX_CONCURRENT_EXTRACTIONS) then apply
+# additional per-stage limits within this outer bound.
+# Sized at 20 to leave 5 connections free for webhook handler sessions and
+# other admin calls within the DB pool ceiling of 25.
+MAX_CONCURRENT_MESSAGE_PROCESSING: int = 20
+
+# Maximum number of messages allowed to queue waiting for the entry-point
+# semaphore. Above this threshold new tasks are rejected immediately rather
+# than queued, preventing event loop overload during traffic spikes.
+# 20 active + 50 queued = 70 max coroutines — well within safe bounds.
+MAX_QUEUED_MESSAGES: int = 50
+
 # Allowed MIME types for uploaded documents.
 # Only images (JPEG, PNG) and PDF are accepted.
 ALLOWED_MIME_TYPES: set[str] = {

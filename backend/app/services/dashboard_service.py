@@ -35,7 +35,7 @@ import logging
 from datetime import date, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.encryption import decrypt_field
@@ -48,6 +48,7 @@ from app.models.diet_item import DietItem
 from app.models.document import Document
 from app.models.pet import Pet
 from app.models.pet_ai_insight import PetAiInsight
+from app.models.custom_preventive_item import CustomPreventiveItem
 from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
 from app.models.reminder import Reminder
@@ -865,6 +866,27 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
                         or 0
                     ) > 0
                     if has_diet_items:
+                        return []
+                # If cache claims zero preventive items but records now exist,
+                # the cache was computed before document upload — force a refresh.
+                preventive_bullet_stale = any(
+                    isinstance(b, dict) and "0 preventive" in (b.get("label") or "").lower()
+                    for b in bullets
+                )
+                if preventive_bullet_stale:
+                    has_preventive = (
+                        db.query(func.count(PreventiveRecord.id))
+                        .outerjoin(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
+                        .outerjoin(CustomPreventiveItem, PreventiveRecord.custom_preventive_item_id == CustomPreventiveItem.id)
+                        .filter(
+                            PreventiveRecord.pet_id == pet_id,
+                            PreventiveRecord.last_done_date.isnot(None),
+                            or_(PreventiveMaster.is_core.is_(True), CustomPreventiveItem.id.isnot(None)),
+                        )
+                        .scalar()
+                        or 0
+                    ) > 0
+                    if has_preventive:
                         return []
                 return bullets
         except Exception:

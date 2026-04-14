@@ -37,6 +37,7 @@ from app.core.constants import (
     HELP_COMMANDS,
     MAX_CONCURRENT_UPLOAD_PROCESSING,
     MAX_DOCS_PER_SESSION,
+    MAX_QUEUED_UPLOADS,
     MAX_PENDING_DOCS_PER_PET,
     MAX_PETS_PER_USER,
     NUDGE_ACTION,
@@ -75,6 +76,14 @@ from app.services.document_upload import get_extraction_semaphore as _get_extrac
 # most 8 connections are held for upload work, leaving headroom in the pool for
 # webhook handler sessions and other background tasks.
 _upload_processing_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOAD_PROCESSING)
+
+# Backpressure counter — tracks how many upload tasks are currently active OR
+# waiting to acquire _upload_processing_semaphore. When this exceeds
+# MAX_QUEUED_UPLOADS, new uploads are rejected immediately rather than queued.
+# This bounds the number of coroutines blocked on the semaphore so an upload
+# spike cannot exhaust event loop memory with hundreds of waiting tasks.
+# Counter is incremented before semaphore acquisition and decremented in finally.
+_upload_queue_depth: int = 0
 
 # --- Batch upload tracking ---
 # Tracks recent upload timestamps per pet to enforce the 5-file batch limit.
@@ -1567,121 +1576,150 @@ async def _handle_media(db: Session, user, message_data: dict) -> None:
     # Track this upload in the in-memory batch window.
     _recent_uploads[pet_key].append(now)
 
-    # Gate download + DB writes so at most MAX_CONCURRENT_UPLOAD_PROCESSING
-    # tasks run this section at once. Without this, 20 simultaneous uploads
-    # would check out 20 DB connections concurrently, overwhelming the pool
-    # and triggering SSL termination on Supabase's side.
-    async with _upload_processing_semaphore:
-        # --- Download media from WhatsApp ---
-        media_result = await download_whatsapp_media(media_id)
-        if not media_result:
-            # Remove the tracked upload since download failed.
-            _recent_uploads[pet_key].pop()
-            await send_text_message(db, from_number, "Failed to download the file. Please try again.")
-            return
+    # --- Backpressure check ---
+    # If too many tasks are already waiting on the semaphore, reject this
+    # upload immediately instead of queuing another coroutine. This prevents
+    # event loop overload during traffic spikes (e.g. a user bulk-forwarding
+    # 50 files) without silently dropping messages — the user gets a clear
+    # "try again" message rather than an indefinite wait.
+    global _upload_queue_depth
+    if _upload_queue_depth >= MAX_QUEUED_UPLOADS:
+        logger.warning(
+            "Upload queue full (%d/%d) — rejecting upload for pet=%s mobile=%s",
+            _upload_queue_depth, MAX_QUEUED_UPLOADS,
+            pet_key, mask_phone(from_number),
+        )
+        _recent_uploads[pet_key].pop()
+        await send_text_message(
+            db, from_number,
+            "We're receiving a lot of uploads right now. "
+            "Please try again in a moment.",
+        )
+        return
 
-        file_content, detected_mime = media_result
+    _upload_queue_depth += 1
+    try:
+        # Gate download + DB writes so at most MAX_CONCURRENT_UPLOAD_PROCESSING
+        # tasks run this section at once. Without this, 20 simultaneous uploads
+        # would check out 20 DB connections concurrently, overwhelming the pool
+        # and triggering SSL termination on Supabase's side.
+        async with _upload_processing_semaphore:
+            # --- Download media from WhatsApp ---
+            media_result = await download_whatsapp_media(media_id)
+            if not media_result:
+                # Remove the tracked upload since download failed.
+                _recent_uploads[pet_key].pop()
+                await send_text_message(db, from_number, "Failed to download the file. Please try again.")
+                return
 
-        try:
-            filename = original_filename or f"{media_id}.{_mime_to_ext(detected_mime)}"
-            document = await process_document_upload(
-                db=db,
-                pet_id=pet.id,
-                user_id=user.id,
-                filename=filename,
-                file_content=file_content,
-                mime_type=detected_mime,
-                pet_name=pet.name,
-                source_wamid=message_id,
-            )
+            file_content, detected_mime = media_result
 
-            # Track this exact document in the current in-memory batch so the
-            # deferred extractor doesn't accidentally sweep unrelated pending docs.
-            _batch_document_ids.setdefault(pet_key, []).append(document.id)
-
-            # --- Immediate post-onboarding upload acknowledgement ---
-            # When a user sends documents AFTER onboarding, they wait through a
-            # 15s batch window + extraction time with no feedback.  Send a quick
-            # "Got it 🐾" on the FIRST document of a post-onboarding batch so the
-            # user knows their upload was received.  The detailed processing
-            # message still fires from the batch extractor once the window closes.
-            is_first_in_batch = len(_batch_document_ids[pet_key]) == 1
-            if is_first_in_batch and user.onboarding_state != "awaiting_documents":
-                try:
-                    await send_text_message(
-                        db,
-                        from_number,
-                        f"Got it 🐾 I'll update {pet.name}'s records once I've gone through "
-                        "what you sent. Feel free to share more documents — I'll process "
-                        "them together.",
-                    )
-                except Exception as ack_exc:
-                    logger.warning(
-                        "Immediate upload ack failed for pet=%s: %s", str(pet.id), ack_exc
-                    )
-
-            # Persist onboarding intent for this batch at upload time. The
-            # extraction pass later decides whether to finalize onboarding based
-            # on this flag AND whether the user asked to keep uploading more
-            # (see `is_upload_window_extended`).
-            if user.onboarding_state == "awaiting_documents":
-                _batch_is_onboarding[pet_key] = True
-                # Keep the deadline timer alive so auto-finalization still fires
-                # at the end of the window if the user goes silent.
-                _schedule_document_window_timer(
+            try:
+                filename = original_filename or f"{media_id}.{_mime_to_ext(detected_mime)}"
+                document = await process_document_upload(
+                    db=db,
+                    pet_id=pet.id,
                     user_id=user.id,
-                    from_number=from_number,
-                    deadline=user.doc_upload_deadline,
+                    filename=filename,
+                    file_content=file_content,
+                    mime_type=detected_mime,
+                    pet_name=pet.name,
+                    source_wamid=message_id,
                 )
-            else:
-                _batch_is_onboarding.setdefault(pet_key, False)
 
-            # Schedule (or reschedule) a deferred batch extraction.
-            # The timer resets with each new upload so extraction only starts
-            # after uploads have settled (_EXTRACTION_DELAY_SECONDS of silence).
-            _schedule_batch_extraction(
-                pet_id=pet.id,
-                pet_name=pet.name,
-                user_id=user.id,
-                from_number=from_number,
-            )
+                # Track this exact document in the current in-memory batch so the
+                # deferred extractor doesn't accidentally sweep unrelated pending docs.
+                _batch_document_ids.setdefault(pet_key, []).append(document.id)
 
-        except ValueError as e:
-            # Remove the tracked upload since storage failed.
-            _recent_uploads[pet_key].pop()
-            error_str = str(e)
-            if "not allowed" in error_str or "File type" in error_str:
-                # Unsupported MIME type (e.g. .docx): suppress per-file message.
-                # Track the count so it appears in the batch acknowledgment instead.
-                _unsupported_format_count[pet_key] = (
-                    _unsupported_format_count.get(pet_key, 0) + 1
-                )
-                # Schedule a timer so the acknowledgment fires even if no valid
-                # documents are added to the batch.
+                # --- Immediate post-onboarding upload acknowledgement ---
+                # When a user sends documents AFTER onboarding, they wait through a
+                # 15s batch window + extraction time with no feedback.  Send a quick
+                # "Got it 🐾" on the FIRST document of a post-onboarding batch so the
+                # user knows their upload was received.  The detailed processing
+                # message still fires from the batch extractor once the window closes.
+                is_first_in_batch = len(_batch_document_ids[pet_key]) == 1
+                if is_first_in_batch and user.onboarding_state != "awaiting_documents":
+                    try:
+                        await send_text_message(
+                            db,
+                            from_number,
+                            f"Got it 🐾 I'll update {pet.name}'s records once I've gone through "
+                            "what you sent. Feel free to share more documents — I'll process "
+                            "them together.",
+                        )
+                    except Exception as ack_exc:
+                        logger.warning(
+                            "Immediate upload ack failed for pet=%s: %s", str(pet.id), ack_exc
+                        )
+
+                # Persist onboarding intent for this batch at upload time. The
+                # extraction pass later decides whether to finalize onboarding based
+                # on this flag AND whether the user asked to keep uploading more
+                # (see `is_upload_window_extended`).
+                if user.onboarding_state == "awaiting_documents":
+                    _batch_is_onboarding[pet_key] = True
+                    # Keep the deadline timer alive so auto-finalization still fires
+                    # at the end of the window if the user goes silent.
+                    _schedule_document_window_timer(
+                        user_id=user.id,
+                        from_number=from_number,
+                        deadline=user.doc_upload_deadline,
+                    )
+                else:
+                    _batch_is_onboarding.setdefault(pet_key, False)
+
+                # Schedule (or reschedule) a deferred batch extraction.
+                # The timer resets with each new upload so extraction only starts
+                # after uploads have settled (_EXTRACTION_DELAY_SECONDS of silence).
                 _schedule_batch_extraction(
                     pet_id=pet.id,
                     pet_name=pet.name,
                     user_id=user.id,
                     from_number=from_number,
                 )
-            else:
-                # File-size or daily-limit errors: send immediately — these are
-                # batch-level constraints the user needs to know about right away.
-                await send_text_message(db, from_number, error_str)
-        except RuntimeError:
-            _recent_uploads[pet_key].pop()
-            # Always schedule the extraction timer even when this individual doc
-            # failed — other docs in the batch may have already succeeded and
-            # still need extraction + summary. Without this call, a DB error on
-            # one doc would leave successfully-uploaded docs with no timer and
-            # no user feedback.
-            _schedule_batch_extraction(
-                pet_id=pet.id,
-                pet_name=pet.name,
-                user_id=user.id,
-                from_number=from_number,
-            )
-            await send_text_message(db, from_number, "Upload failed. Please try again later.")
+
+            except ValueError as e:
+                # Remove the tracked upload since storage failed.
+                _recent_uploads[pet_key].pop()
+                error_str = str(e)
+                if "not allowed" in error_str or "File type" in error_str:
+                    # Unsupported MIME type (e.g. .docx): suppress per-file message.
+                    # Track the count so it appears in the batch acknowledgment instead.
+                    _unsupported_format_count[pet_key] = (
+                        _unsupported_format_count.get(pet_key, 0) + 1
+                    )
+                    # Schedule a timer so the acknowledgment fires even if no valid
+                    # documents are added to the batch.
+                    _schedule_batch_extraction(
+                        pet_id=pet.id,
+                        pet_name=pet.name,
+                        user_id=user.id,
+                        from_number=from_number,
+                    )
+                else:
+                    # File-size or daily-limit errors: send immediately — these are
+                    # batch-level constraints the user needs to know about right away.
+                    await send_text_message(db, from_number, error_str)
+            except RuntimeError:
+                _recent_uploads[pet_key].pop()
+                # Always schedule the extraction timer even when this individual doc
+                # failed — other docs in the batch may have already succeeded and
+                # still need extraction + summary. Without this call, a DB error on
+                # one doc would leave successfully-uploaded docs with no timer and
+                # no user feedback.
+                _schedule_batch_extraction(
+                    pet_id=pet.id,
+                    pet_name=pet.name,
+                    user_id=user.id,
+                    from_number=from_number,
+                )
+                await send_text_message(db, from_number, "Upload failed. Please try again later.")
+    finally:
+        # Always decrement the backpressure counter, whether the upload
+        # succeeded, failed, or was rejected by an exception. This ensures
+        # the counter stays accurate across all exit paths so future uploads
+        # are not incorrectly throttled by stale counts.
+        _upload_queue_depth -= 1
 
 
 def _schedule_batch_extraction(

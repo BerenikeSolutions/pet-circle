@@ -609,7 +609,9 @@ async def download_whatsapp_media(media_id: str) -> tuple[bytes, str] | None:
 
     Two-step process:
         1. GET the media URL from Meta's API.
-        2. Download the actual file content.
+        2. Stream the file content in chunks, aborting early if the file
+           exceeds MAX_UPLOAD_BYTES (10MB). This avoids loading an entire
+           oversized file into memory before validation can reject it.
 
     Args:
         media_id: The media ID from the incoming WhatsApp message.
@@ -618,7 +620,10 @@ async def download_whatsapp_media(media_id: str) -> tuple[bytes, str] | None:
         Tuple of (file_bytes, mime_type) on success, None on failure.
     """
     import asyncio as _asyncio
+    import io as _io
     import random as _random
+
+    from app.core.constants import MAX_UPLOAD_BYTES
 
     # Use the shared client for connection reuse. Media downloads use a
     # separate timeout (60s) because files can be large (up to 10MB).
@@ -648,20 +653,40 @@ async def download_whatsapp_media(media_id: str) -> tuple[bytes, str] | None:
                 logger.error("No URL in media response for media_id=%s", media_id)
                 return None
 
-            # Step 2: Download the file (longer timeout for large files)
-            file_response = await client.get(
+            # Step 2: Stream the file in 8KB chunks with a size guard.
+            # We abort immediately if accumulated bytes exceed MAX_UPLOAD_BYTES,
+            # avoiding downloading the full oversize file into memory.
+            # The same size limit is enforced again in validate_file_upload()
+            # after download — this is a cheap early-exit, not a replacement.
+            buffer = _io.BytesIO()
+            total_bytes = 0
+            _CHUNK_SIZE = 8192  # 8KB — small enough to stay responsive
+
+            async with client.stream(
+                "GET",
                 media_url,
                 headers={"Authorization": f"Bearer {settings.WHATSAPP_TOKEN}"},
                 timeout=60.0,
-            )
-            file_response.raise_for_status()
+            ) as file_response:
+                file_response.raise_for_status()
+                async for chunk in file_response.aiter_bytes(_CHUNK_SIZE):
+                    total_bytes += len(chunk)
+                    if total_bytes > MAX_UPLOAD_BYTES:
+                        logger.warning(
+                            "Media download aborted — exceeds size limit: "
+                            "media_id=%s, bytes_read=%d, limit=%d",
+                            media_id, total_bytes, MAX_UPLOAD_BYTES,
+                        )
+                        return None
+                    buffer.write(chunk)
 
+            file_bytes = buffer.getvalue()
             logger.info(
                 "Media downloaded: media_id=%s, mime=%s, size=%d",
-                media_id, mime_type, len(file_response.content),
+                media_id, mime_type, len(file_bytes),
             )
 
-            return file_response.content, mime_type
+            return file_bytes, mime_type
 
         except Exception as e:
             logger.error(

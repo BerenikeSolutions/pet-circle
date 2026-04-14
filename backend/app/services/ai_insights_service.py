@@ -746,8 +746,12 @@ async def generate_recognition_bullets(db: Session, pet: Pet) -> list[Bullet]:
             ),
         )
     )
+    # Match vaccine keywords against BOTH master and custom item names.
+    # Vaccines logged as custom items (master=NULL after outer-join) would
+    # never match a filter on PreventiveMaster.item_name alone.
     _vaccine_filter = or_(
-        *[PreventiveMaster.item_name.ilike(f"%{kw}%") for kw in _VACCINE_BULLET_TERMS]
+        *[PreventiveMaster.item_name.ilike(f"%{kw}%") for kw in _VACCINE_BULLET_TERMS],
+        *[CustomPreventiveItem.item_name.ilike(f"%{kw}%") for kw in _VACCINE_BULLET_TERMS],
     )
     vaccine_count = (
         _base_preventive_q.filter(_vaccine_filter).count()
