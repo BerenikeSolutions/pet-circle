@@ -197,7 +197,7 @@ body {
 
 .stage-marker {
   position: absolute;
-  top: 50%;
+  top: 4px; /* vertically centre over the 8px bar */
   transform: translate(-50%, -50%);
   width: 18px;
   height: 18px;
@@ -205,6 +205,7 @@ body {
   background: var(--orange);
   border: 3px solid white;
   box-shadow: 0 0 0 2px var(--orange);
+  pointer-events: none;
 }
 
 .stage-caption {

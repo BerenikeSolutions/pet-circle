@@ -14,10 +14,10 @@ interface LifeStageCardProps {
   compact?: boolean;
 }
 
-const INSIGHT_ACCENT: Record<LifeStageInsight["color"], string> = {
-  orange:  "#FF6B35",
-  green:   "#1e8c3a",
-  neutral: "#C8C3BB",
+const INSIGHT_BG: Record<LifeStageInsight["color"], { bg: string; color: string }> = {
+  orange:  { bg: "var(--ta)",  color: "#b85c00" },
+  green:   { bg: "var(--tg)",  color: "#1e8c3a" },
+  neutral: { bg: "#F0EDE9",    color: "var(--t2)" },
 };
 
 function getStageStarts() {
@@ -38,7 +38,8 @@ function markerPositionPct(
   const start = stageBounds[stageIndex];
   const end   = stageBounds[stageIndex + 1];
   const progress = Math.max(0, Math.min(1, (ageMonths - start) / Math.max(1, end - start)));
-  return Math.min(starts[stageIndex] + progress * STAGE_WIDTHS[stageIndex], 98);
+  const raw = starts[stageIndex] + progress * STAGE_WIDTHS[stageIndex];
+  return Math.max(3, Math.min(raw, 97));
 }
 
 export default function LifeStageCard({ data, compact = false }: LifeStageCardProps) {
@@ -88,22 +89,25 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
       </div>
 
       {/* Progress bar */}
-      <div className="stage-bar" style={{ marginBottom: 3 }}>
-        {STAGE_LABELS.map((label, index) => (
-          <div
-            key={label}
-            style={{
-              position: "absolute",
-              left: `${starts[index]}%`,
-              width: `${STAGE_WIDTHS[index]}%`,
-              top: 0,
-              bottom: 0,
-              background: index === stageIndex ? "linear-gradient(90deg,#FF8C5A,#FF6B35)" : "#E0DDD9",
-              opacity: index === stageIndex ? 1 : 0.5,
-              borderRadius: index === 0 ? "6px 0 0 6px" : index === STAGE_LABELS.length - 1 ? "0 6px 6px 0" : 0,
-            }}
-          />
-        ))}
+      <div style={{ position: "relative", marginBottom: 3 }}>
+        {/* Segments clipped to rounded bar shape */}
+        <div className="stage-bar" style={{ overflow: "hidden" }}>
+          {STAGE_LABELS.map((label, index) => (
+            <div
+              key={label}
+              style={{
+                position: "absolute",
+                left: `${starts[index]}%`,
+                width: `${STAGE_WIDTHS[index]}%`,
+                top: 0,
+                bottom: 0,
+                background: index === stageIndex ? "linear-gradient(90deg,#FF8C5A,#FF6B35)" : "#E0DDD9",
+                opacity: index === stageIndex ? 1 : 0.5,
+              }}
+            />
+          ))}
+        </div>
+        {/* Marker sits outside overflow:hidden so it can extend above/below the bar */}
         <div className="stage-marker" style={{ left: `${markerPct}%` }} />
       </div>
 
@@ -115,18 +119,17 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
       {insights.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {insights.map((insight, i) => {
-            const accent = INSIGHT_ACCENT[insight.color] ?? INSIGHT_ACCENT.neutral;
+            const style = INSIGHT_BG[insight.color] ?? INSIGHT_BG.neutral;
             return (
               <div
                 key={i}
                 style={{
-                  background: "#F0EDE9",
+                  background: style.bg,
                   borderRadius: 10,
-                  borderLeft: `3px solid ${accent}`,
                   padding: "10px 14px",
                   fontSize: 13,
                   fontWeight: 500,
-                  color: "var(--t1)",
+                  color: style.color,
                   lineHeight: 1.45,
                   overflowWrap: "break-word",
                   wordBreak: "break-word",

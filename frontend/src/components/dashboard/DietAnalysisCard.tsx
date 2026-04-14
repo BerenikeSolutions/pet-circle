@@ -46,6 +46,21 @@ interface DietAnalysisCardProps {
 
 const NUTR_COLOR = { green: "#34C759", amber: "#FF9F1C", red: "#FF3B30" };
 
+const MACRO_LABELS = ["Protein", "Fat", "Carbs", "Fibre"] as const;
+
+/** Empty donut ring — grey track + dash centre, shown when macro data is unavailable. */
+function EmptyDonut({ size = 64 }: { size?: number }) {
+  const sw = 7;
+  const r = (size - sw * 2) / 2;
+  const cx = size / 2;
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} xmlns="http://www.w3.org/2000/svg">
+      <circle cx={cx} cy={cx} r={r} fill="none" stroke="#E8E4DF" strokeWidth={sw} />
+      <text x={cx} y={cx + 5} textAnchor="middle" fontFamily="DM Sans,sans-serif" fontSize="14" fontWeight="700" fill="#C7C7CC">—</text>
+    </svg>
+  );
+}
+
 const AMBER_PILL_BG  = "#FFF3E0";
 const AMBER_PILL_TXT = "#b85c00";
 const RED_PILL_BG    = "#FFD6D6";
@@ -166,16 +181,40 @@ export default function DietAnalysisCard({ token, compact = false }: DietAnalysi
 
   const n = nutrition;
 
-  // Empty state
-  if (!n || (!n.calories_per_day && !n.protein_pct && !n.fat_pct)) {
+  // No macros available — show placeholder donuts with contextual message
+  if (!n?.calories_per_day && !n?.protein_pct && !n?.fat_pct) {
     const hasDietItems = n?.has_diet_items ?? false;
+    const message = hasDietItems
+      ? "Portion sizes not specified — add daily gram amounts to your food items to see the calorie and macro breakdown."
+      : "Log your pet's food and portion sizes to see the calorie and macro breakdown.";
     return (
       <div className={compact ? undefined : "card"}>
         <div className="sec-lbl">Diet Analysis</div>
-        <div style={{ color: "var(--t3)", fontSize: 13, padding: "14px 4px", lineHeight: 1.5 }}>
-          {hasDietItems
-            ? "Add portion sizes to your food items to see the calorie and macro breakdown."
-            : "Not enough diet information yet. Log meals and portion sizes to see the breakdown across calories, protein, fat and fibre."}
+
+        {/* Placeholder macro grid */}
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(4, 1fr)",
+          gap: 6,
+          textAlign: "center",
+          margin: "10px 0 12px",
+        }}>
+          {MACRO_LABELS.map((label) => (
+            <div key={label} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+              <EmptyDonut size={64} />
+              <div style={{ fontSize: 10, fontWeight: 700, color: "var(--t1)" }}>{label}</div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{
+          borderTop: "1px solid var(--border)",
+          paddingTop: 10,
+          fontSize: 12,
+          color: "var(--t3)",
+          lineHeight: 1.5,
+        }}>
+          {message}
         </div>
       </div>
     );
