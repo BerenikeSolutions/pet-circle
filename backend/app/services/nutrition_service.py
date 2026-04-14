@@ -549,8 +549,13 @@ def _parse_json_from_response(raw: str) -> dict | None:
     if text.startswith("```"):
         # Remove opening fence (optionally with language tag like ```json)
         lines = text.split("\n")
-        if len(lines) > 2:
-            text = "\n".join(lines[1:-1])  # Skip first and last line
+        # Only strip the last line if it is a closing fence — not JSON content.
+        # If GPT omits the closing fence (truncated response), lines[-1] is
+        # actual JSON and must be kept.
+        has_closing_fence = lines[-1].strip() == "```"
+        if len(lines) > 1:
+            end = -1 if has_closing_fence else len(lines)
+            text = "\n".join(lines[1:end])
         else:
             text = ""
 
