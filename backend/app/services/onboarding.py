@@ -3665,16 +3665,27 @@ async def _parse_diet_input(text: str) -> list[tuple[str, str, str]]:
 
 
 def _strip_json_fences(raw: str) -> str:
-    """Strip markdown code fences from GPT JSON output.
+    """Strip markdown code fences from a model JSON response.
 
-    Raises ValueError when the result is empty so callers receive a clear
-    error message instead of a cryptic 'Expecting value' JSONDecodeError.
+    Also handles the case where the model prepends explanatory text before the
+    JSON object (e.g. "Here is the result:\n{...}"), which causes json.loads to
+    fail with JSONDecodeError at char 0.  After fence-stripping, if the result
+    does not start with '{', we scan for the outermost { ... } pair and extract
+    only that portion.
+
+    Raises ValueError when no JSON object can be found in the response.
     """
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
         if raw.endswith("```"):
             raw = raw[:-3]
         raw = raw.strip()
+    # If there is non-JSON preamble, extract the first complete JSON object.
+    if raw and not raw.startswith("{"):
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end > start:
+            raw = raw[start : end + 1]
     if not raw:
         raise ValueError("Claude returned an empty response body")
     return raw
@@ -4026,8 +4037,8 @@ def _keyword_parse_preventive_care(text: str) -> dict:
         return None
 
     _vaccine_re = re.compile(
-        r"\b(?:vaccine|vaccin|vaccinat|jabs?|shots?|rabies|dhppi?|bordetella|"
-        r"core\s+vaccine|kennel\s+cough|leptospirosis|corona(?:virus)?|fvrcp|felv)\b"
+        r"\b(?:vaccin\w*|jabs?|shots?|rabies|dhppi?|bordetella|"
+        r"core\s+vaccines?|kennel\s+cough|leptospirosis|corona(?:virus)?|fvrcp|felv)\b"
     )
     _deworm_re = re.compile(r"\b(?:deworm(?:ing)?|worming|worm(?:ed|ing)?)\b")
     _flea_re = re.compile(
