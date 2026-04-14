@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import Boolean, Column, Date, DateTime, ForeignKey, String, UniqueConstraint
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 
 from app.database import Base
@@ -51,6 +51,8 @@ class Condition(Base):
     name = Column(String(200), nullable=False)
     diagnosis = Column(String(500), nullable=True)
     condition_type = Column(String(20), nullable=False, default="chronic")  # chronic | episodic | resolved
+    condition_status = Column(String(20), nullable=True)  # active | resolved | null (from Health Prompt v2)
+    episode_dates = Column(JSONB, nullable=False, default=list)  # sorted list of YYYY-MM-DD strings
     diagnosed_at = Column(Date, nullable=True)
     notes = Column(String(1000), nullable=True)
     icon = Column(String(10), nullable=True)  # Emoji icon for condition display

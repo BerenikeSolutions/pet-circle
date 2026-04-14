@@ -29,6 +29,7 @@ class ConditionMonitoring(Base):
     name = Column(String(200), nullable=False)
     frequency = Column(String(100), nullable=True)
     next_due_date = Column(Date, nullable=True)  # When next check is due
+    recheck_due_date = Column(Date, nullable=True)  # Explicit follow-up date from prescription
     last_done_date = Column(Date, nullable=True)  # When last performed
     result_summary = Column(String(200), nullable=True)  # Short finding from last check
 

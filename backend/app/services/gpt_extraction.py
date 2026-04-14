@@ -837,7 +837,7 @@ REQUIRED_EXTRACTION_KEYS = {"item_name", "last_done_date"}
 # Instructs GPT to extract structured preventive health data only.
 # No medical advice. No inference beyond the document content.
 EXTRACTION_SYSTEM_PROMPT = (
-    "You are a veterinary document data extractor. "
+    "You are a veterinary document data extractor.\n"
     "Analyze the provided document and return a JSON object with these keys:\n"
     '  - "document_name": string (a short descriptive name for this document, '
     "e.g., 'Blood Test Report', 'Vaccination Certificate', 'Deworming Record', "
@@ -846,7 +846,7 @@ EXTRACTION_SYSTEM_PROMPT = (
     "(set to 'not_pet_related' if the document is clearly NOT a pet/veterinary document, "
     "e.g., a human medical report, invoice, random photo, etc.)\n"
     '  - "document_category": one of "Blood Report", "Urine Report", "Imaging", '
-    '"Prescription", "PCR & Parasite Panel", "Vaccination", "Other" — '
+    '"Prescription", "PCR & Parasite Panel", "Vaccination", "Other" --- '
     "pick the most specific match: "
     "Blood Report for CBC/biochemistry/haematology/blood test reports, "
     "Urine Report for urinalysis/urine culture/urine sensitivity reports, "
@@ -855,7 +855,7 @@ EXTRACTION_SYSTEM_PROMPT = (
     "PCR & Parasite Panel for PCR/parasite/tick-borne disease panels, "
     "Vaccination for vaccine certificates/immunisation records, "
     "Other for anything else\n"
-    '  - "diagnostic_summary": string or null (for Diagnostic documents only — '
+    '  - "diagnostic_summary": string or null (for Diagnostic documents only --- '
     "provide a 1-2 sentence plain-language summary of key findings; null otherwise)\n"
     '  - "diagnostic_values": array (for Diagnostic reports), each with:\n'
     '    - "test_type": "blood" | "urine" | "fecal" | "xray"\n'
@@ -870,22 +870,58 @@ EXTRACTION_SYSTEM_PROMPT = (
     '    - "status_flag": "low" | "normal" | "high" | "abnormal" | null\n'
     '    - "observed_at": date string (same accepted formats) or null\n'
     '  - "conditions": array of objects (diagnosed diseases/conditions found in the document; [] if none), each with:\n'
-    '    - "condition_name": string — the NAME of a diagnosed DISEASE, DISORDER, or SYNDROME only '
+    '    - "condition_name": string --- the NAME of a diagnosed DISEASE, DISORDER, or SYNDROME only '
     '(e.g. "Hip Dysplasia", "Diabetes Mellitus", "Otitis Externa", "Skin Allergy"). '
     'NEVER use a medication, drug, supplement, or vaccine brand as condition_name '
     '(e.g. do NOT write "Simparica", "Doxycycline", "NexGard", "Omega-3" as a condition_name).\n'
-    '    - "condition_type": "chronic" | "episodic" | "resolved"\n'
+    '    - "condition_type": "chronic" | "acute" | "episodic" | "recurrent"\n'
+    '      NOTE: "acute" and "episodic" are interchangeable --- use whichever term appears in the document.\n'
+    '      If neither term appears explicitly, default to "acute" for single or short-term conditions.\n'
+    '      "resolved" is NOT a valid condition_type --- it belongs in condition_status only.\n'
+    '    - "condition_status": "active" | "resolved" | null\n'
+    '      Set to "resolved" if the document explicitly states the condition is resolved, cured, or no longer active.\n'
+    '      Set to "active" if the condition is described as ongoing or being treated. Set to null if not stated.\n'
     '    - "diagnosis": string or null (brief diagnosis description)\n'
     '    - "diagnosed_at": date string or null\n'
-    '    - "medications": array of objects ([] if none) — drugs/products prescribed TO TREAT this condition, each with:\n'
+    '    - "episode_dates": array of date strings --- ALL dates on which this condition was recorded, treated,\n'
+    '      or mentioned in this document. Always include diagnosed_at here if known. Add any additional\n'
+    '      encounter or treatment dates found in the document for this condition. [] if none found.\n'
+    '    - "medications": array of objects ([] if none) --- drugs/products prescribed TO TREAT this condition, each with:\n'
     '      - "name": string (medication/drug name)\n'
     '      - "dose": string or null\n'
     '      - "frequency": string or null (e.g., "Once daily", "Twice daily")\n'
     '      - "route": string or null (e.g., "oral", "topical", "injection")\n'
+    '      - "end_date": string or null --- the last date of the treatment course as explicitly stated in the\n'
+    '        document (e.g., "give for 5 days" computed from a start date, or a specific stop date written on\n'
+    '        the prescription). Only populate if derivable from the document itself. Do NOT infer from clinical norms.\n'
     '    - "monitoring": array of objects ([] if none), each with:\n'
     '      - "name": string (e.g., "Blood Work", "Follow-up Vet Visit")\n'
     '      - "frequency": string or null (e.g., "Every 6 months", "Yearly")\n'
-    '  - "preventive_medications": array of objects ([] if none) — preventive medicines used for deworming and/or flea/tick control even when no diagnosis is present, each with:\n'
+    '      - "recheck_due_date": string or null --- a specific follow-up or recheck date as explicitly stated\n'
+    '        in the document (e.g., "follow up after 15 days", "repeat test after 3 months", "next due: Jan 2025").\n'
+    '        Compute only if a relative interval AND a reference date are both present in the document.\n'
+    '        Do NOT use external clinical guidelines or assumptions to infer this date.\n'
+    '  - "standalone_medications": array of objects ([] if none) --- medications explicitly prescribed in the\n'
+    '    document that are NOT linked to any named diagnosis or condition. Captures drugs written on a\n'
+    '    prescription whose clinical indication is not stated, enabling future linkage when more context is available.\n'
+    '    Each with:\n'
+    '    - "name": string (medication/drug name as written)\n'
+    '    - "dose": string or null\n'
+    '    - "frequency": string or null\n'
+    '    - "route": string or null\n'
+    '    - "end_date": string or null (same derivation rule as conditions[].medications[].end_date)\n'
+    '    - "notes": string or null (any additional context written near the medication, e.g., duration phrase)\n'
+    '  - "recommendations": array of objects ([] if none) --- non-medication clinical guidance written by the\n'
+    '    vet as part of the treatment or management plan. Captures diet instructions, activity restrictions,\n'
+    '    rest advice, feeding plans, and similar directives that are not drugs or supplements.\n'
+    '    Each with:\n'
+    '    - "type": "diet" | "activity" | "rest" | "follow_up" | "other"\n'
+    '    - "description": string (exact or close paraphrase of what is written)\n'
+    '    - "linked_condition": string or null (condition_name this recommendation relates to, if inferable from document)\n'
+    '    - "duration": string or null (e.g., "until recheck", "7 days", if stated)\n'
+    '    - "notes": string or null\n'
+    '  - "preventive_medications": array of objects ([] if none) --- preventive medicines used for '
+    "deworming and/or flea/tick control even when no diagnosis is present, each with:\n"
     '    - "name": string (medicine/product name as written)\n'
     '    - "start_date": date string or null\n'
     '    - "prevention_targets": array containing one or both of "deworming", "flea_tick"\n'
@@ -906,37 +942,24 @@ EXTRACTION_SYSTEM_PROMPT = (
     '  - "vaccination_details": array of objects (for vaccine records; [] if none). '
     "Each object may include: vaccine_name, vaccine_name_raw, dose, dose_unit, "
     "route, manufacturer, batch_number, next_due_date, administered_by, notes\n"
-    '  - "vet_diet_recommendations": array of objects ([] if none) — dietary instructions or food recommendations '
-    "explicitly written by the vet on a Prescription. Only populate for Prescription documents. "
-    "Capture items such as prescribed therapeutic diets, foods to feed, foods to avoid, or feeding guidelines. "
-    "Each object:\n"
-    '    - "food_label": string (the food/diet name as written, e.g. "Royal Canin Renal", "boiled chicken and rice", "low-fat diet")\n'
-    '    - "food_type": "packaged" | "homemade" | "supplement" | "avoid" '
-    '(use "packaged" for commercial brands, "homemade" for home-cooked/fresh food, "supplement" for vitamins/oils/probiotics, '
-    '"avoid" for foods the vet says not to feed)\n'
-    '    - "detail": string or null (feeding instruction, e.g. "twice daily", "for 3 months", "avoid completely")\n'
-    '  - "clinical_exam": object or null — ONLY for Prescriptions / vet visit records. '
-    "Capture any clinical examination values written on the document, each field null when not present:\n"
-    '    - "weight_kg": number or null (pet body weight in kilograms as recorded by the vet)\n'
-    '    - "temperature_c": number or null (body temperature in °C — if document states °F, convert to °C)\n'
-    '    - "pulse_bpm": number or null (heart rate / pulse, beats per minute)\n'
-    '    - "respiration_rpm": number or null (respiration rate, breaths per minute)\n'
-    '    - "mucous_membranes": string or null (e.g., "pink moist", "pale", "icteric")\n'
-    '    - "clinical_findings": string or null (other examination notes: hydration, body condition score, etc.)\n'
-    '    - "in_clinic_test_values": array of objects ([] if none) — any in-clinic test values '
-    "written on the prescription such as blood glucose, PCV, SpO2. "
-    'Each entry: {"parameter_name": string, "value_numeric": number or null, "value_text": string or null, "unit": string or null}\n'
+    '  - "clinical_exam": object or null --- ONLY for Prescriptions / vet visit records. '
+    "Capture any clinical examination values written on the document:\n"
+    '    - "weight_kg": number or null\n'
+    '    - "temperature_c": number or null (if degF, convert to degC)\n'
+    '    - "pulse_bpm": number or null\n'
+    '    - "respiration_rpm": number or null\n'
+    '    - "mucous_membranes": string or null\n'
+    '    - "clinical_findings": string or null\n'
+    '    - "in_clinic_test_values": array --- in-clinic test values (blood glucose, PCV, SpO2, etc.)\n'
+    '      Each entry: {"parameter_name": string, "value_numeric": number|null, '
+    '"value_text": string|null, "unit": string|null}\n'
     '  - "items": array of objects, each with:\n'
     '    - "item_name": string (MUST be one of the tracked items listed below)\n'
-    '    - "last_done_date": string (the date the item was done, '
-    "in DD/MM/YYYY or DD-MM-YYYY or DD-Mon-YYYY or DD Month YYYY or YYYY-MM-DD format. "
-    "ALWAYS use 4-digit years (e.g. 2025, not 25). "
-    "If the year is written as 2 digits (e.g. '25'), expand it to 20XX (e.g. 2025). "
-    "If the date is unclear, illegible, or ambiguous, set last_done_date to null — do NOT guess.)\n"
-    '    - "dose": string or null (dose amount, if present in the document)\n'
-    '    - "doctor_name": string or null (doctor name for that line item, if present)\n'
-    '    - "clinic_name": string or null (clinic name for that line item, if present)\n'
-    '    - "batch_number": string or null (vaccine lot/batch number, if present)\n\n'
+    '    - "last_done_date": string (ALWAYS use 4-digit years; null if unclear)\n'
+    '    - "dose": string or null\n'
+    '    - "doctor_name": string or null\n'
+    '    - "clinic_name": string or null\n'
+    '    - "batch_number": string or null\n\n'
     "Tracked preventive items (use these EXACT names):\n"
     "  - Rabies Vaccine\n"
     "  - Rabies (Nobivac RL)\n"
@@ -952,61 +975,73 @@ EXTRACTION_SYSTEM_PROMPT = (
     "  - Dental Check\n\n"
     "Rules:\n"
     "- Extract ONLY items that match the tracked preventive items above.\n"
-    "- A blood test report counts as 'Preventive Blood Test' — use the report date.\n"
+    "- A blood test report counts as 'Preventive Blood Test' --- use the report date.\n"
     "- Do NOT provide medical advice or interpretation.\n"
-    "- Do NOT infer dates — only extract what is explicitly stated.\n"
+    "- Do NOT infer dates --- only extract what is explicitly stated.\n"
     "- Extract the pet's name EXACTLY as written in the document (if present).\n"
-    "- For vaccination records, extract all available vaccine details (dose, batch, doctor, clinic, next due date) without guessing.\n"
-    "- For dog vaccination cards, include each administered vaccine row in items (e.g., DHPPi, Rabies, Kennel Cough, CCoV) when a done date is present.\n"
-    "- For vaccination cards/booklets, treat the administered date as the handwritten/typed DATE GIVEN for each row.\n"
+    "- For vaccination records, extract all available vaccine details without guessing.\n"
+    "- For dog vaccination cards, include each administered vaccine row in items when a done date is present.\n"
     "- NEVER use vaccine sticker metadata dates (manufacturing/expiry/lot label dates) as last_done_date.\n"
-    "- In vaccination documents, do not add Annual Checkup to items unless a separate checkup event is explicitly documented outside the vaccine table.\n"
-    "- Capture next_due_date for each vaccine row whenever it is visible.\n"
-    "- For X-ray reports: use test_type 'xray', anatomical region as parameter_name, finding as value_text.\n"
-    "- For fecal reports: use test_type 'fecal', parasite name as parameter_name, result as value_text, status_flag normal/abnormal.\n"
+    "- In vaccination documents, do not add Annual Checkup unless a separate checkup event is documented.\n"
+    "- Capture next_due_date for each vaccine row whenever visible.\n"
+    "- For X-ray reports: test_type 'xray', anatomical region as parameter_name, finding as value_text.\n"
+    "- For fecal reports: test_type 'fecal', parasite name as parameter_name, result as value_text.\n"
     "- For conditions: extract diagnosed diseases/disorders/syndromes with their medications and monitoring.\n"
-    "- condition_name must be the DISEASE/DISORDER name only — never a drug, supplement, or vaccine brand name.\n"
+    "- condition_name must be the DISEASE/DISORDER name only --- never a drug, supplement, or vaccine brand.\n"
+    "- \"acute\" and \"episodic\" are interchangeable labels for condition_type. Use the term from the document; "
+    "default to \"acute\" if neither is written and the condition is short-term or single-episode.\n"
+    "- \"resolved\" is NOT a valid condition_type value. If the document states a condition is resolved, "
+    "set condition_type to whatever clinical type applies (chronic/acute/episodic/recurrent) AND set "
+    "condition_status to \"resolved\".\n"
+    "- episode_dates must capture every date the condition is mentioned, treated, or encountered in this "
+    "document. This enables downstream recurrence analysis across multiple documents.\n"
+    "- medications[].end_date must be extracted only from explicit document text (e.g., \"for 7 days\" from "
+    "a known start date, or a written stop date). Never infer from drug type or standard protocols.\n"
+    "- monitoring[].recheck_due_date must be extracted only from explicit document text (e.g., \"follow up "
+    "in 2 weeks\", \"repeat CBC after 3 months\"). Compute only when both interval and reference date are "
+    "present in the document. Never apply external clinical guidelines.\n"
+    "- standalone_medications[] must be used for any medication written on a prescription that cannot be "
+    "linked to a named condition in the document. Do NOT invent a condition_name to house it. "
+    "Do NOT place it in preventive_medications[] unless it clearly targets deworming or flea/tick.\n"
+    "- recommendations[] must capture all non-medication clinical directives written by the vet: diet "
+    "instructions, feeding plans, activity restrictions, rest advice, etc. Populate description with "
+    "what is written; do not paraphrase into clinical language. [] if none.\n"
     "- If a document lists preventive medicines without a diagnosis, keep conditions: [] and populate preventive_medications[].\n"
-    "- For each preventive_medications entry, always set prevention_targets explicitly using one or both: deworming, flea_tick.\n"
+    "- For each preventive_medications entry, always set prevention_targets explicitly (deworming, flea_tick, or both).\n"
     "- If the medicine coverage text indicates both internal parasites (worms/deworming) and external parasite control (flea/tick), include BOTH targets.\n"
     f"{_build_medicine_coverage_prompt()}\n"
-    "- Drugs prescribed to treat a condition belong in that condition's medications[] array, not as a separate condition.\n"
-    "- For contacts: extract vet/specialist contact details when explicitly present in the document.\n"
+    "- Drugs prescribed to treat a condition belong in that condition's medications[] array, not standalone_medications[].\n"
+    "- Prescribed non-preventive medications (antibiotics, analgesics, antacids, etc.) must NEVER go into "
+    "preventive_medications[]. They belong in conditions[].medications[] or standalone_medications[].\n"
+    "- For contacts: extract vet/specialist contact details when explicitly present.\n"
     "- Document category for vet-written documents: If the document is on a veterinary clinic's "
-    "letterhead, has a doctor signature/stamp, contains Rx or Tr. markings, records clinical examination "
-    "values (weight/temperature/pulse), prescribes medications, OR orders tests for the pet to undergo "
-    "(e.g. 'Get CBC done', 'Blood Test - LFT, KFT'), ALWAYS set document_category to 'Prescription' — "
+    "letterhead, has a doctor signature/stamp, contains Rx or Tr. markings, records clinical "
+    "examination values (weight/temperature/pulse), prescribes medications, OR orders tests for "
+    "the pet to undergo (e.g. 'Get CBC done', 'Blood Test - LFT, KFT'), ALWAYS set "
+    "document_category to 'Prescription' --- "
     "even if the only content is a list of ordered tests and no diagnosis is written. "
     "A document that only lists test RESULTS from a diagnostic lab (with reference ranges and status flags) "
-    "is a 'Blood Report' / 'Urine Report' / etc., NOT a Prescription. The distinguishing signal is: "
-    "ordered tests → Prescription; reported test results → Lab report. "
-    "For lab reports (Blood Report, Urine Report, PCR & Parasite Panel, Imaging): set conditions: [] "
-    "even if the document contains a brief clinical impression, interpretation, or diagnosis line — "
-    "conditions[] is only for vet prescriptions or clinic visit records where a doctor actively "
-    "diagnosed and treated the pet.\n"
-    "- Handwritten medication lists are Prescriptions: A handwritten page listing drug names with doses "
-    "and frequencies (e.g., 'Tab Pan 40mg BID', 'Tab Toxomox 500mg AIT', 'Tab Gabapentin 600mg') is ALWAYS "
-    "a Prescription even if no clinic letterhead or formal diagnosis is visible. Set document_category to "
-    "'Prescription'. Place these medications inside a conditions[] entry using a descriptive condition_name "
-    "such as 'Treatment course' or 'Post-operative care' — never leave prescribed medications unclassified.\n"
-    "- Prescribed non-preventive medications (antibiotics, analgesics, antacids, etc.) must NEVER go into "
-    "preventive_medications[]. They belong in conditions[].medications[].\n"
-    "- For Prescription documents: if the vet has written any dietary instructions (e.g. 'feed low-fat diet', "
-    "'give Royal Canin Renal', 'avoid high-protein food', 'boiled chicken twice daily'), capture each as an entry "
-    "in vet_diet_recommendations[]. Use food_type='avoid' for restricted foods. Leave vet_diet_recommendations=[] "
-    "for non-Prescription documents.\n"
+    "is a 'Blood Report'/'Urine Report'/etc., NOT a Prescription. The distinguishing signal is: "
+    "ordered tests -> Prescription; reported test results -> Lab report.\n"
+    "- Handwritten medication lists are Prescriptions: A handwritten page listing drug names with "
+    "doses and frequencies (e.g., 'Tab Pan 40mg BID', 'Tab Toxomox 500mg AIT', 'Tab Gabapentin "
+    "600mg') is ALWAYS a Prescription even if no clinic letterhead or formal diagnosis is visible. "
+    "Set document_category to 'Prescription'. Place these medications inside a conditions[] entry "
+    "using a descriptive condition_name such as 'Treatment course' or 'Post-operative care' if a "
+    "broad grouping is inferable --- otherwise place them in standalone_medications[]. "
+    "Never leave prescribed medications unclassified.\n"
     "- For Prescription documents: ALWAYS populate clinical_exam with weight, temperature, pulse, "
     "respiration, mucous membranes, and any other examination notes written on the document. "
-    "Leave individual fields as null when not present. Omit clinical_exam (or set null) for non-prescription documents.\n"
-    "- Any in-clinic test values written on a prescription (e.g. blood glucose, PCV, SpO2) should be listed in "
-    "clinical_exam.in_clinic_test_values — do NOT duplicate them into diagnostic_values.\n"
-    "- If any field is missing in the document, use null for that field.\n"
-    "- If the document is not pet/veterinary related, set document_type to 'not_pet_related' and items to [].\n"
-    '- If no preventive items are found, return {"document_name": "...", "document_type": "pet_medical", '
+    "Leave individual fields as null when not present. Omit clinical_exam for non-prescription documents.\n"
+    "- Any in-clinic test values written on a prescription (blood glucose, PCV, SpO2) should be "
+    "listed in clinical_exam.in_clinic_test_values --- do NOT duplicate them into diagnostic_values.\n"
+    "- If any field is missing, use null for that field.\n"
+    "- If not pet/veterinary related, set document_type to 'not_pet_related' and items to [].\n"
+    '- If no preventive items found, return {"document_name": "...", "document_type": "pet_medical", '
     '"document_category": "...", "diagnostic_summary": null, "pet_name": null, "items": [], '
-    '"conditions": [], "preventive_medications": [], "contacts": []}\n'
-    "- confidence: a number between 0.0 and 1.0 rating how certain you are about the extraction. "
-    "Set below 0.7 if the document is unclear, partially legible, or the document_category is ambiguous."
+    '"conditions": [], "standalone_medications": [], "recommendations": [], '
+    '"preventive_medications": [], "contacts": []}\n'
+    "- Return valid JSON only --- no markdown, no explanation, no extra text."
 )
 
 # ---------------------------------------------------------------------------
@@ -1080,14 +1115,81 @@ EXTRACTION_TOOL_SCHEMA: dict = {
                         "condition_name": {"type": "string"},
                         "condition_type": {
                             "type": "string",
-                            "enum": ["chronic", "episodic", "resolved"],
+                            "enum": ["chronic", "acute", "episodic", "recurrent"],
+                        },
+                        "condition_status": {
+                            "type": ["string", "null"],
+                            "enum": ["active", "resolved", None],
                         },
                         "diagnosis": {"type": ["string", "null"]},
                         "diagnosed_at": {"type": ["string", "null"]},
-                        "medications": {"type": "array", "items": {"type": "object"}},
-                        "monitoring": {"type": "array", "items": {"type": "object"}},
+                        "episode_dates": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "All dates this condition was recorded or treated in this document.",
+                        },
+                        "medications": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "dose": {"type": ["string", "null"]},
+                                    "frequency": {"type": ["string", "null"]},
+                                    "route": {"type": ["string", "null"]},
+                                    "end_date": {"type": ["string", "null"]},
+                                },
+                                "required": ["name"],
+                            },
+                        },
+                        "monitoring": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "frequency": {"type": ["string", "null"]},
+                                    "recheck_due_date": {"type": ["string", "null"]},
+                                },
+                                "required": ["name"],
+                            },
+                        },
                     },
                     "required": ["condition_name"],
+                },
+            },
+            "standalone_medications": {
+                "type": "array",
+                "description": "Medications prescribed without a named condition.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "dose": {"type": ["string", "null"]},
+                        "frequency": {"type": ["string", "null"]},
+                        "route": {"type": ["string", "null"]},
+                        "end_date": {"type": ["string", "null"]},
+                        "notes": {"type": ["string", "null"]},
+                    },
+                    "required": ["name"],
+                },
+            },
+            "recommendations": {
+                "type": "array",
+                "description": "Non-medication clinical directives (diet, activity, rest, follow-up).",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": ["diet", "activity", "rest", "follow_up", "other"],
+                        },
+                        "description": {"type": "string"},
+                        "linked_condition": {"type": ["string", "null"]},
+                        "duration": {"type": ["string", "null"]},
+                        "notes": {"type": ["string", "null"]},
+                    },
+                    "required": ["type", "description"],
                 },
             },
             "preventive_medications": {
@@ -1140,22 +1242,6 @@ EXTRACTION_TOOL_SCHEMA: dict = {
                     "required": ["name"],
                 },
             },
-            "vet_diet_recommendations": {
-                "type": "array",
-                "description": "Dietary instructions written by the vet on a Prescription. Empty array for non-prescription documents.",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "food_label": {"type": "string"},
-                        "food_type": {
-                            "type": "string",
-                            "enum": ["packaged", "homemade", "supplement", "avoid"],
-                        },
-                        "detail": {"type": ["string", "null"]},
-                    },
-                    "required": ["food_label", "food_type"],
-                },
-            },
             "clinical_exam": {
                 "type": ["object", "null"],
                 "properties": {
@@ -1168,14 +1254,8 @@ EXTRACTION_TOOL_SCHEMA: dict = {
                     "notes": {"type": ["string", "null"]},
                 },
             },
-            "confidence": {
-                "type": "number",
-                "description": "Confidence score 0.0–1.0 for the overall extraction quality.",
-                "minimum": 0.0,
-                "maximum": 1.0,
-            },
         },
-        "required": ["document_name", "document_type", "document_category", "items", "confidence"],
+        "required": ["document_name", "document_type", "document_category", "items"],
     },
 }
 
@@ -2721,9 +2801,25 @@ async def extract_and_process_document(
         )
 
         # --- Store vet-prescribed dietary recommendations (prescriptions only) ---
-        # Each item lands in diet_items so the Nutrition tab and DietAnalysisCard
-        # automatically include vet-recommended foods in the nutrition breakdown.
-        vet_diet = metadata.get("vet_diet_recommendations") or []
+        # New extraction uses recommendations[type=diet]; legacy used vet_diet_recommendations.
+        # Convert recommendations[type=diet] entries to the legacy diet-item format so that
+        # _save_vet_diet_items can persist them without changes to downstream logic.
+        raw_recommendations = metadata.get("recommendations") or []
+        vet_diet: list[dict] = []
+        for rec in raw_recommendations:
+            if not isinstance(rec, dict):
+                continue
+            if rec.get("type") == "diet":
+                desc = str(rec.get("description") or "").strip()
+                if desc:
+                    vet_diet.append({
+                        "food_label": desc[:200],
+                        "food_type": "packaged",  # conservative default; doc may clarify
+                        "detail": str(rec.get("duration") or rec.get("notes") or "")[:200] or None,
+                    })
+        # Also accept legacy field if present (e.g. old cached metadata).
+        if not vet_diet:
+            vet_diet = metadata.get("vet_diet_recommendations") or []
         if vet_diet:
             try:
                 await _save_vet_diet_items(
@@ -2774,15 +2870,51 @@ async def extract_and_process_document(
                 )
                 continue
             try:
-                condition_type = str(raw_condition.get("condition_type") or "chronic").strip().lower()
-                if condition_type not in ("chronic", "episodic", "resolved"):
+                # Map new extraction condition_type values to DB-valid values.
+                # DB column still uses: chronic | episodic | resolved.
+                # New prompt produces: chronic | acute | episodic | recurrent.
+                # "acute" and "recurrent" map to "episodic" for DB storage.
+                # "resolved" type from old prompts also maps to "episodic" + condition_status="resolved".
+                raw_condition_type = str(raw_condition.get("condition_type") or "chronic").strip().lower()
+                if raw_condition_type == "chronic":
                     condition_type = "chronic"
+                elif raw_condition_type in ("episodic", "acute"):
+                    condition_type = "episodic"
+                elif raw_condition_type == "recurrent":
+                    condition_type = "episodic"
+                elif raw_condition_type == "resolved":
+                    # Legacy: old prompt used "resolved" as a type.
+                    condition_type = "episodic"
+                else:
+                    condition_type = "chronic"
+
+                # condition_status: "active" | "resolved" | null
+                raw_status = raw_condition.get("condition_status")
+                condition_status = str(raw_status).strip().lower() if raw_status else None
+                if condition_status not in ("active", "resolved"):
+                    condition_status = None
+                # If old prompt set type="resolved", ensure status is set.
+                if raw_condition_type == "resolved" and not condition_status:
+                    condition_status = "resolved"
+
+                # episode_dates: parse and validate each date string.
+                raw_episode_dates: list[str] = raw_condition.get("episode_dates") or []
+                _today = datetime.utcnow().date()
+                valid_episode_dates: list[str] = []
+                for _ed in raw_episode_dates:
+                    try:
+                        _parsed = parse_date(str(_ed))
+                        if _parsed <= _today and _parsed.year >= 2015:
+                            valid_episode_dates.append(str(_parsed))
+                    except Exception:
+                        pass
+                # Remove duplicates and sort.
+                valid_episode_dates = sorted(set(valid_episode_dates))
 
                 diagnosed_at = None
                 if raw_condition.get("diagnosed_at"):
                     try:
                         _diag_date = parse_date(str(raw_condition["diagnosed_at"]))
-                        _today = datetime.utcnow().date()
                         if _diag_date > _today:
                             logger.warning(
                                 "Condition diagnosed_at is in the future (%s), ignoring: "
@@ -2812,10 +2944,16 @@ async def extract_and_process_document(
                 )
                 if existing_condition:
                     existing_condition.condition_type = condition_type
+                    if condition_status:
+                        existing_condition.condition_status = condition_status
                     if raw_condition.get("diagnosis"):
                         existing_condition.diagnosis = str(raw_condition["diagnosis"])[:500]
                     if diagnosed_at:
                         existing_condition.diagnosed_at = diagnosed_at
+                    # Merge episode_dates: combine existing + new, deduplicate, sort.
+                    existing_dates = existing_condition.episode_dates or []
+                    merged_dates = sorted(set(existing_dates) | set(valid_episode_dates))
+                    existing_condition.episode_dates = merged_dates
                     existing_condition.document_id = document.id
                     condition_obj = existing_condition
                 else:
@@ -2825,6 +2963,8 @@ async def extract_and_process_document(
                         name=condition_name[:200],
                         diagnosis=(str(raw_condition.get("diagnosis"))[:500] if raw_condition.get("diagnosis") else None),
                         condition_type=condition_type,
+                        condition_status=condition_status,
+                        episode_dates=valid_episode_dates,
                         diagnosed_at=diagnosed_at,
                         source="extraction",
                     )
@@ -2844,6 +2984,15 @@ async def extract_and_process_document(
                         .filter(ConditionMedication.condition_id == condition_obj.id, ConditionMedication.name == med_name)
                         .first()
                     )
+                    # Parse end_date if provided.
+                    med_end_date = None
+                    if med.get("end_date"):
+                        try:
+                            _med_end = parse_date(str(med["end_date"]))
+                            if _med_end.year >= 2015:
+                                med_end_date = _med_end
+                        except Exception:
+                            pass
                     if not existing_med:
                         db.add(ConditionMedication(
                             condition_id=condition_obj.id,
@@ -2851,7 +3000,10 @@ async def extract_and_process_document(
                             dose=(str(med.get("dose"))[:100] if med.get("dose") else None),
                             frequency=(str(med.get("frequency"))[:100] if med.get("frequency") else None),
                             route=(str(med.get("route"))[:50] if med.get("route") else None),
+                            end_date=med_end_date,
                         ))
+                    elif med_end_date and not existing_med.end_date:
+                        existing_med.end_date = med_end_date
 
                 # Add monitoring checks (deduplicate by condition_id + name).
                 raw_monitors = raw_condition.get("monitoring") or []
@@ -2866,12 +3018,24 @@ async def extract_and_process_document(
                         .filter(ConditionMonitoring.condition_id == condition_obj.id, ConditionMonitoring.name == mon_name)
                         .first()
                     )
+                    # Parse recheck_due_date if provided.
+                    mon_recheck = None
+                    if mon.get("recheck_due_date"):
+                        try:
+                            _recheck = parse_date(str(mon["recheck_due_date"]))
+                            if _recheck.year >= 2015:
+                                mon_recheck = _recheck
+                        except Exception:
+                            pass
                     if not existing_mon:
                         db.add(ConditionMonitoring(
                             condition_id=condition_obj.id,
                             name=mon_name[:200],
                             frequency=(str(mon.get("frequency"))[:100] if mon.get("frequency") else None),
+                            recheck_due_date=mon_recheck,
                         ))
+                    elif mon_recheck and not existing_mon.recheck_due_date:
+                        existing_mon.recheck_due_date = mon_recheck
 
             except Exception as e:
                 db.rollback()

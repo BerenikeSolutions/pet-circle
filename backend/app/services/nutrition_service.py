@@ -198,174 +198,6 @@ NUTRITION_TARGET_SYSTEM_PROMPT = (
     "- No explanation, no markdown — JSON only"
 )
 
-def _build_food_estimation_prompt(
-    species: str | None = None,
-    breed: str | None = None,
-    weight_kg: float | None = None,
-    age_description: str | None = None,
-    gender: str | None = None,
-    conditions: list[str] | None = None,
-) -> str:
-    """
-    Build veterinary nutritionist prompt for food analysis.
-
-    Returns the core prompt for nutrition analysis that:
-    1. Resolves food identity
-    2. Determines serving size with strict rules
-    3. Handles mixed diets properly
-    4. Estimates daily nutrition intake
-    5. Analyzes micronutrient gaps qualitatively
-    6. Returns top 4 micronutrient gaps
-    """
-    return (
-        "You are a board-certified veterinary nutritionist.\n\n"
-        "Your task:\n"
-        "Analyse ONE food item and estimate its contribution to this pet's daily nutrition. "
-        "This food is ONE part of the pet's overall diet — do NOT evaluate it as a complete standalone diet.\n\n"
-        "You must follow this strict decision framework:\n\n"
-        "-----------------------------------\n"
-        "STEP 1 — RESOLVE FOOD IDENTITY\n"
-        "-----------------------------------\n"
-        "- Identify the most likely specific product based on:\n"
-        "- food name\n"
-        "- species\n"
-        "- age (puppy / adult / senior)\n"
-        "- Example:\n"
-        "\"Pedigree\" + adult dog → Pedigree Adult Dog Food\n"
-        "- If multiple variants are possible, choose the most common one and reduce confidence\n"
-        "- If product identity is highly ambiguous, reduce confidence\n\n"
-        "-----------------------------------\n"
-        "STEP 2 — DETERMINE SERVING SIZE\n"
-        "-----------------------------------\n\n"
-        "CASE A: USER PROVIDED QUANTITY (any food)\n"
-        "- Use EXACTLY the user-provided quantity (e.g., \"2 cups/day\", \"1 bowl/day\")\n"
-        "- Do NOT override, scale, or reinterpret it\n\n"
-        "CASE B: COMMERCIAL / PACKAGED FOOD AND NO QUANTITY PROVIDED\n"
-        "- Use ONLY official brand feeding guidelines\n"
-        "- Use pet weight and age ONLY to select the correct feeding range\n"
-        "- Choose a reasonable midpoint within that range\n"
-        "- Do NOT invent or extrapolate beyond brand guidance\n\n"
-        "CASE C: HOMEMADE / GENERIC FOOD AND NO QUANTITY PROVIDED\n"
-        "- DO NOT estimate or assume any serving size\n"
-        "- Mark portion as UNKNOWN\n\n"
-        "IF serving size cannot be determined with confidence:\n"
-        "- Set confidence < 0.6\n"
-        "- RETURN NO ANALYSIS (see fail-safe)\n\n"
-        "-----------------------------------\n"
-        "STEP 3 — MIXED DIET HANDLING\n"
-        "-----------------------------------\n\n"
-        "If BOTH commercial food AND homemade food are present:\n\n"
-        "- Treat commercial food as the PRIMARY diet anchor:\n"
-        "- Use it for:\n"
-        "- calories_per_day\n"
-        "- macronutrient percentages (protein, fat, fibre)\n\n"
-        "- For homemade food WITHOUT quantity:\n"
-        "- DO NOT include in:\n"
-        "- calories\n"
-        "- macronutrient calculations\n"
-        "- ONLY use it for qualitative micronutrient signals if possible\n\n"
-        "- If homemade food HAS quantity:\n"
-        "- Include it fully in all calculations\n\n"
-        "-----------------------------------\n"
-        "STEP 4 — NUTRITION ESTIMATION\n"
-        "-----------------------------------\n"
-        "- Estimate TOTAL DAILY intake based on determined serving size\n"
-        "- Ensure values are realistic and internally consistent\n"
-        "- Prevent extreme or biologically impossible outputs\n"
-        "- Macro percentages must remain within realistic biological limits\n"
-        "- Total calories must fall within realistic daily intake ranges\n\n"
-        "-----------------------------------\n"
-        "STEP 5 — MICRONUTRIENT GAP ANALYSIS\n"
-        "-----------------------------------\n\n"
-        "- Identify micronutrient gaps dynamically based on:\n"
-        "- pet nutritional requirements\n"
-        "- current diet composition\n\n"
-        "- Use ONLY this controlled list of nutrient names:\n"
-        "omega_3, omega_6, vitamin_e, vitamin_d3, glucosamine, calcium, phosphorus, iron, zinc, taurine, fibre\n\n"
-        "- For each nutrient:\n"
-        "- Assign ONLY one of the following statuses:\n"
-        "- \"sufficient\"\n"
-        "- \"low\"\n"
-        "- \"missing\"\n\n"
-        "- DO NOT include nutrients where status cannot be confidently determined\n"
-        "- DO NOT output \"unknown\" under any condition\n\n"
-        "- DO NOT output numeric values, units, or requirements for micronutrients\n"
-        "- Micronutrients are strictly qualitative signals\n\n"
-        "- Assign a severity_score (0–1) based on:\n"
-        "- deficiency severity (missing > low > sufficient)\n"
-        "- relevance to pet conditions\n"
-        "- confidence in assessment\n\n"
-        "-----------------------------------\n"
-        "STEP 6 — SELECT TOP MICRONUTRIENTS\n"
-        "-----------------------------------\n\n"
-        "- Rank micronutrients by severity_score\n"
-        "- Return ONLY the TOP 4 most important micronutrient gaps\n"
-        "- EXCLUDE all nutrients marked as \"sufficient\"\n"
-        "- If fewer than 4 meaningful gaps exist, return fewer\n\n"
-        "-----------------------------------\n"
-        "OUTPUT FORMAT\n"
-        "-----------------------------------\n\n"
-        "Return ONLY valid JSON with these keys:\n\n"
-        "resolved_name (string),\n"
-        "confidence (float 0–1),\n"
-        "serving_description (string),\n"
-        "calories_per_day (int),\n"
-        "protein_pct (float — % of daily protein need contributed by this food),\n"
-        "fat_pct (float — % of daily fat need contributed by this food),\n"
-        "carbs_pct (float — % of daily carbohydrate need contributed by this food),\n"
-        "fibre_pct (float — % of daily fibre need contributed by this food),\n\n"
-        "micronutrient_gaps: [\n"
-        "{\n"
-        "name (string),\n"
-        "status (string: sufficient | low | missing),\n"
-        "severity_score (float 0–1),\n"
-        "supplement (string | null — specific product name if supplementation is advised, null if sufficient or no supplement needed),\n"
-        "reason (string — one concise sentence explaining why this gap matters for this specific pet, diet, and conditions)\n"
-        "}\n"
-        "]\n\n"
-        "-----------------------------------\n"
-        "CRITICAL RULES\n"
-        "-----------------------------------\n\n"
-        "- NEVER estimate serving size arbitrarily\n"
-        "- NEVER assume portion size for homemade food\n"
-        "- NEVER scale portions beyond brand guidelines\n"
-        "- NEVER include homemade food in calorie or macro calculations unless quantity is provided\n"
-        "- NEVER fabricate precision where data is missing\n"
-        "- Maintain internal consistency across all outputs\n\n"
-        "-----------------------------------\n"
-        "CONFIDENCE DEFINITION\n"
-        "-----------------------------------\n\n"
-        "confidence reflects ONLY your certainty about:\n"
-        "- food identity (can you identify what this food is?)\n"
-        "- serving size (is the quantity clear?)\n\n"
-        "confidence does NOT reflect dietary completeness or nutritional sufficiency.\n"
-        "A carrot, a treat, or a supplement can all have high confidence.\n\n"
-        "-----------------------------------\n"
-        "FAIL-SAFE\n"
-        "-----------------------------------\n\n"
-        "Return INSUFFICIENT_DATA ONLY IF:\n"
-        "- product identity cannot be determined (truly unknown food) OR\n"
-        "- serving size is missing AND no brand guidelines exist (CASE C without quantity)\n\n"
-        "Do NOT return INSUFFICIENT_DATA because the food is nutritionally incomplete — "
-        "individual food items are expected to be partial contributions.\n\n"
-        "THEN RETURN:\n\n"
-        "{\n"
-        '\"confidence\": <value>,\n'
-        '\"error\": \"INSUFFICIENT_DATA\",\n'
-        '\"message\": \"Provide exact SKU or serving size for accurate diet analysis\"\n'
-        "}\n\n"
-        "-----------------------------------\n"
-        "GENERAL\n"
-        "-----------------------------------\n\n"
-        "- No explanation\n"
-        "- No markdown\n"
-        "- JSON only"
-    )
-
-
-# Kept for backward compatibility / fallback when pet context is unavailable.
-FOOD_ESTIMATION_SYSTEM_PROMPT = _build_food_estimation_prompt(None, None, None, None)
-
 RECOMMENDATION_SYSTEM_PROMPT = (
     "You are a friendly veterinary nutritionist. Generate a short, personalized "
     "nutrition recommendation for a pet parent.\n\n"
@@ -537,7 +369,7 @@ async def _call_openai_nutrition_targets(
     return result
 
 
-# ─── Step 3b: AI Food Estimation ────────────────────────────────────
+# ─── JSON / weight helpers ──────────────────────────────────────────
 
 def _parse_json_from_response(raw: str) -> dict | None:
     """Parse JSON from AI response, stripping markdown code fences and trailing text."""
@@ -594,172 +426,6 @@ def _weight_bucket(weight_kg: float | None) -> str:
     return "xl"
 
 
-async def estimate_food_nutrition(
-    db: Session,
-    food_label: str,
-    food_type: str,
-    species: str | None = None,
-    breed: str | None = None,
-    weight_kg: float | None = None,
-    age_description: str | None = None,
-    gender: str | None = None,
-    conditions: list[str] | None = None,
-    daily_portion_g: int | None = None,
-    detail: str | None = None,
-) -> dict | None:
-    """
-    Estimate nutrition for foods not matched in product_catalog.
-
-    Pipeline: DB cache check → OpenAI call → cache result.
-    Returns nutrition dict or None on failure.
-
-    The cache key embeds species + weight bucket + a hash of the pet's
-    diagnosed conditions so a 5kg cat, a 40kg healthy dog, and a 40kg dog
-    with kidney disease never share an estimate for the same food label.
-    """
-    species_norm = (species or "dog").lower().strip()
-    bucket = _weight_bucket(weight_kg)
-    conditions_sorted = sorted(c.lower().strip() for c in (conditions or []) if c)
-    cond_hash = (
-        hashlib.sha1(",".join(conditions_sorted).encode()).hexdigest()[:8]
-        if conditions_sorted else "none"
-    )
-    # Encode pet context into the cache key (avoids a schema migration).
-    # v3 prefix invalidates v2 entries which lacked pet context in the user prompt.
-    portion_key = str(daily_portion_g) if daily_portion_g and daily_portion_g > 0 else "unset"
-    # Include detail in cache key so different quantities for the same food are cached separately.
-    detail_key = hashlib.sha1((detail or "").lower().strip().encode()).hexdigest()[:8]
-    label_normalized = (
-        f"v3|{species_norm}|{bucket}|{cond_hash}|{portion_key}|{detail_key}|{food_label.lower().strip()}"
-    )
-
-    # 1. Check DB cache
-    try:
-        cached = (
-            db.query(FoodNutritionCache)
-            .filter(
-                FoodNutritionCache.food_label_normalized == label_normalized,
-                FoodNutritionCache.food_type == food_type,
-            )
-            .first()
-        )
-        if cached:
-            staleness_cutoff = datetime.utcnow() - timedelta(days=FOOD_CACHE_STALENESS_DAYS)
-            if cached.created_at.replace(tzinfo=None) > staleness_cutoff:
-                logger.info("Food nutrition cache hit: %s (%s)", label_normalized, food_type)
-                return cached.nutrition_json
-            else:
-                db.delete(cached)
-                db.commit()
-    except Exception as e:
-        logger.warning("Food nutrition cache lookup failed: %s", e)
-
-    # 2. Call OpenAI
-    try:
-        result = await retry_openai_call(
-            _call_openai_food_estimation,
-            food_label, food_type,
-            species, breed, weight_kg, age_description, gender, conditions_sorted,
-            daily_portion_g, detail,
-        )
-    except Exception as e:
-        logger.error("OpenAI food estimation failed: %s", e)
-        return None
-
-    if not result:
-        return None
-
-    # 3. Cache the result
-    try:
-        cache_entry = FoodNutritionCache(
-            food_label_normalized=label_normalized,
-            food_type=food_type,
-            nutrition_json=result,
-        )
-        db.add(cache_entry)
-        db.commit()
-        logger.info("Cached food nutrition for: %s (%s)", label_normalized, food_type)
-    except Exception as e:
-        db.rollback()
-        logger.info("Food nutrition cache race condition: %s", e)
-
-    return result
-
-
-async def _call_openai_food_estimation(
-    food_label: str,
-    food_type: str,
-    species: str | None = None,
-    breed: str | None = None,
-    weight_kg: float | None = None,
-    age_description: str | None = None,
-    gender: str | None = None,
-    conditions: list[str] | None = None,
-    daily_portion_g: int | None = None,
-    detail: str | None = None,
-) -> dict | None:
-    """Call OpenAI to estimate nutritional content of a food item."""
-    client = _get_openai_client()
-    system_prompt = _build_food_estimation_prompt(
-        species=species,
-        breed=breed,
-        weight_kg=weight_kg,
-        age_description=age_description,
-        gender=gender,
-        conditions=conditions,
-    )
-    # Build user prompt with full pet context so CASE B (brand feeding guidelines)
-    # can correctly select the right feeding range using pet weight and age.
-    prompt_parts = []
-    if species:
-        prompt_parts.append(f"Species: {species}")
-    if breed:
-        prompt_parts.append(f"Breed: {breed}")
-    if age_description:
-        prompt_parts.append(f"Age: {age_description}")
-    if isinstance(weight_kg, (int, float)) and weight_kg > 0:
-        prompt_parts.append(f"Weight: {float(weight_kg):g} kg")
-    if gender:
-        prompt_parts.append(f"Gender: {gender}")
-    if conditions:
-        prompt_parts.append(f"Conditions: {', '.join(conditions)}")
-    prompt_parts.append(f"Food name: {food_label}")
-    prompt_parts.append(f"Type: {food_type}")
-    if daily_portion_g and daily_portion_g > 0:
-        prompt_parts.append(f"User-provided daily portion: {daily_portion_g}g")
-    elif detail and detail.strip():
-        # detail stores the user-provided quantity text (e.g. "2 cups . kibble /day", "1 cup")
-        prompt_parts.append(f"User-provided quantity: {detail.strip()}")
-    user_prompt = "\n".join(prompt_parts)
-
-    response = await client.messages.create(
-        model=OPENAI_QUERY_MODEL,
-        temperature=0.0,
-        max_tokens=OPENAI_FOOD_ESTIMATION_MAX_TOKENS,
-        system=system_prompt,
-        messages=[
-            {"role": "user", "content": user_prompt},
-        ],
-    )
-    raw = response.content[0].text
-    logger.debug("OpenAI food estimation raw: %s", raw)
-    result = _parse_json_from_response(raw)
-    if result is None:
-        logger.error("Failed to parse food estimation response — raw: %s", raw)
-        return None
-
-    # Fail-safe: reject low-confidence or error responses
-    if result.get("error") == "INSUFFICIENT_DATA":
-        logger.warning("Insufficient data for food: %s — %s", food_label, result.get("message"))
-        return None
-    confidence = result.get("confidence", 1.0)
-    if isinstance(confidence, (int, float)) and confidence < 0.6:
-        logger.warning("Low confidence (%.2f) for food: %s", confidence, food_label)
-        return None
-
-    return result
-
-
 # ─── Step 3c: Combined Meal Analysis ────────────────────────────────
 # Analyses ALL diet items together in a single LLM call so the model can
 # see the full diet, weight macros by caloric contribution, and assess
@@ -770,31 +436,62 @@ COMBINED_MEAL_SYSTEM_PROMPT = (
     "Your task:\n"
     "Analyse ALL listed foods together as the pet's COMPLETE daily diet. "
     "Calculate TOTAL daily nutrition across all foods — do not analyse any food in isolation.\n\n"
+    "You must follow this strict decision framework:\n\n"
     "-----------------------------------\n"
     "STEP 1 — RESOLVE EACH FOOD\n"
     "-----------------------------------\n"
     "- Identify the most specific product for each food based on name + species + age\n"
-    "- If a food is ambiguous, choose the most common variant\n\n"
+    "  Example: \"Royal Canin\" + adult dog → Royal Canin Medium Adult\n"
+    "- If multiple variants are possible, choose the most common one and reduce confidence\n"
+    "- If product identity is highly ambiguous, reduce confidence\n\n"
     "-----------------------------------\n"
     "STEP 2 — DETERMINE SERVING SIZE PER FOOD\n"
     "-----------------------------------\n\n"
-    "CASE A: USER PROVIDED QUANTITY\n"
-    "- Use EXACTLY the user-provided quantity\n"
+    "CASE A: USER PROVIDED QUANTITY (any food)\n"
+    "- Use EXACTLY the user-provided quantity (e.g., \"2 cups/day\", \"1 bowl/day\")\n"
     "- Do NOT override, scale, or reinterpret it\n\n"
-    "CASE B: COMMERCIAL FOOD, NO QUANTITY\n"
-    "- Use ONLY official brand feeding guidelines for this pet's weight and age\n\n"
-    "CASE C: HOMEMADE / GENERIC, NO QUANTITY\n"
+    "CASE B: COMMERCIAL / PACKAGED FOOD AND NO QUANTITY PROVIDED\n"
+    "- Use ONLY official brand feeding guidelines\n"
+    "- Use pet weight and age ONLY to select the correct feeding range\n"
+    "- Choose a reasonable midpoint within that range\n"
+    "- Do NOT invent or extrapolate beyond brand guidance\n\n"
+    "CASE C: HOMEMADE / GENERIC FOOD AND NO QUANTITY PROVIDED\n"
+    "- DO NOT estimate or assume any serving size\n"
+    "- Mark portion as UNKNOWN\n"
     "- Exclude from calorie and macro calculations\n"
     "- Use only for qualitative micronutrient signals\n\n"
+    "IF serving size cannot be determined with confidence:\n"
+    "- Set confidence < 0.6\n"
+    "- RETURN NO ANALYSIS for that food item (see fail-safe)\n\n"
     "-----------------------------------\n"
-    "STEP 3 — COMBINED NUTRITION ESTIMATION\n"
+    "STEP 3 — MIXED DIET HANDLING\n"
+    "-----------------------------------\n\n"
+    "If BOTH commercial food AND homemade food are present:\n\n"
+    "- Treat commercial food as the PRIMARY calorie anchor:\n"
+    "  - Use brand feeding guidelines (CASE B) for calories and macronutrient percentages\n"
+    "  - If multiple commercial foods are present, sum their calorie contributions\n\n"
+    "- For homemade food WITHOUT quantity (CASE C):\n"
+    "  - DO NOT include in calories or macronutrient calculations\n"
+    "  - ONLY use for qualitative micronutrient signals\n\n"
+    "- For homemade food WITH quantity (CASE A):\n"
+    "  - Include fully in all calculations — add to calories and calorie-weighted macro average\n\n"
+    "- For supplements WITHOUT quantity:\n"
+    "  - Exclude from calorie and macro calculations\n"
+    "  - Include qualitatively in micronutrient analysis (they may resolve a gap)\n\n"
+    "- For supplements WITH quantity:\n"
+    "  - Include fully in calorie and macro calculations\n\n"
+    "-----------------------------------\n"
+    "STEP 4 — COMBINED NUTRITION ESTIMATION\n"
     "-----------------------------------\n"
     "- Sum calories_per_day across all foods with known portions\n"
     "- For protein_pct, fat_pct, carbs_pct, fibre_pct:\n"
     "  - Calculate a CALORIE-WEIGHTED AVERAGE across all foods\n"
     "  - Foods with CASE C (no quantity) must be excluded from this calculation\n"
     "  - carbs_pct represents the percentage of daily carbohydrate need met\n"
-    "- Ensure values are biologically realistic\n\n"
+    "- Ensure values are realistic and internally consistent\n"
+    "- Prevent extreme or biologically impossible outputs\n"
+    "- Macro percentages must remain within realistic biological limits\n"
+    "- Total calories must fall within realistic daily intake ranges\n\n"
     "-----------------------------------\n"
     "VET-PRESCRIBED ITEMS\n"
     "-----------------------------------\n"
@@ -805,26 +502,36 @@ COMBINED_MEAL_SYSTEM_PROMPT = (
     "  top_improvements entry severity to 'prescribed' instead of 'high' or 'medium'\n"
     "  and note it as a vet-managed constraint rather than an actionable fix\n\n"
     "-----------------------------------\n"
-    "STEP 4 — MICRONUTRIENT GAP ANALYSIS\n"
+    "STEP 5 — MICRONUTRIENT GAP ANALYSIS\n"
     "-----------------------------------\n\n"
-    "- Assess what micronutrients are missing or low in the COMBINED diet\n"
+    "- Identify micronutrient gaps dynamically based on:\n"
+    "  - pet nutritional requirements\n"
+    "  - current combined diet composition\n"
     "- If food A provides omega_3 and food B also provides omega_3, combine their contributions\n"
     "- Use ONLY this controlled list of nutrient names:\n"
     "  omega_3, omega_6, vitamin_e, vitamin_d3, glucosamine, calcium, phosphorus, iron, zinc, taurine, fibre\n\n"
     "- For each nutrient:\n"
-    "  - Assign ONLY one of: \"sufficient\" | \"low\" | \"missing\"\n"
+    "  - Assign ONLY one of the following statuses:\n"
+    "    - \"sufficient\"\n"
+    "    - \"low\"\n"
+    "    - \"missing\"\n"
     "  - Do NOT include nutrients where status cannot be confidently determined\n"
-    "  - Do NOT output \"unknown\"\n"
-    "  - Do NOT output numeric values for micronutrients\n"
-    "- Assign a severity_score (0-1): deficiency severity × relevance to pet conditions × confidence\n\n"
+    "  - Do NOT output \"unknown\" under any condition\n"
+    "  - Do NOT output numeric values, units, or requirements for micronutrients\n"
+    "  - Micronutrients are strictly qualitative signals\n"
+    "- Assign a severity_score (0-1) based on:\n"
+    "  - deficiency severity (missing > low > sufficient)\n"
+    "  - relevance to pet conditions\n"
+    "  - confidence in assessment\n\n"
     "-----------------------------------\n"
-    "STEP 5 — SELECT TOP 4 MICRONUTRIENTS\n"
+    "STEP 6 — SELECT TOP 4 MICRONUTRIENTS\n"
     "-----------------------------------\n"
-    "- Rank by severity_score\n"
-    "- Return only the top 4 with status low or missing\n"
-    "- Exclude all \"sufficient\" nutrients\n\n"
+    "- Rank micronutrients by severity_score\n"
+    "- Return ONLY the TOP 4 most important micronutrient gaps\n"
+    "- EXCLUDE all nutrients marked as \"sufficient\"\n"
+    "- If fewer than 4 meaningful gaps exist, return fewer\n\n"
     "-----------------------------------\n"
-    "STEP 6 — GENERATE TOP IMPROVEMENTS\n"
+    "STEP 7 — GENERATE TOP IMPROVEMENTS\n"
     "-----------------------------------\n"
     "- Produce up to 3 specific, actionable improvements for this pet's diet\n"
     "- Each improvement must be directly grounded in the combined diet analysis above\n"
@@ -838,15 +545,29 @@ COMBINED_MEAL_SYSTEM_PROMPT = (
     "- Order by severity (high first, then medium, then prescribed)\n"
     "- If the diet is fully adequate, return an empty array\n\n"
     "-----------------------------------\n"
+    "CRITICAL RULES\n"
+    "-----------------------------------\n\n"
+    "- NEVER estimate serving size arbitrarily\n"
+    "- NEVER assume portion size for homemade food\n"
+    "- NEVER scale portions beyond brand guidelines\n"
+    "- NEVER include homemade food in calorie or macro calculations unless quantity is provided\n"
+    "- NEVER fabricate precision where data is missing\n"
+    "- Maintain internal consistency across all outputs\n\n"
+    "-----------------------------------\n"
     "CONFIDENCE DEFINITION\n"
     "-----------------------------------\n\n"
-    "confidence reflects ONLY your certainty about food identity and serving sizes.\n"
-    "It does NOT reflect dietary completeness. Treat/vegetable items CAN have high confidence.\n\n"
+    "confidence reflects ONLY your certainty about:\n"
+    "- food identity (can you identify what each food is?)\n"
+    "- serving size (is the quantity clear?)\n\n"
+    "confidence does NOT reflect dietary completeness or nutritional sufficiency.\n"
+    "A carrot, a treat, or a supplement can all have high confidence.\n\n"
     "-----------------------------------\n"
     "FAIL-SAFE\n"
     "-----------------------------------\n\n"
     "Return INSUFFICIENT_DATA ONLY IF no food in the list has determinable identity AND serving size.\n"
-    "If at least ONE food can be analysed, return results based on what is known.\n\n"
+    "If at least ONE food can be analysed, return results based on what is known.\n"
+    "Do NOT return INSUFFICIENT_DATA because the combined diet is nutritionally incomplete —\n"
+    "partial diets are expected and should still be analysed.\n\n"
     "{\n"
     '"confidence": <value>,\n'
     '"error": "INSUFFICIENT_DATA",\n'

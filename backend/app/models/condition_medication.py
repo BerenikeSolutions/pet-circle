@@ -33,6 +33,7 @@ class ConditionMedication(Base):
     route = Column(String(50), nullable=True)
     status = Column(String(20), nullable=False, default="active")  # active | discontinued
     started_at = Column(Date, nullable=True)
+    end_date = Column(Date, nullable=True)  # Treatment end date (extracted from prescription)
     refill_due_date = Column(Date, nullable=True)  # When refill is due
     price = Column(String(20), nullable=True)  # e.g. "₹280"
     notes = Column(String(500), nullable=True)
