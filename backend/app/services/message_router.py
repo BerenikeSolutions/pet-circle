@@ -713,7 +713,19 @@ async def route_message(db: Session, message_data: dict) -> None:
         logger.warning("Message has no from_number — skipping.")
         return
 
-    # Silently ignore non-actionable message types (reactions, stickers,
+    # Voice messages are not supported — reply with a text prompt so the user
+    # knows to switch to chat instead of getting silently stuck.
+    if msg_type == "audio":
+        logger.info("Voice message received from %s — sending unsupported-type reply", mask_phone(from_number))
+        await send_text_message(
+            db,
+            from_number,
+            "I'm not able to listen to voice messages just yet 🙏\n\n"
+            "Please type your message in the chat and I'll be happy to help!",
+        )
+        return
+
+    # Silently ignore other non-actionable message types (reactions, stickers,
     # location, contacts, etc.) — these should never trigger onboarding
     # prompts or GPT calls.
     _ACTIONABLE_TYPES = {"text", "image", "document", "button"}

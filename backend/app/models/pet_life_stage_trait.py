@@ -33,7 +33,6 @@ class PetLifeStageTrait(Base):
     life_stage = Column(String(20), nullable=False)
     breed_size = Column(String(20), nullable=False)
     traits = Column(JSONB, nullable=False)
-    essential_care = Column(JSONB, nullable=False)
     generated_at = Column(DateTime, nullable=False)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
