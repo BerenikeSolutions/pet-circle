@@ -9,6 +9,7 @@ Assembles Health Trends V2 payload used by the trends view:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -870,22 +871,25 @@ async def get_health_trends(db: Session, pet: Pet) -> dict[str, Any]:
     preventive_rows = _fetch_preventive_rows(db, pet.id)
     diagnostics_desc = _fetch_diagnostic_rows_desc(db, pet.id)
 
-    ask_vet_conditions = []
-    for condition in conditions:
-        questions = await _get_condition_questions(db, pet, condition)
-        ask_vet_conditions.append(
-            {
-                "id": str(condition.id),
-                "icon": condition.icon or "🩺",
-                "label": condition.name,
-                "condition_tag": condition.condition_type,
-                "headline": _condition_headline(condition),
-                "trend": _condition_trend(condition),
-                "questions": questions,
-                "chart_data": _build_condition_chart_data(condition, diagnostics_desc),
-                "timeline_data": _build_condition_timeline(condition),
-            }
-        )
+    # Fetch vet questions for all conditions in parallel — each call may make a GPT
+    # API call, so sequential execution multiplies latency by N conditions.
+    all_questions = await asyncio.gather(
+        *[_get_condition_questions(db, pet, condition) for condition in conditions]
+    )
+    ask_vet_conditions = [
+        {
+            "id": str(condition.id),
+            "icon": condition.icon or "🩺",
+            "label": condition.name,
+            "condition_tag": condition.condition_type,
+            "headline": _condition_headline(condition),
+            "trend": _condition_trend(condition),
+            "questions": questions,
+            "chart_data": _build_condition_chart_data(condition, diagnostics_desc),
+            "timeline_data": _build_condition_timeline(condition),
+        }
+        for condition, questions in zip(conditions, all_questions)
+    ]
 
     ask_vet = {"conditions": ask_vet_conditions} if ask_vet_conditions else None
 

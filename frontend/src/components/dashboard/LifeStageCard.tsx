@@ -90,7 +90,7 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
       </div>
 
       {/* Progress bar */}
-      <div className="stage-bar" style={{ marginBottom: 3 }}>
+      <div className="stage-bar" style={{ marginBottom: 8 }}>
         {STAGE_LABELS.map((label, index) => (
           <div
             key={label}

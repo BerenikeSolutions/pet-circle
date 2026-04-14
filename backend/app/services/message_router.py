@@ -23,7 +23,7 @@ Rules:
 import asyncio
 import logging
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -401,10 +401,18 @@ async def stop_document_window_sweeper() -> None:
     _document_window_sweeper_task = None
 
 
+_DEFERRED_MARKER_STALE_MINUTES: int = 30  # Auto-clear threshold (no pending docs + age)
+
+
 def _has_pending_deferred_care_plan(db: Session, pet_id, user=None) -> bool:
-    """Return True when per-pet marker or legacy user pending flag indicates deferred send."""
+    """Return True when per-pet marker or legacy user pending flag indicates deferred send.
+
+    Stale markers (older than _DEFERRED_MARKER_STALE_MINUTES with no pending documents)
+    are auto-cleared so users are never permanently locked out if the extraction
+    pipeline fails before reaching _send_deferred_care_plan.
+    """
     marker = (
-        db.query(DeferredCarePlanPending.id)
+        db.query(DeferredCarePlanPending)
         .filter(
             DeferredCarePlanPending.pet_id == pet_id,
             DeferredCarePlanPending.is_cleared == False,
@@ -412,6 +420,32 @@ def _has_pending_deferred_care_plan(db: Session, pet_id, user=None) -> bool:
         .first()
     )
     if marker is not None:
+        # Auto-clear stale marker: if it's been more than the threshold and
+        # there are no pending documents left, the extraction pipeline is done
+        # (success, failure, or lost) — unblock the user.
+        stale_cutoff = datetime.utcnow() - timedelta(minutes=_DEFERRED_MARKER_STALE_MINUTES)
+        if marker.created_at and marker.created_at < stale_cutoff:
+            pending_doc_count = (
+                db.query(Document)
+                .filter(Document.pet_id == pet_id, Document.extraction_status == "pending")
+                .count()
+            )
+            if pending_doc_count == 0:
+                logger.info(
+                    "Auto-clearing stale deferred marker for pet=%s (age > %dmin, no pending docs)",
+                    str(pet_id), _DEFERRED_MARKER_STALE_MINUTES,
+                )
+                try:
+                    marker.is_cleared = True
+                    marker.cleared_at = datetime.utcnow()
+                    db.commit()
+                except Exception as _clr_err:
+                    logger.warning("Failed to auto-clear stale marker: %s", _clr_err)
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                return False
         return True
 
     # Backward compatibility during rollout from user-level pending flag.
@@ -1102,7 +1136,6 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
     # When the user mentions a vet-prescribed food in a message, extract and
     # persist it as a tagged diet item, then also answer any question present.
     if _is_vet_diet_intent(text_lower):
-        from app.models.pet import Pet
         chat_pet = (
             db.query(Pet)
             .filter(Pet.user_id == user.id, Pet.is_deleted == False)
@@ -1121,7 +1154,6 @@ async def _send_help_menu(db: Session, from_number: str, user=None) -> None:
     """Send the help/commands menu to the user, personalised with pet name."""
     pet_name = None
     if user:
-        from app.models.pet import Pet
         pet = db.query(Pet).filter(Pet.user_id == user.id).order_by(Pet.created_at.desc()).first()
         if pet:
             pet_name = pet.name
@@ -1789,6 +1821,27 @@ async def run_extraction_batch(
                 "[extraction] No pending docs found for pet=%s (already processed?)",
                 pet_key,
             )
+            # Docs were processed by another consumer or path — still clear any
+            # lingering deferred marker so the user is not permanently locked out.
+            user = bg_db.query(User).filter(User.id == user_id).first()
+            pet = bg_db.query(Pet).filter(Pet.id == pet_id).first()
+            if pet and _has_pending_deferred_care_plan(bg_db, pet.id, user=user):
+                try:
+                    _clear_deferred_care_plan_marker(bg_db, pet.id, user=user)
+                    bg_db.commit()
+                    logger.info(
+                        "[extraction] Cleared stale deferred marker for pet=%s (no pending docs)",
+                        pet_key,
+                    )
+                except Exception as _clr_exc:
+                    logger.warning(
+                        "[extraction] Could not clear stale deferred marker for pet=%s: %s",
+                        pet_key, _clr_exc,
+                    )
+                    try:
+                        bg_db.rollback()
+                    except Exception:
+                        pass
             return
 
         total = len(pending_docs)
@@ -2610,27 +2663,23 @@ async def _send_deferred_care_plan(
 
         diet_items = db.query(DietItem).filter(DietItem.pet_id == pet.id).all()
 
-        # Pre-warm health_conditions_v2 so the dashboard shows it on first load.
-        # Runs as a background task in parallel with care plan message assembly.
-        try:
-            import asyncio as _asyncio_cp
-            from app.services.precompute_service import precompute_dashboard_enrichments
-            _asyncio_cp.create_task(precompute_dashboard_enrichments(str(pet.id)))
-        except Exception as _pre_exc:
-            logger.warning(
-                "health_conditions_v2 precompute scheduling failed for pet=%s: %s",
-                str(pet.id), _pre_exc,
-            )
+        # Pre-warm dashboard cache concurrently with care plan message assembly.
+        # Both are awaited together so the cache is guaranteed to be warm before
+        # the dashboard link is sent — the user never clicks into a cold cache.
+        from app.services.precompute_service import precompute_dashboard_enrichments
 
-        care_plan_msg = await _generate_care_plan_message(
-            db=db,
-            pet=pet,
-            diet_count=diet_count,
-            supplement_count=supplement_count,
-            record_count=record_count,
-            docs_uploaded=docs_uploaded,
-            conditions=conditions,
-            diet_items=diet_items,
+        care_plan_msg, _ = await asyncio.gather(
+            _generate_care_plan_message(
+                db=db,
+                pet=pet,
+                diet_count=diet_count,
+                supplement_count=supplement_count,
+                record_count=record_count,
+                docs_uploaded=docs_uploaded,
+                conditions=conditions,
+                diet_items=diet_items,
+            ),
+            precompute_dashboard_enrichments(str(pet.id)),
         )
 
         dashboard_link = _get_dashboard_link(db, pet)

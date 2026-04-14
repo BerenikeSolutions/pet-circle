@@ -303,7 +303,7 @@ async def test_extraction():
         _derive_blood_test_fallback_items,
         _infer_document_category,
         _resolve_document_category,
-        _validate_extraction_json,
+        _validate_extraction_dict,
     )
     from app.utils.file_reader import (
         encode_image_base64,
@@ -312,11 +312,14 @@ async def test_extraction():
     )
 
     repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    candidate_dirs = [
-        os.path.join(repo_root, "Sample_Reports"),
-        os.path.join(repo_root, "fixtures", "sample_reports"),
-    ]
-    fixtures_dir = next((path for path in candidate_dirs if os.path.exists(path)), candidate_dirs[0])
+    if os.environ.get("FIXTURES_DIR"):
+        fixtures_dir = os.environ["FIXTURES_DIR"]
+    else:
+        candidate_dirs = [
+            os.path.join(repo_root, "Sample_Reports"),
+            os.path.join(repo_root, "fixtures", "sample_reports"),
+        ]
+        fixtures_dir = next((path for path in candidate_dirs if os.path.exists(path)), candidate_dirs[0])
 
     if not os.path.exists(fixtures_dir):
         print(f"ERROR: Fixtures directory not found: {fixtures_dir}")
@@ -344,7 +347,7 @@ async def test_extraction():
             file_bytes = f.read()
 
         start_time = time.time()
-        raw_json = None
+        parsed_dict = None
         error = None
 
         try:
@@ -353,7 +356,7 @@ async def test_extraction():
                 mime = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
                 data_uri = encode_image_base64(file_bytes, mime)
                 print(f"  Type: Image ({mime}), using vision API")
-                raw_json = await _call_openai_extraction_vision(data_uri)
+                parsed_dict = await _call_openai_extraction_vision(data_uri)
 
             elif ext == "pdf":
                 # PDF → text extraction first
@@ -362,7 +365,7 @@ async def test_extraction():
                 print(f"  Type: PDF, extracted text: {text_len} chars")
 
                 if text_len > 20:
-                    raw_json = await _call_openai_extraction(
+                    parsed_dict = await _call_openai_extraction(
                         f"Veterinary document text:\n\n{pdf_text}"
                     )
                 else:
@@ -392,9 +395,9 @@ async def test_extraction():
 
         elapsed = time.time() - start_time
 
-        if raw_json:
+        if parsed_dict:
             try:
-                items, doc_name, pet_name, metadata = _validate_extraction_json(raw_json)
+                items, doc_name, pet_name, metadata = _validate_extraction_dict(parsed_dict, file_path=filepath)
                 diagnostic_values = metadata.get("diagnostic_values", [])
                 vaccination_details = metadata.get("vaccination_details", [])
 
@@ -490,13 +493,11 @@ async def test_extraction():
 
             except ValueError as ve:
                 print(f"  VALIDATION ERROR: {ve}")
-                print(f"  Raw JSON length: {len(raw_json)} chars")
-                print(f"  Raw JSON tail: ...{raw_json[-200:]}")
+                print(f"  Parsed dict keys: {list(parsed_dict.keys()) if parsed_dict else '(none)'}")
                 results.append({
                     "file": filename,
                     "status": "validation_error",
                     "error": str(ve),
-                    "raw_json_length": len(raw_json),
                     "time_s": round(elapsed, 1),
                 })
                 file_issues = _validate_result(filename, {"status": "validation_error", "error": str(ve)})

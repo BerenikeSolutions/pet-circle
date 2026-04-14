@@ -43,6 +43,11 @@ class Contact(Base):
     address = Column(String(500), nullable=True)
     source = Column(String(20), nullable=False, default="extraction")  # extraction | manual
 
+    # Denormalized from the source document for display without joins.
+    # NULL for manually added contacts.
+    source_document_name = Column(String(200), nullable=True)
+    source_document_category = Column(String(30), nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

@@ -577,6 +577,8 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
                     "email": c.email,
                     "address": c.address,
                     "source": c.source,
+                    "source_document_name": c.source_document_name,
+                    "source_document_category": c.source_document_category,
                     "created_at": str(c.created_at) if c.created_at else None,
                 }
                 for c in rows

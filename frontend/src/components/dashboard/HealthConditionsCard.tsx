@@ -30,7 +30,15 @@ export default function HealthConditionsCard({
   onGoToTrends,
   compact = false,
 }: HealthConditionsCardProps) {
-  const health = data.health_conditions_v2;
+  const rawHealth = data.health_conditions_v2;
+  const summaryConditions = (data.health_conditions_summary ?? []).length;
+
+  // Guard: if the AI cache reports 0 conditions but the DB summary has live conditions,
+  // the cache is stale (precompute ran before extraction committed). Fall through to the
+  // summary fallback so real conditions are never hidden.
+  const health = rawHealth && rawHealth.meta.total_conditions === 0 && summaryConditions > 0
+    ? null
+    : rawHealth;
 
   // If Health Prompt 5 result is available, use it directly.
   if (health) {

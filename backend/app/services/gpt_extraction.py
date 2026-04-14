@@ -627,6 +627,12 @@ def _pet_name_matches_document_name(extracted_pet_name: str | None, pet_name: st
     return False
 
 
+# Document categories from which vet contacts may be created.
+# Lab/diagnostic reports (Blood Report, Urine Report, Imaging, PCR & Parasite Panel)
+# mention a requesting/signing doctor but that name is not a reliable vet contact.
+_CLINICAL_CONTACT_CATEGORIES: frozenset[str] = frozenset({"Vaccination", "Prescription"})
+
+
 def _is_plausible_doctor_name(value: str | None, pet_name: str | None = None) -> bool:
     """Reject obvious non-doctor text such as owner labels or pet-name fragments."""
     normalized_value = _normalize_name_for_matching(value)
@@ -726,9 +732,9 @@ def _append_single_extracted_date_to_filename(
 
     # Convert to MonYY format (e.g., "Sep25" for September 2025)
     date_obj = datetime.strptime(only_date_iso, "%Y-%m-%d")
-    date_suffix = date_obj.strftime("%b%y").lower()  # e.g., "sep25"
+    date_suffix = date_obj.strftime("%b%y")  # e.g., "Sep25"
 
-    if date_suffix in original_filename:
+    if date_suffix.lower() in original_filename.lower():
         return original_filename
 
     # Append date before extension when present.
@@ -3045,132 +3051,157 @@ async def extract_and_process_document(
                 )
 
         # --- Store extracted contacts (deduplicated) ---
-        extracted_contacts = metadata.get("contacts") or []
-        # Deduplicate by (name, role) — keep last occurrence (richest data).
-        seen_contacts: dict[tuple[str, str], dict] = {}
-        for raw_contact in extracted_contacts:
-            if not isinstance(raw_contact, dict):
-                continue
-            c_name = str(raw_contact.get("name") or "").strip()
-            if not c_name:
-                continue
-            c_role = str(raw_contact.get("role") or "veterinarian").strip().lower()
-            if c_role not in ("veterinarian", "groomer", "trainer", "specialist", "other"):
-                c_role = "veterinarian"
-            key = (c_name, c_role)
-            # Merge: keep non-None fields from later duplicates.
-            if key in seen_contacts:
-                prev = seen_contacts[key]
-                for field in ("clinic_name", "phone", "email", "address"):
-                    if raw_contact.get(field) and not prev.get(field):
-                        prev[field] = raw_contact[field]
-            else:
-                seen_contacts[key] = {**raw_contact, "name": c_name, "role": c_role}
-
-        for (contact_name, role), raw_contact in seen_contacts.items():
-            try:
-                # Flush first to ensure session is clean before querying.
-                db.flush()
-
-                # Upsert by (pet_id, name, role).
-                existing_contact = (
-                    db.query(Contact)
-                    .filter(Contact.pet_id == pet.id, Contact.name == contact_name, Contact.role == role)
-                    .first()
-                )
-                if existing_contact:
-                    if raw_contact.get("clinic_name"):
-                        existing_contact.clinic_name = str(raw_contact["clinic_name"])[:200]
-                    if raw_contact.get("phone"):
-                        existing_contact.phone = str(raw_contact["phone"])[:30]
-                    if raw_contact.get("email"):
-                        existing_contact.email = str(raw_contact["email"])[:200]
-                    if raw_contact.get("address"):
-                        existing_contact.address = str(raw_contact["address"])[:500]
-                    existing_contact.document_id = document.id
+        # Only process contacts from clinical documents. Lab/diagnostic reports
+        # (Blood Report, Urine Report, Imaging, PCR & Parasite Panel) may reference
+        # a requesting doctor but that is not a reliable vet contact.
+        if document_category in _CLINICAL_CONTACT_CATEGORIES:
+            extracted_contacts = metadata.get("contacts") or []
+            # Deduplicate by (name, role) — keep last occurrence (richest data).
+            seen_contacts: dict[tuple[str, str], dict] = {}
+            for raw_contact in extracted_contacts:
+                if not isinstance(raw_contact, dict):
+                    continue
+                c_name = str(raw_contact.get("name") or "").strip()
+                if not c_name:
+                    continue
+                c_role = str(raw_contact.get("role") or "veterinarian").strip().lower()
+                if c_role not in ("veterinarian", "groomer", "trainer", "specialist", "other"):
+                    c_role = "veterinarian"
+                key = (c_name, c_role)
+                # Merge: keep non-None fields from later duplicates.
+                if key in seen_contacts:
+                    prev = seen_contacts[key]
+                    for field in ("clinic_name", "phone", "email", "address"):
+                        if raw_contact.get(field) and not prev.get(field):
+                            prev[field] = raw_contact[field]
                 else:
-                    db.add(Contact(
-                        pet_id=pet.id,
-                        document_id=document.id,
-                        role=role,
-                        name=contact_name[:200],
-                        clinic_name=(str(raw_contact.get("clinic_name"))[:200] if raw_contact.get("clinic_name") else None),
-                        phone=(str(raw_contact.get("phone"))[:30] if raw_contact.get("phone") else None),
-                        email=(str(raw_contact.get("email"))[:200] if raw_contact.get("email") else None),
-                        address=(str(raw_contact.get("address"))[:500] if raw_contact.get("address") else None),
-                        source="extraction",
-                    ))
-                    db.flush()
-            except Exception as e:
-                db.rollback()
-                logger.warning(
-                    "Error storing extracted contact '%s': %s. document_id=%s",
-                    contact_name, str(e), str(document_id),
-                )
+                    seen_contacts[key] = {**raw_contact, "name": c_name, "role": c_role}
 
-        # Auto-create contact from document-level doctor_name/clinic_name.
-        if selected_doctor_name and _is_plausible_doctor_name(selected_doctor_name, pet_name=pet.name):
-            try:
-                db.flush()
-                existing_doc_contact = (
-                    db.query(Contact)
-                    .filter(Contact.pet_id == pet.id, Contact.name == selected_doctor_name, Contact.role == "veterinarian")
-                    .first()
-                )
-                if not existing_doc_contact:
-                    db.add(Contact(
-                        pet_id=pet.id,
-                        document_id=document.id,
-                        role="veterinarian",
-                        name=selected_doctor_name[:200],
-                        clinic_name=(str(metadata["clinic_name"])[:200] if metadata["clinic_name"] else None),
-                        source="extraction",
-                    ))
+            for (contact_name, role), raw_contact in seen_contacts.items():
+                try:
+                    # Flush first to ensure session is clean before querying.
                     db.flush()
-            except Exception as e:
-                db.rollback()
-                logger.warning(
-                    "Error auto-creating contact from doctor_name '%s': %s",
-                    selected_doctor_name, str(e),
-                )
 
-        # Auto-create contacts from ALL item-level doctor names.
-        # A single document (e.g. vaccination card) may mention multiple doctors
-        # across different line items — each should be stored as a contact.
-        for item in extracted_items:
-            item_doctor = item.get("doctor_name")
-            item_clinic = item.get("clinic_name")
-            if not item_doctor or not isinstance(item_doctor, str):
-                continue
-            item_doctor = item_doctor.strip()
-            if not item_doctor or not _is_plausible_doctor_name(item_doctor, pet_name=pet.name):
-                continue
-            # Skip if it's the same as the document-level doctor (already handled above)
-            if selected_doctor_name and item_doctor.lower() == selected_doctor_name.lower():
-                continue
-            try:
-                db.flush()
-                existing_item_contact = (
-                    db.query(Contact)
-                    .filter(Contact.pet_id == pet.id, Contact.name == item_doctor, Contact.role == "veterinarian")
-                    .first()
-                )
-                if not existing_item_contact:
-                    db.add(Contact(
-                        pet_id=pet.id,
-                        document_id=document.id,
-                        role="veterinarian",
-                        name=item_doctor[:200],
-                        clinic_name=(str(item_clinic)[:200] if item_clinic else
-                                     (str(metadata["clinic_name"])[:200] if metadata["clinic_name"] else None)),
-                        source="extraction",
-                    ))
+                    # Upsert by (pet_id, name, role).
+                    existing_contact = (
+                        db.query(Contact)
+                        .filter(Contact.pet_id == pet.id, Contact.name == contact_name, Contact.role == role)
+                        .first()
+                    )
+                    if existing_contact:
+                        if raw_contact.get("clinic_name"):
+                            existing_contact.clinic_name = str(raw_contact["clinic_name"])[:200]
+                        if raw_contact.get("phone"):
+                            existing_contact.phone = str(raw_contact["phone"])[:30]
+                        if raw_contact.get("email"):
+                            existing_contact.email = str(raw_contact["email"])[:200]
+                        if raw_contact.get("address"):
+                            existing_contact.address = str(raw_contact["address"])[:500]
+                        # Update source tracking to reflect the latest clinical document.
+                        existing_contact.document_id = document.id
+                        existing_contact.source_document_name = document.document_name
+                        existing_contact.source_document_category = document.document_category
+                    else:
+                        db.add(Contact(
+                            pet_id=pet.id,
+                            document_id=document.id,
+                            role=role,
+                            name=contact_name[:200],
+                            clinic_name=(str(raw_contact.get("clinic_name"))[:200] if raw_contact.get("clinic_name") else None),
+                            phone=(str(raw_contact.get("phone"))[:30] if raw_contact.get("phone") else None),
+                            email=(str(raw_contact.get("email"))[:200] if raw_contact.get("email") else None),
+                            address=(str(raw_contact.get("address"))[:500] if raw_contact.get("address") else None),
+                            source="extraction",
+                            source_document_name=document.document_name,
+                            source_document_category=document.document_category,
+                        ))
+                        db.flush()
+                except Exception as e:
+                    db.rollback()
+                    logger.warning(
+                        "Error storing extracted contact '%s': %s. document_id=%s",
+                        contact_name, str(e), str(document_id),
+                    )
+
+            # Auto-create contact from document-level doctor_name/clinic_name.
+            if selected_doctor_name and _is_plausible_doctor_name(selected_doctor_name, pet_name=pet.name):
+                try:
                     db.flush()
-            except Exception as e:
-                db.rollback()
-                logger.warning(
-                    "Error auto-creating contact from item doctor_name '%s': %s",
-                    item_doctor, str(e),
+                    existing_doc_contact = (
+                        db.query(Contact)
+                        .filter(Contact.pet_id == pet.id, Contact.name == selected_doctor_name, Contact.role == "veterinarian")
+                        .first()
+                    )
+                    if existing_doc_contact:
+                        # Refresh source tracking to reflect the latest clinical document.
+                        existing_doc_contact.document_id = document.id
+                        existing_doc_contact.source_document_name = document.document_name
+                        existing_doc_contact.source_document_category = document.document_category
+                        db.flush()
+                    else:
+                        db.add(Contact(
+                            pet_id=pet.id,
+                            document_id=document.id,
+                            role="veterinarian",
+                            name=selected_doctor_name[:200],
+                            clinic_name=(str(metadata["clinic_name"])[:200] if metadata["clinic_name"] else None),
+                            source="extraction",
+                            source_document_name=document.document_name,
+                            source_document_category=document.document_category,
+                        ))
+                        db.flush()
+                except Exception as e:
+                    db.rollback()
+                    logger.warning(
+                        "Error auto-creating contact from doctor_name '%s': %s",
+                        selected_doctor_name, str(e),
+                    )
+
+            # Auto-create contacts from ALL item-level doctor names.
+            # A single document (e.g. vaccination card) may mention multiple doctors
+            # across different line items — each should be stored as a contact.
+            for item in extracted_items:
+                item_doctor = item.get("doctor_name")
+                item_clinic = item.get("clinic_name")
+                if not item_doctor or not isinstance(item_doctor, str):
+                    continue
+                item_doctor = item_doctor.strip()
+                if not item_doctor or not _is_plausible_doctor_name(item_doctor, pet_name=pet.name):
+                    continue
+                # Skip if it's the same as the document-level doctor (already handled above)
+                if selected_doctor_name and item_doctor.lower() == selected_doctor_name.lower():
+                    continue
+                try:
+                    db.flush()
+                    existing_item_contact = (
+                        db.query(Contact)
+                        .filter(Contact.pet_id == pet.id, Contact.name == item_doctor, Contact.role == "veterinarian")
+                        .first()
+                    )
+                    if existing_item_contact:
+                        # Refresh source tracking to reflect the latest clinical document.
+                        existing_item_contact.document_id = document.id
+                        existing_item_contact.source_document_name = document.document_name
+                        existing_item_contact.source_document_category = document.document_category
+                        db.flush()
+                    else:
+                        db.add(Contact(
+                            pet_id=pet.id,
+                            document_id=document.id,
+                            role="veterinarian",
+                            name=item_doctor[:200],
+                            clinic_name=(str(item_clinic)[:200] if item_clinic else
+                                         (str(metadata["clinic_name"])[:200] if metadata["clinic_name"] else None)),
+                            source="extraction",
+                            source_document_name=document.document_name,
+                            source_document_category=document.document_category,
+                        ))
+                        db.flush()
+                except Exception as e:
+                    db.rollback()
+                    logger.warning(
+                        "Error auto-creating contact from item doctor_name '%s': %s",
+                        item_doctor, str(e),
                 )
 
         # --- Non-pet document check ---

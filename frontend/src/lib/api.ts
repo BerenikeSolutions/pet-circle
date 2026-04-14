@@ -160,6 +160,8 @@ export interface ContactItem {
   email: string | null;
   address: string | null;
   source: string;
+  source_document_name: string | null;
+  source_document_category: string | null;
   created_at: string | null;
 }
 

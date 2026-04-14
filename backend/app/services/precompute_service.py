@@ -206,6 +206,79 @@ async def precompute_dashboard_enrichments(pet_id_str: str) -> None:
         finally:
             db.close()
 
+    async def _run_vet_questions() -> None:
+        """Pre-warm per-condition ask-vet questions for every active condition.
+
+        Uses the same insight_type key pattern (vet_questions:{condition_id}) and
+        condition filter (chronic/episodic) as _get_condition_questions in
+        health_trends_service so the health-trends endpoint always hits cache.
+        """
+        db: Session = SessionLocal()
+        try:
+            pet = db.query(Pet).filter(Pet.id == pet_id).first()
+            if not pet:
+                return
+            from app.models.condition import Condition
+            from app.services.ai_insights_service import get_or_generate_insight
+            from sqlalchemy.orm import selectinload
+
+            condition_rows = (
+                db.query(Condition)
+                .options(
+                    selectinload(Condition.medications),
+                    selectinload(Condition.monitoring),
+                )
+                .filter(
+                    Condition.pet_id == pet_id,
+                    Condition.is_active == True,
+                    Condition.condition_type.in_({"chronic", "episodic"}),
+                )
+                .all()
+            )
+
+            if not condition_rows:
+                return
+
+            pet_dict = {"name": pet.name, "species": pet.species, "breed": pet.breed}
+
+            async def _warm_one(cond: Condition) -> None:
+                condition_payload = {
+                    "name": cond.name,
+                    "condition_type": cond.condition_type,
+                    "medications": [
+                        {"name": m.name, "dose": m.dose, "frequency": m.frequency}
+                        for m in (cond.medications or [])
+                    ],
+                    "monitoring": [
+                        {
+                            "name": m.name,
+                            "next_due_date": m.next_due_date.isoformat() if m.next_due_date else None,
+                            "last_done_date": m.last_done_date.isoformat() if m.last_done_date else None,
+                        }
+                        for m in (cond.monitoring or [])
+                    ],
+                }
+                await get_or_generate_insight(
+                    db=db,
+                    pet_id=pet.id,
+                    insight_type=f"vet_questions:{cond.id}",
+                    pet=pet_dict,
+                    conditions=[condition_payload],
+                    health_score={"score": None},
+                    force=False,
+                )
+
+            # Warm all conditions concurrently — each uses a different insight_type key.
+            await asyncio.gather(*[_warm_one(cond) for cond in condition_rows])
+            logger.info(
+                "precompute: vet_questions cached for pet=%s (%d conditions)",
+                pet_id_str, len(condition_rows),
+            )
+        except Exception as exc:
+            logger.warning("precompute: vet_questions failed for pet=%s: %s", pet_id_str, exc)
+        finally:
+            db.close()
+
     async def _run_care_plan_reasons(diet_summary: dict) -> None:
         db: Session = SessionLocal()
         try:
@@ -240,6 +313,7 @@ async def precompute_dashboard_enrichments(pet_id_str: str) -> None:
             _run_nutrition_analysis(),
             _run_life_stage(),
             _run_health_conditions_v2(),
+            _run_vet_questions(),
         )
 
         # Phase 2: care_plan_reasons depends on diet_summary — run after phase 1.

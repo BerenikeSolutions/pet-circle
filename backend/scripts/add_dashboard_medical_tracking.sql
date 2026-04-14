@@ -83,7 +83,7 @@ CREATE TABLE IF NOT EXISTS diagnostic_test_results (
   updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
 
   CONSTRAINT chk_diagnostic_test_type
-    CHECK (test_type IN ('blood', 'urine')),
+    CHECK (test_type IN ('blood', 'urine', 'vital')),
   CONSTRAINT chk_diagnostic_status_flag
     CHECK (status_flag IS NULL OR status_flag IN ('low', 'normal', 'high', 'abnormal')),
   CONSTRAINT chk_diagnostic_value_present

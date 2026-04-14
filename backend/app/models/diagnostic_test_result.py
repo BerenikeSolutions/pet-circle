@@ -19,7 +19,7 @@ class DiagnosticTestResult(Base):
     pet_id = Column(UUID(as_uuid=True), ForeignKey("pets.id", ondelete="CASCADE"), index=True, nullable=False)
     document_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"), index=True, nullable=True)
 
-    test_type = Column(String(30), nullable=False)  # blood | urine
+    test_type = Column(String(30), nullable=False)  # blood | urine | vital
     parameter_name = Column(String(120), nullable=False)
     value_numeric = Column(Numeric(14, 4), nullable=True)
     value_text = Column(String(200), nullable=True)

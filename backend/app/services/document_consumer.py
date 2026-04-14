@@ -10,9 +10,9 @@ Queues:
     dashboard.precompute  — calls precompute_dashboard_enrichments() from precompute_service
 
 Concurrency:
-    Prefetch is capped at 1–5 (env RABBITMQ_PREFETCH_COUNT, default 4).
-    Keeps at most 4 batch jobs in-flight at once, limiting concurrent GPT API
-    calls and memory pressure on Render's free tier (~512 MB RAM).
+    Both queues share RABBITMQ_PREFETCH_COUNT (default 4, clamped 1–5).
+    Keeps at most that many batch jobs in-flight across each queue, limiting
+    concurrent GPT API calls and memory pressure on Render's free tier (~512 MB RAM).
 
 Retry policy (document.extract):
     Up to 3 attempts (tracked via "attempt" field in the job payload).
@@ -197,12 +197,12 @@ async def start_consuming() -> None:
         # Separate connection from the publisher so QoS settings are isolated.
         connection = await aio_pika.connect_robust(url)
 
-        # One channel per queue — different prefetch counts.
+        # Both channels share the same prefetch count from RABBITMQ_PREFETCH_COUNT.
         extract_channel = await connection.channel()
         await extract_channel.set_qos(prefetch_count=prefetch)
 
         precompute_channel = await connection.channel()
-        await precompute_channel.set_qos(prefetch_count=2)
+        await precompute_channel.set_qos(prefetch_count=prefetch)
 
         # passive=True: queues were already declared by queue_service.connect().
         extract_queue = await extract_channel.declare_queue(
@@ -216,8 +216,8 @@ async def start_consuming() -> None:
         await precompute_queue.consume(_handle_precompute_job)
 
         logger.info(
-            "[consumer] Listening on %s (prefetch=%d) and %s (prefetch=2)",
-            QUEUE_DOCUMENT_EXTRACT, prefetch, QUEUE_DASHBOARD_PRECOMPUTE,
+            "[consumer] Listening on %s and %s (prefetch=%d)",
+            QUEUE_DOCUMENT_EXTRACT, QUEUE_DASHBOARD_PRECOMPUTE, prefetch,
         )
 
         # Block here until stop() is called during FastAPI shutdown.

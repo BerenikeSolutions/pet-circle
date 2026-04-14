@@ -19,19 +19,43 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+_MAX_IMAGE_DIMENSION = 7900  # Anthropic API hard limit is 8000px per dimension
+
+
 def encode_image_base64(file_bytes: bytes, mime_type: str) -> str:
     """
-    Base64-encode image bytes for the OpenAI vision API.
+    Base64-encode image bytes for the Anthropic vision API.
 
-    Returns a data URI string: data:{mime_type};base64,{encoded_data}
+    Downscales the image if either dimension exceeds _MAX_IMAGE_DIMENSION (7900px)
+    to comply with the Anthropic API limit of 8000px per dimension.
 
     Args:
         file_bytes: Raw image bytes.
         mime_type: MIME type (image/jpeg or image/png).
 
     Returns:
-        Data URI string for use in OpenAI vision API messages.
+        Data URI string: data:{mime_type};base64,{encoded_data}
     """
+    try:
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(file_bytes))
+        w, h = img.size
+        if w > _MAX_IMAGE_DIMENSION or h > _MAX_IMAGE_DIMENSION:
+            scale = _MAX_IMAGE_DIMENSION / max(w, h)
+            new_w, new_h = int(w * scale), int(h * scale)
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+            buf = io.BytesIO()
+            fmt = "JPEG" if mime_type == "image/jpeg" else "PNG"
+            img.save(buf, format=fmt, quality=92)
+            file_bytes = buf.getvalue()
+            logger.debug(
+                "Resized image from %dx%d to %dx%d for Anthropic API limit",
+                w, h, new_w, new_h,
+            )
+    except Exception as e:
+        logger.warning("Image resize skipped (PIL unavailable or error): %s", e)
+
     encoded = base64.b64encode(file_bytes).decode("utf-8")
     return f"data:{mime_type};base64,{encoded}"
 
