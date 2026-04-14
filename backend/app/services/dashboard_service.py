@@ -32,7 +32,7 @@ Rules:
 
 import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import func
@@ -47,20 +47,16 @@ from app.models.diagnostic_test_result import DiagnosticTestResult
 from app.models.diet_item import DietItem
 from app.models.document import Document
 from app.models.pet import Pet
+from app.models.pet_ai_insight import PetAiInsight
 from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
 from app.models.reminder import Reminder
 from app.models.user import User
-from app.services.ai_insights_service import (
-    AI_INSIGHT_CACHE_DAYS,
-    generate_care_plan_reasons,
-    generate_recognition_bullets,
-)
+from app.services.ai_insights_service import AI_INSIGHT_CACHE_DAYS
 from app.services.care_plan_engine import compute_care_plan, get_preventive_baseline_days, _normalize_item_name
 from app.services.document_upload import download_from_supabase
 from app.services.gpt_extraction import _infer_document_category, _resolve_document_category
 from app.services.life_stage_service import get_life_stage_data
-from app.services.nutrition_service import get_diet_summary
 from app.services.preventive_calculator import (
     compute_next_due_date,
     compute_status,
@@ -385,38 +381,39 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
     dashboard_token = validate_dashboard_token(db, token)
     pet_id = dashboard_token.pet_id
 
+    # --- Load Pet + User together — avoids a second round-trip for the owner row ---
+    from sqlalchemy.orm import joinedload
+    pet = (
+        db.query(Pet)
+        .options(joinedload(Pet.user))
+        .filter(Pet.id == pet_id)
+        .first()
+    )
+    if not pet or pet.is_deleted:
+        raise ValueError("Pet not found or has been removed.")
+    user = pet.user  # already loaded — no extra query
+
     # --- Record dashboard visit for nudge level tracking (N8) ---
     # Best-effort: never crash the dashboard load on a logging failure.
-    # user_id is resolved via pet.user_id (DashboardToken has no user_id FK).
     # Count previous visits BEFORE inserting new one to determine first visit.
     is_first_visit = True
     try:
         from app.models.dashboard_visit import DashboardVisit
-        _visit_pet = db.query(Pet).filter(Pet.id == pet_id).first()
-        if _visit_pet:
-            previous_visit_count = (
-                db.query(func.count(DashboardVisit.id))
-                .filter(DashboardVisit.pet_id == pet_id)
-                .scalar()
-                or 0
-            )
-            is_first_visit = previous_visit_count == 0
-            # Defer the INSERT into a background task — the dashboard response
-            # never reads it back, so there's no reason to keep callers waiting
-            # on another write inside the main transaction.
-            _visit_user_id = _visit_pet.user_id
-            asyncio.create_task(
-                _record_dashboard_visit_bg(_visit_user_id, pet_id, token)
-            )
+        previous_visit_count = (
+            db.query(func.count(DashboardVisit.id))
+            .filter(DashboardVisit.pet_id == pet_id)
+            .scalar()
+            or 0
+        )
+        is_first_visit = previous_visit_count == 0
+        # Defer the INSERT into a background task — the dashboard response
+        # never reads it back, so there's no reason to keep callers waiting
+        # on another write inside the main transaction.
+        asyncio.create_task(
+            _record_dashboard_visit_bg(pet.user_id, pet_id, token)
+        )
     except Exception:
         logger.warning("Failed to record dashboard visit for token=%s...", token[:8])
-
-    # --- Load pet + owner in one query via join ---
-    pet = db.query(Pet).filter(Pet.id == pet_id).first()
-    if not pet or pet.is_deleted:
-        raise ValueError("Pet not found or has been removed.")
-
-    user = db.query(User).filter(User.id == pet.user_id).first()
 
     # --- Load preventive records with master item names ---
     # Also compute health score inline to avoid a duplicate DB query.
@@ -511,7 +508,6 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
 
         # Recompute next_due_date from last_done_date + effective_recurrence so the
         # displayed date is always consistent with care_plan_engine's computation.
-        from datetime import timedelta
         if record.last_done_date and test_type in _LIFE_STAGE_TYPES:
             display_next_due = str(record.last_done_date + timedelta(days=effective_recurrence))
         else:
@@ -574,9 +570,16 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
                 "is_core": bool(master.is_core) if master.is_core is not None else False,
             })
 
-    # --- Health score (6-category, single source of truth) ---
-    from app.services.health_score import compute_health_score
-    health_score = compute_health_score(db, pet_id)
+    # --- Load diet items early — needed by health_score and nutrition tab ---
+    diet_rows = (
+        db.query(DietItem)
+        .filter(DietItem.pet_id == pet_id)
+        .order_by(DietItem.created_at.asc())
+        .all()
+    )
+
+    # Health score removed — not computed.
+    health_score = None
 
     # --- Load active reminders ---
     reminders = (
@@ -737,13 +740,7 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
             "created_at": str(contact.created_at) if contact.created_at else None,
         })
 
-    # --- Load diet items (nutrition tab) ---
-    diet_rows = (
-        db.query(DietItem)
-        .filter(DietItem.pet_id == pet_id)
-        .order_by(DietItem.created_at.asc())
-        .all()
-    )
+    # --- Format diet items for nutrition tab (diet_rows already loaded above) ---
     diet_items_data = [
         {
             "id": str(d.id),
@@ -790,12 +787,13 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
             })
 
     # --- Dashboard Rebuild v2 enrichments ---
-    # Hard timeout per enrichment.
-    # Set to 45s to survive worst-case Claude 429 retry backoffs (10s + 20s)
-    # plus actual API call time. The global concurrency semaphore in retry.py
-    # prevents simultaneous callers from saturating the TPM quota, so in
-    # practice this timeout should rarely be reached.
-    _ENRICHMENT_TIMEOUT_SECONDS = 45
+    # Timeout for non-DB enrichments (life_stage, vet_summary are pure-DB/sync;
+    # only care_plan computation touches the DB synchronously). Kept at 8s —
+    # enough for any single fast operation. GPT-intensive calls (diet_summary,
+    # recognition_bullets, care_plan_reasons) are read from the pet_ai_insights
+    # cache only; background precompute (precompute_service) warms them before
+    # the dashboard link is sent, so cache should almost always be warm.
+    _ENRICHMENT_TIMEOUT_SECONDS = 8
 
     async def _safe_async_call(label: str, default, coro):
         try:
@@ -817,24 +815,80 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
             logger.error("%s failed for pet=%s: %s", label, pet_id, exc)
             return default
 
+    # --- Read diet_summary from cache (pet_ai_insights) — no API call on critical path ---
+    # precompute_service warms this before the dashboard link is sent.
+    def _read_diet_summary_cache() -> dict:
+        try:
+            cutoff = datetime.utcnow() - timedelta(hours=24)
+            row = (
+                db.query(PetAiInsight)
+                .filter(
+                    PetAiInsight.pet_id == pet_id,
+                    PetAiInsight.insight_type == "diet_summary",
+                    PetAiInsight.generated_at >= cutoff,
+                )
+                .first()
+            )
+            if row and isinstance(row.content_json, dict):
+                return row.content_json
+        except Exception:
+            pass
+        return {"macros": [], "missing_micros": []}
+
+    # --- Read recognition_bullets from cache (pet_ai_insights) — no API call on critical path ---
+    def _read_recognition_bullets_cache() -> list:
+        try:
+            cutoff = datetime.utcnow() - timedelta(hours=24)
+            row = (
+                db.query(PetAiInsight)
+                .filter(
+                    PetAiInsight.pet_id == pet_id,
+                    PetAiInsight.insight_type == "recognition_bullets",
+                    PetAiInsight.generated_at >= cutoff,
+                )
+                .first()
+            )
+            if row and isinstance(row.content_json, list):
+                return row.content_json
+        except Exception:
+            pass
+        return []
+
+    diet_summary = _read_diet_summary_cache()
+    recognition_bullets = _read_recognition_bullets_cache()
+
     empty_care_plan = {"continue_items": [], "attend_items": [], "add_items": []}
 
-    care_plan_v2, life_stage_data, vet_summary, diet_summary, recognition_bullets = await asyncio.gather(
+    care_plan_v2, life_stage_data, vet_summary = await asyncio.gather(
         _safe_sync_call("care_plan_engine.compute_care_plan", empty_care_plan, compute_care_plan, db, pet),
         _safe_async_call("life_stage_service.get_life_stage_data", None, get_life_stage_data(db, pet)),
         _safe_sync_call("vet_summary_service.get_vet_summary", None, get_vet_summary, db, pet.id),
-        _safe_async_call("nutrition_service.get_diet_summary", {"macros": [], "missing_micros": []}, get_diet_summary(db, pet)),
-        _safe_async_call("ai_insights_service.generate_recognition_bullets", [], generate_recognition_bullets(db, pet)),
     )
 
     care_plan_v2 = _normalize_care_plan_shape(care_plan_v2)
 
     orderable_items = _collect_orderable_items(care_plan_v2)
-    care_plan_reasons = await _safe_async_call(
-        "ai_insights_service.generate_care_plan_reasons",
-        {},
-        generate_care_plan_reasons(db, pet, orderable_items, diet_summary=diet_summary),
-    )
+
+    # --- Read care_plan_reasons from cache only — no API call on critical path ---
+    # If cache is stale/missing, return empty (items still render without reason text).
+    # precompute_service regenerates this in the background after each document upload.
+    care_plan_reasons: dict = {}
+    try:
+        cutoff = datetime.utcnow() - timedelta(hours=1)
+        cached_reasons_row = (
+            db.query(PetAiInsight)
+            .filter(
+                PetAiInsight.pet_id == pet_id,
+                PetAiInsight.insight_type == "care_plan_reasons",
+                PetAiInsight.generated_at >= cutoff,
+            )
+            .first()
+        )
+        if cached_reasons_row and isinstance(cached_reasons_row.content_json, dict):
+            care_plan_reasons = cached_reasons_row.content_json.get("reasons", {})
+    except Exception:
+        pass
+
     care_plan_v2 = _apply_reasons_to_care_plan(care_plan_v2, care_plan_reasons)
     care_plan_v2 = _inject_supplement_recommendations(care_plan_v2, diet_summary)
 
@@ -868,9 +922,6 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
     # /health-summary and /vet-questions API calls.
     cached_insights: dict[str, dict | None] = {"health_summary": None, "vet_questions": None}
     try:
-        from datetime import timedelta
-
-        from app.models.pet_ai_insight import PetAiInsight
         stale_cutoff = datetime.utcnow() - timedelta(days=AI_INSIGHT_CACHE_DAYS)
         insight_rows = (
             db.query(PetAiInsight)

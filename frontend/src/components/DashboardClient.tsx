@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CarePlanItem, DashboardData } from "@/lib/api";
-import { fetchDashboard } from "@/lib/api";
+import { fetchDashboard, getCachedDashboard } from "@/lib/api";
 import ErrorBoundary from "./ErrorBoundary";
 import CartView, { type CartItem } from "./CartView";
 import CheckoutView from "./cart/CheckoutView";
@@ -75,13 +75,28 @@ function DashboardInner({ token }: { token: string }) {
   const load = useCallback(async () => {
     try {
       setError("");
+
+      // Stale-while-revalidate: show localStorage cache immediately so the
+      // dashboard renders in <16ms on repeat visits while the API call runs
+      // in the background. On first visit there is no cache → show spinner.
       setData((prev) => {
         if (prev) {
+          // Already have data (prior load or cached) — show refresh indicator.
           setRefreshing(true);
-        } else {
-          setLoading(true);
+          return prev;
         }
-        return prev;
+        const cached = getCachedDashboard(token);
+        if (cached) {
+          // Paint with cached data instantly, mark stale so fresh fetch proceeds.
+          setLoading(false);
+          setRefreshing(true);
+          setStale(true);
+          setCachedAt(cached.cachedAt);
+          return cached.data;
+        }
+        // No cache — show spinner until API responds.
+        setLoading(true);
+        return null;
       });
 
       const result = await fetchDashboard(token);

@@ -428,17 +428,18 @@ async def _generate_vet_questions_gpt(pet_context: str) -> list:
         return []
 
 
-def _build_pet_context(pet, conditions: list, health_score: dict) -> str:
+def _build_pet_context(pet, conditions: list, health_score: dict | None) -> str:
     """
     Build a compact plain-text context string for GPT prompts.
 
     Includes: species, breed, age, active conditions, medications,
-    overdue monitoring items, and the health score.
+    and overdue monitoring items.
     """
     from datetime import date
 
     today = date.today()
     lines = []
+    health_score = health_score or {}
 
     # Pet basics
     age_str = ""
@@ -455,15 +456,6 @@ def _build_pet_context(pet, conditions: list, health_score: dict) -> str:
         f"Pet: {pet.get('name', 'Unknown')}, {pet.get('species', '')} ({pet.get('breed', '')})"
         f"{age_str}, {pet.get('gender', '')}, {neutered}"
     )
-
-    # Health score
-    score = health_score.get("score", 0)
-    label = health_score.get("label", "Unknown")
-    lines.append(f"Health score: {score}/100 ({label})")
-    draggers = health_score.get("draggers", [])
-    if draggers:
-        dragger_names = ", ".join(d.get("category", "") for d in draggers)
-        lines.append(f"Weak areas: {dragger_names}")
 
     # Active conditions
     if not conditions:
@@ -514,7 +506,7 @@ async def get_or_generate_insight(
     insight_type: str,
     pet: dict,
     conditions: list,
-    health_score: dict,
+    health_score: dict | None,
     force: bool = False,
 ) -> dict:
     """

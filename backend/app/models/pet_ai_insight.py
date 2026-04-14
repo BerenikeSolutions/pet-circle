@@ -6,17 +6,24 @@ dashboard load. Each (pet_id, insight_type) pair has at most one row;
 re-generation uses upsert (ON CONFLICT DO UPDATE).
 
 insight_type values:
-    'health_summary'  — 1-2 sentence plain-text health insight shown at the
-                        top of the Conditions tab.
-    'vet_questions'   — JSON list of prioritised questions to raise at the
-                        next vet visit, shown in the "Ask the Vet" section.
+    'health_summary'        — 1-2 sentence plain-text health insight (Conditions tab).
+    'vet_questions'         — JSON list of prioritised questions for the vet visit.
+    'diet_summary'          — Aggregated nutrition breakdown (Nutrition tab). Precomputed
+                              by precompute_service before the dashboard link is sent.
+    'recognition_bullets'   — "What We Found" bullets (Overview tab). Precomputed by
+                              precompute_service; pure DB, no API calls.
+    'care_plan_reasons'     — Map of item_id → reason sentence for orderable care plan
+                              items. Precomputed by precompute_service; 1h TTL.
+    'nutrition_importance'  — 3-4 sentence nutrition note (Nutrition tab). 30-day TTL.
 
 content_json schema by insight_type:
-    health_summary : {"summary": "<string>"}
-    vet_questions  : [{"priority": "urgent|high|medium",
-                       "icon": "<emoji>",
-                       "q": "<question>",
-                       "context": "<explanation>"},  ...]
+    health_summary        : {"summary": "<string>"}
+    vet_questions         : [{"priority": "urgent|high|medium", "icon": "<emoji>",
+                              "q": "<question>", "context": "<explanation>"}, ...]
+    diet_summary          : {"macros": [...], "missing_micros": [...], ...}
+    recognition_bullets   : [{"icon": "<emoji>", "label": "<string>"}, ...]
+    care_plan_reasons     : {"reasons": {"<item_id>": "<sentence>", ...}}
+    nutrition_importance  : {"note": "<string>"}
 """
 
 import uuid

@@ -541,7 +541,7 @@ export interface DashboardData {
   diagnostic_results: DiagnosticResultItem[];
   conditions: ConditionItem[];
   contacts: ContactItem[];
-  health_score: HealthScore;
+  health_score: HealthScore | null;
   vet_summary?: VetSummary | null;
   life_stage?: LifeStageData | null;
   health_conditions_summary?: HealthConditionSummary[];
@@ -683,7 +683,7 @@ export interface NudgeItem {
 const CACHE_PREFIX = DASHBOARD_CACHE_PREFIX;
 const DASHBOARD_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
 
-function getCachedDashboard(token: string): { data: DashboardData; cachedAt: string } | null {
+export function getCachedDashboard(token: string): { data: DashboardData; cachedAt: string } | null {
   try {
     const raw = localStorage.getItem(`${CACHE_PREFIX}${token}`);
     if (!raw) return null;

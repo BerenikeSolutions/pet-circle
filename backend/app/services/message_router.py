@@ -1908,6 +1908,14 @@ async def _send_dashboard_links(db, user) -> None:
 
             pet_msg = f"*{pet.name}'s Dashboard*:\n{dashboard_url}"
 
+            # Pre-warm dashboard cache so the first load reads from DB with no API calls.
+            try:
+                import asyncio as _asyncio
+                from app.services.precompute_service import precompute_dashboard_enrichments
+                _asyncio.create_task(precompute_dashboard_enrichments(str(pet.id)))
+            except Exception as _pre_exc:
+                logger.warning("precompute task scheduling failed for pet=%s: %s", pet.id, _pre_exc)
+
             # Fetch and append active reminders for this pet
             try:
                 reminders = (

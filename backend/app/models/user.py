@@ -133,6 +133,16 @@ class User(Base):
     # Nullable — None when user is not in an order flow.
     order_state = Column(String(30), nullable=True)
 
+    # --- Agentic Edit Flow State ---
+    # Set to "agentic_edit" when user is in an AI-driven profile edit conversation.
+    # Cleared to None when the edit session completes or is cancelled.
+    edit_state = Column(String(30), nullable=True)
+
+    # Transient session data for the agentic edit flow.
+    # Structure: {"messages": [...], "selected_pet_id": "<uuid>|null"}
+    # Cleared on session completion.
+    edit_data = Column(JSONB, nullable=True)
+
     # Reference to the draft order being built during the order flow.
     # SET NULL on delete so user record isn't affected if order is cleaned up.
     # use_alter=True avoids circular FK dependency during table creation.
