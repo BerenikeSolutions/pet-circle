@@ -668,6 +668,7 @@ export interface BackendDietItem {
 }
 
 export interface NutritionAnalysis {
+  // Legacy nested fields (kept for backward compat)
   calories: { actual: number; target: number; status: string };
   macros: Array<{ name: string; icon: string; actual: number; target: number; unit: string; status: string; note: string }>;
   vitamins: Array<{ name: string; status: string; supplement: string | null; price: string | null; priority: string }>;
@@ -678,6 +679,21 @@ export interface NutritionAnalysis {
   recommendation: string;
   analysis_context: string;
   gap_count: number;
+  // Flat fields for DietAnalysisCard
+  has_diet_items?: boolean;
+  calories_per_day?: number | null;
+  calorie_target?: number | null;
+  calorie_gap_pct?: number | null;
+  food_label?: string | null;
+  show_warning?: boolean;
+  warning_message?: string | null;
+  prescription_context?: string | null;
+  protein_pct?: number | null;
+  fat_pct?: number | null;
+  carbs_pct?: number | null;
+  fibre_pct?: number | null;
+  micronutrient_gaps?: Array<{ name: string; status: string; severity_score: number }> | null;
+  top_improvements?: Array<{ title: string; detail: string; severity: string }> | null;
 }
 
 export interface NudgeItem {
