@@ -497,6 +497,294 @@ def _build_pet_context(pet, conditions: list, health_score: dict | None) -> str:
 
 
 # --------------------------------------------------------------------------- #
+#  Document Aggregation Layer (Health Prompt 5 input builder)                   #
+# --------------------------------------------------------------------------- #
+
+def _aggregate_conditions_for_health_prompt(conditions: list[dict]) -> list[dict]:
+    """
+    Collapse multi-document condition data into the lean structure expected by
+    Health Prompt 5.
+
+    Per the aggregation spec only 5 signals are extracted:
+        1. episode_dates  — merged, deduplicated, sorted
+        2. latest_record_date — max date across all conditions (set at root)
+        3. medications.end_date — only end_date is kept
+        4. monitoring.recheck_due_date — only recheck_due_date is kept
+        5. diagnostic_values — minimal: parameter_name, status_flag, observed_at
+
+    Args:
+        conditions: list of condition dicts from DB (as returned by dashboard_service).
+
+    Returns:
+        Aggregated list ready for Health Prompt 5 user message.
+    """
+    conditions_map: dict[str, dict] = {}
+    all_dates: list[str] = []
+
+    for cond in conditions:
+        if not isinstance(cond, dict):
+            continue
+        name = str(cond.get("name") or cond.get("condition_name") or "").strip().lower()
+        if not name:
+            continue
+
+        if name not in conditions_map:
+            # Condition type: carry forward, prefer chronic > recurrent > episodic.
+            conditions_map[name] = {
+                "name": cond.get("name") or cond.get("condition_name") or name,
+                "condition_type": cond.get("condition_type") or "episodic",
+                "episode_dates": [],
+                "medications": [],
+                "monitoring": [],
+                "diagnostic_values": [],
+            }
+
+        entry = conditions_map[name]
+
+        # Resolve type conflicts: chronic > recurrent > episodic/acute.
+        _type_rank = {"chronic": 3, "recurrent": 2, "episodic": 1, "acute": 1}
+        existing_rank = _type_rank.get(entry["condition_type"], 0)
+        incoming_rank = _type_rank.get(cond.get("condition_type") or "episodic", 0)
+        if incoming_rank > existing_rank:
+            entry["condition_type"] = cond.get("condition_type")
+
+        # Merge episode_dates.
+        for d in (cond.get("episode_dates") or []):
+            if d and isinstance(d, str):
+                entry["episode_dates"].append(d)
+                all_dates.append(d)
+
+        # Extract only end_date from medications.
+        for med in (cond.get("medications") or []):
+            if not isinstance(med, dict):
+                continue
+            if med.get("end_date"):
+                entry["medications"].append({"end_date": med["end_date"]})
+                all_dates.append(med["end_date"])
+
+        # Extract only recheck_due_date from monitoring.
+        for mon in (cond.get("monitoring") or []):
+            if not isinstance(mon, dict):
+                continue
+            if mon.get("recheck_due_date"):
+                entry["monitoring"].append({"recheck_due_date": mon["recheck_due_date"]})
+                all_dates.append(mon["recheck_due_date"])
+
+        # Minimal diagnostic_values.
+        for dv in (cond.get("diagnostic_values") or []):
+            if not isinstance(dv, dict):
+                continue
+            if dv.get("observed_at"):
+                all_dates.append(dv["observed_at"])
+            entry["diagnostic_values"].append({
+                "parameter_name": dv.get("parameter_name") or "",
+                "status_flag": dv.get("status_flag"),
+                "observed_at": dv.get("observed_at"),
+            })
+
+    # Post-process: deduplicate and sort episode_dates.
+    for entry in conditions_map.values():
+        entry["episode_dates"] = sorted(set(entry["episode_dates"]))
+
+    # Compute latest_record_date across all dates.
+    valid_dates = [d for d in all_dates if d and isinstance(d, str)]
+    latest_record_date = max(valid_dates) if valid_dates else None
+
+    result = list(conditions_map.values())
+
+    # Attach latest_record_date to the first entry so the prompt can see it.
+    if result and latest_record_date:
+        result[0]["latest_record_date"] = latest_record_date
+
+    return result
+
+
+# --------------------------------------------------------------------------- #
+#  Health Prompt 5 — GPT-driven condition classification and status             #
+# --------------------------------------------------------------------------- #
+
+_HEALTH_CONDITIONS_V2_SYSTEM_PROMPT = """\
+You are a veterinary health assistant writing for a pet owner's conditions dashboard. You receive chronological medical records and must classify conditions, assign statuses, and write a 2-3 sentence summary focused ONLY on the pet's conditions. Do NOT mention vaccines, nutrition, grooming, checkups, or the overall health score.
+
+STEP 1 --- CLASSIFY CONDITION TYPE
+Similarity rule: Group complaints by clinical presentation and body system, not exact label. "Loose stools," "GI upset," "diarrhoea," and "colitis" are the same family. "Ear discharge," "itchy ear," and "otitis externa" are the same. Apply clinical judgement --- do not string match.
+Terminology note: "acute" and "episodic" are interchangeable. If input data carries condition_type "episodic", treat it identically to "acute" in all rules below.
+
+acute --- Single self-limiting episode, no prior similar history.
+recurrent --- Repeated episodes of the same or similar complaint with symptom-free gaps. Threshold: >=2 episodes in last 15 months OR >=3 in last 24 months; provided at least one episode falls within the most recent 15 months window. Below threshold: classify acute, set recurrence_watch: true.
+  To count episodes, use the episode_dates[] arrays from all input records for the same condition. Merge episode_dates across documents before applying the threshold.
+  Override rule: If a condition arrives with condition_type "recurrent" explicitly set by the vet in the source document (i.e., the vet labelled it recurrent), classify it as recurrent directly without requiring the episode threshold to be met.
+chronic --- Persistent condition requiring ongoing management. Identify via, in priority order:
+  1. Explicit vet/prescription label (hypothyroidism, diabetes, CKD, cardiac, etc.)
+  2. Same organ system or marker flagged across 2+ diagnostic reports on different dates
+  3. Lifelong management drug prescribed (thyroxine, insulin, enalapril, phenobarbitone, etc.)
+
+STEP 2 --- ASSIGN CONDITION STATUS
+Severity ladder (highest to lowest): needs_attention > active > monitoring > managed > resolved
+When a condition qualifies for multiple statuses, assign the highest.
+
+needs_attention --- Assign if any of these are true:
+  - Chronic: latest results significantly outside normal range with no treatment adjustment on record
+  - Any type: a recheck_due_date is present in monitoring[] and that date has passed with no new record of the recheck occurring
+  - Any type: same abnormal marker appears across 2+ tests with no workup or explanation
+  - Recurrent: threshold crossed with no investigation of underlying cause
+
+active --- Ongoing episode or treatment course where the end date has not yet passed.
+  - If medications[].end_date is present and has passed -> set resolved + soft_resolution: true
+  - If no end_date is defined and last record is older than 6 weeks -> set resolved + soft_resolution: true
+  - soft_resolution only applies to acute and recurrent types. Never to chronic.
+
+monitoring --- No active treatment but a watchout exists:
+  - Acute: abnormal lab finding from episode with no confirmed follow-up result
+  - Recurrent: between episodes, vet has noted to monitor frequency; or recurrence_watch: true and a second episode has now occurred
+  - Chronic: marker mildly outside range, vet has not initiated treatment. Never use for a stable chronic condition on consistent medication --- that is managed.
+
+managed --- Chronic or recurrent only. Stable, on medication or regular rechecks, no missed intervals, no unresolved findings.
+
+resolved --- Confirmed treatment end, no recurrence, no pending findings. Never apply to chronic without explicit vet confirmation. Silence on a chronic condition is never resolved.
+
+STEP 3 --- BUILD DISPLAY LIST
+Order: Severity ladder descending, most recent first within each group.
+Display Line:
+  - Chronic: [Condition] since [year] --- [one-line management status]
+  - Recurrent: [N] episodes of [condition] since [year] --- last episode [month year]
+  - Acute (last 30 days): condition, treatment, expected resolution
+  - Acute (1-3 months ago): condition and resolution in one clause
+  - Acute (beyond 3 months, no recurrence): collapse to resolved
+Caps:
+  - needs_attention / active / monitoring: show all
+  - managed: all chronic; recurrent capped at 2 most recent
+  - resolved: show only if fewer than 2 conditions exist in higher states; cap at 1
+  - clean: nothing shown
+Each condition must include a display_line that is complete and independently understandable when shown alone.
+Generate a trend_label (<= 4 words) for each condition:
+  acute: "Ongoing" or "Recent episode"
+  recurrent: "Last episode [month year]"
+  chronic: "Since [year]"
+Ensure final conditions[] is fully pre-sorted and capped as per rules above (frontend will not reorder or cap).
+Assign severity to each condition based on its final status:
+  - "red" -> needs_attention
+  - "yellow" -> active | monitoring
+  - "green" -> managed | resolved
+
+STEP 4 --- HEADLINE STATE
+Highest status across all conditions: needs_attention > active > monitoring > managed > resolved > clean
+This will be used directly for UI subtitle generation; ensure it reflects the highest severity condition accurately.
+
+STEP 5 --- WRITE SUMMARY
+Write a 2-3 sentence summary using the pet's name.
+TONE: Warm, calm, and clear. Reassuring but informative. Do not use alarming or urgent language. If attention is needed, phrase it as a gentle suggestion (e.g., "worth discussing with your vet").
+Content: Focus only on conditions and their current state. Do not repeat the display list verbatim. Add light context or continuity (past -> present where relevant). Never mention vaccines, nutrition, grooming, or health score.
+For each condition, also generate an insight:
+  1-2 short sentences. Explain current state and what it means. No alarming tone. Do not repeat display_line.
+
+STEP 6 --- OUTPUT
+Respond with valid JSON only. No prose outside the block.
+{
+  "headline_state": "needs_attention | active | monitoring | managed | resolved | clean",
+  "conditions": [
+    {
+      "id": "string",
+      "name": "string",
+      "type": "chronic | recurrent | acute",
+      "status": "needs_attention | active | monitoring | managed | resolved",
+      "severity": "red | yellow | green",
+      "trend_label": "string",
+      "insight": "string",
+      "display_line": "string",
+      "recurrence_watch": true,
+      "soft_resolution": true
+    }
+  ],
+  "summary": "string",
+  "meta": {
+    "total_conditions": 0,
+    "red_count": 0,
+    "yellow_count": 0,
+    "green_count": 0
+  }
+}
+"""
+
+_HEALTH_CONDITIONS_V2_FALLBACK: dict = {
+    "headline_state": "clean",
+    "conditions": [],
+    "summary": "No active conditions on record. Keep up the great preventive care!",
+    "meta": {"total_conditions": 0, "red_count": 0, "yellow_count": 0, "green_count": 0},
+}
+
+
+async def _generate_health_conditions_v2_gpt(
+    aggregated_conditions: list[dict],
+    pet_name: str,
+) -> dict:
+    """
+    Call GPT with Health Prompt 5 to classify conditions, assign statuses,
+    and build the structured conditions dashboard payload.
+
+    Args:
+        aggregated_conditions: Output of _aggregate_conditions_for_health_prompt().
+        pet_name: Pet's name for personalised summary.
+
+    Returns:
+        Structured dict: {headline_state, conditions[], summary, meta}.
+    """
+    if not aggregated_conditions:
+        fallback = dict(_HEALTH_CONDITIONS_V2_FALLBACK)
+        fallback["summary"] = (
+            f"{pet_name} has no active conditions on record. Keep up the great preventive care!"
+            if pet_name else fallback["summary"]
+        )
+        return fallback
+
+    client = _get_openai_client()
+    today_str = date.today().isoformat()
+
+    user_payload = {
+        "today": today_str,
+        "pet_name": pet_name or "your pet",
+        "conditions": aggregated_conditions,
+    }
+
+    async def _call() -> str:
+        response = await client.messages.create(
+            model=OPENAI_QUERY_MODEL,
+            temperature=0,
+            max_tokens=1500,
+            system=_HEALTH_CONDITIONS_V2_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": json.dumps(user_payload)}],
+        )
+        return response.content[0].text or "{}"
+
+    raw = await retry_openai_call(_call)
+
+    # Strip markdown fences if model wraps JSON.
+    raw = re.sub(r"^```(?:json)?\s*", "", raw.strip(), flags=re.IGNORECASE)
+    raw = re.sub(r"\s*```$", "", raw.strip())
+
+    try:
+        parsed = json.loads(raw)
+        # Validate required top-level keys.
+        if "headline_state" not in parsed or "conditions" not in parsed:
+            raise ValueError("Missing required keys in Health Prompt 5 response")
+        # Ensure meta exists.
+        if "meta" not in parsed:
+            conditions_list = parsed.get("conditions") or []
+            parsed["meta"] = {
+                "total_conditions": len(conditions_list),
+                "red_count": sum(1 for c in conditions_list if c.get("severity") == "red"),
+                "yellow_count": sum(1 for c in conditions_list if c.get("severity") == "yellow"),
+                "green_count": sum(1 for c in conditions_list if c.get("severity") == "green"),
+            }
+        return parsed
+    except Exception as exc:
+        logger.warning(
+            "health_conditions_v2 JSON parse failed: %s | raw=%s", exc, raw[:500]
+        )
+        return _HEALTH_CONDITIONS_V2_FALLBACK
+
+
+# --------------------------------------------------------------------------- #
 #  Public API                                                                   #
 # --------------------------------------------------------------------------- #
 
@@ -552,7 +840,12 @@ async def get_or_generate_insight(
             # Allow per-condition cache keys like "vet_questions:<condition_id>".
             normalized_insight_type = "vet_questions"
 
-        if normalized_insight_type == "conditions_summary":
+        if normalized_insight_type == "health_conditions_v2":
+            # Aggregate condition data from DB and run Health Prompt 5.
+            aggregated = _aggregate_conditions_for_health_prompt(conditions)
+            pet_name = pet.get("name") or "" if isinstance(pet, dict) else ""
+            content = await _generate_health_conditions_v2_gpt(aggregated, pet_name)
+        elif normalized_insight_type == "conditions_summary":
             content = await _generate_conditions_summary_gpt(pet_context)
         elif normalized_insight_type == "health_summary":
             content = await _generate_health_summary_gpt(pet_context)
@@ -564,6 +857,8 @@ async def get_or_generate_insight(
     except Exception as exc:
         logger.error("GPT insight generation failed for %s/%s: %s", pet_id, insight_type, exc)
         # Return graceful defaults rather than crashing
+        if insight_type == "health_conditions_v2":
+            return dict(_HEALTH_CONDITIONS_V2_FALLBACK)
         if insight_type in ("health_summary", "conditions_summary"):
             return {"summary": "Summary is currently unavailable."}
         return []

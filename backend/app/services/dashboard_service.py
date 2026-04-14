@@ -965,17 +965,20 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
     }
 
     # --- Load cached AI insights (no GPT calls — DB lookup only) ---
-    # Include health_summary and vet_questions if they exist and are fresh.
-    # This lets the frontend render immediately without waiting for separate
-    # /health-summary and /vet-questions API calls.
-    cached_insights: dict[str, dict | None] = {"health_summary": None, "vet_questions": None}
+    # Include health_summary, vet_questions, and health_conditions_v2 if they exist and are fresh.
+    # This lets the frontend render immediately without waiting for separate API calls.
+    cached_insights: dict[str, dict | None] = {
+        "health_summary": None,
+        "vet_questions": None,
+        "health_conditions_v2": None,
+    }
     try:
         stale_cutoff = datetime.utcnow() - timedelta(days=AI_INSIGHT_CACHE_DAYS)
         insight_rows = (
             db.query(PetAiInsight)
             .filter(
                 PetAiInsight.pet_id == pet_id,
-                PetAiInsight.insight_type.in_(["health_summary", "vet_questions"]),
+                PetAiInsight.insight_type.in_(["health_summary", "vet_questions", "health_conditions_v2"]),
                 PetAiInsight.generated_at >= stale_cutoff,
             )
             .all()
@@ -1027,6 +1030,7 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         "is_first_visit": is_first_visit,
         "cached_health_summary": cached_insights.get("health_summary"),
         "cached_vet_questions": cached_insights.get("vet_questions"),
+        "health_conditions_v2": cached_insights.get("health_conditions_v2"),
         # Internal pet_id exposed only for intra-service use (not sent to frontend).
         # Allows callers to avoid a second validate_dashboard_token() call.
         "_pet_id": str(pet_id),

@@ -136,6 +136,56 @@ async def precompute_dashboard_enrichments(pet_id_str: str) -> None:
         except Exception as exc:
             logger.warning("precompute: life_stage_insights failed for pet=%s: %s", pet_id_str, exc)
 
+        # --- 5. health_conditions_v2 (Health Prompt 5) ---
+        # Aggregates condition signals across all uploaded documents and runs the
+        # multi-step Health Prompt 5 to classify types, assign statuses, and build
+        # the structured conditions dashboard payload.  Result is cached in
+        # pet_ai_insights so the dashboard reads from DB with no blocking GPT call.
+        try:
+            from app.models.condition import Condition
+            from app.services.ai_insights_service import (
+                _aggregate_conditions_for_health_prompt,
+                _generate_health_conditions_v2_gpt,
+            )
+            from sqlalchemy.orm import selectinload
+
+            condition_rows = (
+                db.query(Condition)
+                .options(
+                    selectinload(Condition.medications),
+                    selectinload(Condition.monitoring),
+                )
+                .filter(Condition.pet_id == pet_id, Condition.is_active == True)
+                .order_by(Condition.diagnosed_at.asc().nullslast())
+                .all()
+            )
+
+            conditions_for_prompt = []
+            for cond in condition_rows:
+                meds = [
+                    {"end_date": str(m.end_date) if m.end_date else None}
+                    for m in (cond.medications or [])
+                ]
+                monitoring = [
+                    {"recheck_due_date": str(m.recheck_due_date) if m.recheck_due_date else None}
+                    for m in (cond.monitoring or [])
+                ]
+                conditions_for_prompt.append({
+                    "name": cond.name,
+                    "condition_type": cond.condition_type,
+                    "episode_dates": cond.episode_dates or [],
+                    "medications": meds,
+                    "monitoring": monitoring,
+                    "diagnostic_values": [],
+                })
+
+            aggregated = _aggregate_conditions_for_health_prompt(conditions_for_prompt)
+            result = await _generate_health_conditions_v2_gpt(aggregated, pet.name or "")
+            _upsert_insight(db, pet_id, "health_conditions_v2", result)
+            logger.info("precompute: health_conditions_v2 cached for pet=%s", pet_id_str)
+        except Exception as exc:
+            logger.warning("precompute: health_conditions_v2 failed for pet=%s: %s", pet_id_str, exc)
+
         logger.info("precompute_dashboard_enrichments: completed for pet=%s", pet_id_str)
 
     except Exception as exc:

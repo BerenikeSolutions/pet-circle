@@ -2526,6 +2526,18 @@ async def _send_deferred_care_plan(
 
         diet_items = db.query(DietItem).filter(DietItem.pet_id == pet.id).all()
 
+        # Pre-warm health_conditions_v2 so the dashboard shows it on first load.
+        # Runs as a background task in parallel with care plan message assembly.
+        try:
+            import asyncio as _asyncio_cp
+            from app.services.precompute_service import precompute_dashboard_enrichments
+            _asyncio_cp.create_task(precompute_dashboard_enrichments(str(pet.id)))
+        except Exception as _pre_exc:
+            logger.warning(
+                "health_conditions_v2 precompute scheduling failed for pet=%s: %s",
+                str(pet.id), _pre_exc,
+            )
+
         care_plan_msg = await _generate_care_plan_message(
             db=db,
             pet=pet,

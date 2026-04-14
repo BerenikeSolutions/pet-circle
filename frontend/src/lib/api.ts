@@ -267,6 +267,31 @@ export interface HealthConditionSummary {
   insight: string;
 }
 
+export interface HealthConditionV2 {
+  id: string;
+  name: string;
+  type: "chronic" | "recurrent" | "acute";
+  status: "needs_attention" | "active" | "monitoring" | "managed" | "resolved";
+  severity: "red" | "yellow" | "green";
+  trend_label: string;
+  insight: string;
+  display_line: string;
+  recurrence_watch?: boolean;
+  soft_resolution?: boolean;
+}
+
+export interface HealthConditionsV2 {
+  headline_state: "needs_attention" | "active" | "monitoring" | "managed" | "resolved" | "clean";
+  conditions: HealthConditionV2[];
+  summary: string;
+  meta: {
+    total_conditions: number;
+    red_count: number;
+    yellow_count: number;
+    green_count: number;
+  };
+}
+
 export interface CarePlanItem {
   name: string;
   test_type: string;
@@ -541,6 +566,7 @@ export interface DashboardData {
   vet_summary?: VetSummary | null;
   life_stage?: LifeStageData | null;
   health_conditions_summary?: HealthConditionSummary[];
+  health_conditions_v2?: HealthConditionsV2 | null;
   care_plan_v2?: CarePlanV2;
   diet_summary?: DietSummary;
   recognition?: Recognition;
