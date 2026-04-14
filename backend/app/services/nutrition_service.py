@@ -957,10 +957,11 @@ async def _call_openai_combined_meal_estimation(
         logger.warning("Insufficient data for combined meal: %s", result.get("message"))
         return None
     confidence = result.get("confidence", 1.0)
-    if isinstance(confidence, (int, float)) and confidence < 0.4:
-        # Confidence below threshold — discard the estimate and fall back.
-        # This is expected for pets with sparse diet data; not an error.
-        logger.debug("Low confidence (%.2f) for combined meal estimation — skipping", confidence)
+    if isinstance(confidence, (int, float)) and confidence < 0.15:
+        # Only discard truly unusable estimates (< 0.15). Commercial foods without
+        # explicit portions still reach 0.2–0.4 via official brand feeding guidelines
+        # (CASE B) and produce useful calorie/macro data.
+        logger.debug("Very low confidence (%.2f) for combined meal estimation — skipping", confidence)
         return None
     return result
 

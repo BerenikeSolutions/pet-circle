@@ -14,10 +14,10 @@ interface LifeStageCardProps {
   compact?: boolean;
 }
 
-const INSIGHT_BG: Record<LifeStageInsight["color"], { bg: string; color: string }> = {
-  orange:  { bg: "var(--ta)",  color: "#b85c00" },
-  green:   { bg: "var(--tg)",  color: "#1e8c3a" },
-  neutral: { bg: "#F0EDE9",    color: "var(--t2)" },
+const INSIGHT_ACCENT: Record<LifeStageInsight["color"], string> = {
+  orange:  "#FF6B35",
+  green:   "#1e8c3a",
+  neutral: "#C8C3BB",
 };
 
 function getStageStarts() {
@@ -115,17 +115,18 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
       {insights.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {insights.map((insight, i) => {
-            const style = INSIGHT_BG[insight.color] ?? INSIGHT_BG.neutral;
+            const accent = INSIGHT_ACCENT[insight.color] ?? INSIGHT_ACCENT.neutral;
             return (
               <div
                 key={i}
                 style={{
-                  background: style.bg,
+                  background: "#F0EDE9",
                   borderRadius: 10,
+                  borderLeft: `3px solid ${accent}`,
                   padding: "10px 14px",
                   fontSize: 13,
                   fontWeight: 500,
-                  color: style.color,
+                  color: "var(--t1)",
                   lineHeight: 1.45,
                   overflowWrap: "break-word",
                   wordBreak: "break-word",
