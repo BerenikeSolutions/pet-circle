@@ -52,7 +52,7 @@ from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
 from app.models.reminder import Reminder
 from app.models.user import User
-from app.services.ai_insights_service import AI_INSIGHT_CACHE_DAYS
+from app.services.ai_insights_service import AI_INSIGHT_CACHE_DAYS, generate_recognition_bullets
 from app.services.care_plan_engine import compute_care_plan, get_preventive_baseline_days, _normalize_item_name
 from app.services.document_upload import download_from_supabase
 from app.services.gpt_extraction import _infer_document_category, _resolve_document_category
@@ -849,13 +849,40 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
                 .first()
             )
             if row and isinstance(row.content_json, list):
-                return row.content_json
+                bullets = row.content_json
+                # Sanity-check: if cache claims no diet entries but diet items exist in DB,
+                # the cache is stale (e.g. item was inserted directly in DB bypassing the API).
+                # Return [] so the frontend uses its client-side fallback and we trigger a refresh.
+                diet_bullet_stale = any(
+                    isinstance(b, dict) and "no diet entries" in (b.get("label") or "").lower()
+                    for b in bullets
+                )
+                if diet_bullet_stale:
+                    has_diet_items = (
+                        db.query(func.count(DietItem.id))
+                        .filter(DietItem.pet_id == pet_id)
+                        .scalar()
+                        or 0
+                    ) > 0
+                    if has_diet_items:
+                        return []
+                return bullets
         except Exception:
             pass
         return []
 
     diet_summary = _read_diet_summary_cache()
     recognition_bullets = _read_recognition_bullets_cache()
+
+    # If cache is cold/stale, regenerate inline — generate_recognition_bullets is
+    # pure-DB (no GPT) so it's safe to call on the critical path.
+    if not recognition_bullets:
+        try:
+            recognition_bullets = await generate_recognition_bullets(db, pet)
+        except Exception as _exc:
+            logger.warning(
+                "Inline recognition_bullets generation failed for pet=%s: %s", pet_id, _exc
+            )
 
     empty_care_plan = {"continue_items": [], "attend_items": [], "add_items": []}
 

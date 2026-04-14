@@ -310,9 +310,10 @@ def _build_food_estimation_prompt(
         "confidence (float 0–1),\n"
         "serving_description (string),\n"
         "calories_per_day (int),\n"
-        "protein_pct (float),\n"
-        "fat_pct (float),\n"
-        "fibre_pct (float),\n\n"
+        "protein_pct (float — % of daily protein need contributed by this food),\n"
+        "fat_pct (float — % of daily fat need contributed by this food),\n"
+        "carbs_pct (float — % of daily carbohydrate need contributed by this food),\n"
+        "fibre_pct (float — % of daily fibre need contributed by this food),\n\n"
         "micronutrient_gaps: [\n"
         "{\n"
         "name (string),\n"
@@ -780,10 +781,20 @@ COMBINED_MEAL_SYSTEM_PROMPT = (
     "STEP 3 — COMBINED NUTRITION ESTIMATION\n"
     "-----------------------------------\n"
     "- Sum calories_per_day across all foods with known portions\n"
-    "- For protein_pct, fat_pct, fibre_pct:\n"
+    "- For protein_pct, fat_pct, carbs_pct, fibre_pct:\n"
     "  - Calculate a CALORIE-WEIGHTED AVERAGE across all foods\n"
     "  - Foods with CASE C (no quantity) must be excluded from this calculation\n"
+    "  - carbs_pct represents the percentage of daily carbohydrate need met\n"
     "- Ensure values are biologically realistic\n\n"
+    "-----------------------------------\n"
+    "VET-PRESCRIBED ITEMS\n"
+    "-----------------------------------\n"
+    "Some foods may be tagged [Vet prescribed]. Treat these as medically mandated:\n"
+    "- INCLUDE them fully in calorie and macro calculations (same as any other item)\n"
+    "- Do NOT flag them as nutrition gaps or suggest removing them\n"
+    "- If the vet diet is nutritionally suboptimal (e.g. low protein), set the relevant\n"
+    "  top_improvements entry severity to 'prescribed' instead of 'high' or 'medium'\n"
+    "  and note it as a vet-managed constraint rather than an actionable fix\n\n"
     "-----------------------------------\n"
     "STEP 4 — MICRONUTRIENT GAP ANALYSIS\n"
     "-----------------------------------\n\n"
@@ -803,6 +814,20 @@ COMBINED_MEAL_SYSTEM_PROMPT = (
     "- Rank by severity_score\n"
     "- Return only the top 4 with status low or missing\n"
     "- Exclude all \"sufficient\" nutrients\n\n"
+    "-----------------------------------\n"
+    "STEP 6 — GENERATE TOP IMPROVEMENTS\n"
+    "-----------------------------------\n"
+    "- Produce up to 3 specific, actionable improvements for this pet's diet\n"
+    "- Each improvement must be directly grounded in the combined diet analysis above\n"
+    "- Each item has:\n"
+    "  - title: 3-5 word heading (e.g. \"Increase protein intake\", \"Add omega-3 supplement\")\n"
+    "  - detail: 1-2 sentences specific to this pet's breed, weight, conditions, and current food\n"
+    "  - severity: \"high\" | \"medium\" | \"prescribed\"\n"
+    "    - \"high\": critical gap or deficiency\n"
+    "    - \"medium\": notable but non-urgent improvement\n"
+    "    - \"prescribed\": vet-mandated dietary constraint (non-actionable, informational only)\n"
+    "- Order by severity (high first, then medium, then prescribed)\n"
+    "- If the diet is fully adequate, return an empty array\n\n"
     "-----------------------------------\n"
     "CONFIDENCE DEFINITION\n"
     "-----------------------------------\n\n"
@@ -825,9 +850,10 @@ COMBINED_MEAL_SYSTEM_PROMPT = (
     "{\n"
     '  "confidence": float (0-1, overall confidence across all foods),\n'
     '  "calories_per_day": int (total from all foods),\n'
-    '  "protein_pct": float (calorie-weighted average),\n'
-    '  "fat_pct": float (calorie-weighted average),\n'
-    '  "fibre_pct": float (calorie-weighted average),\n'
+    '  "protein_pct": float (calorie-weighted average, % of daily need met),\n'
+    '  "fat_pct": float (calorie-weighted average, % of daily need met),\n'
+    '  "carbs_pct": float (calorie-weighted average, % of daily carb need met),\n'
+    '  "fibre_pct": float (calorie-weighted average, % of daily need met),\n'
     '  "micronutrient_gaps": [\n'
     '    {\n'
     '      "name": string,\n'
@@ -836,10 +862,18 @@ COMBINED_MEAL_SYSTEM_PROMPT = (
     '      "supplement": string | null,\n'
     '      "reason": string\n'
     '    }\n'
+    "  ],\n"
+    '  "top_improvements": [\n'
+    '    {\n'
+    '      "title": string (3-5 words),\n'
+    '      "detail": string (1-2 sentences, pet-specific),\n'
+    '      "severity": "high" | "medium" | "prescribed"\n'
+    '    }\n'
     "  ]\n"
     "}\n\n"
     "CRITICAL:\n"
     "- severity_score MUST be a float between 0.0 and 1.0 (e.g. 0.72, NOT 7 or 72)\n"
+    "- top_improvements MUST be an array (empty array [] if no improvements needed)\n"
     "- Return ONLY the JSON object — no text, notes, or recommendations after the closing brace\n"
     "- No extra fields beyond the schema\n"
     "- No markdown, no code fences, no explanation"
@@ -876,10 +910,30 @@ async def _call_openai_combined_meal_estimation(
         line = f"{i}. {item.label} (type: {item.type})"
         portion_g = getattr(item, "daily_portion_g", None)
         detail = getattr(item, "detail", None)
+        detail_str = str(detail).strip() if detail else ""
+
+        # Detect vet-prescribed tag embedded in detail by either source
+        # (document extraction appends "· Vet prescribed (doc)" and chat flow
+        # appends "· Vet prescribed (chat)").
+        is_vet = "vet prescribed" in detail_str.lower()
+        # Strip the annotation so the remaining text is a clean quantity/instruction.
+        clean_detail = detail_str
+        if is_vet:
+            # Remove the tag suffix (everything from "· Vet prescribed" onward)
+            for tag in ("· Vet prescribed", "·Vet prescribed", "Vet prescribed"):
+                idx = clean_detail.lower().find(tag.lower())
+                if idx != -1:
+                    clean_detail = clean_detail[:idx].strip().rstrip("·").strip()
+                    break
+
+        vet_suffix = " [Vet prescribed]" if is_vet else ""
+
         if portion_g and portion_g > 0:
-            line += f" — Daily portion: {portion_g}g"
-        elif detail and str(detail).strip():
-            line += f" — User-provided quantity: {str(detail).strip()}"
+            line += f" — Daily portion: {portion_g}g{vet_suffix}"
+        elif clean_detail:
+            line += f" — User-provided quantity: {clean_detail}{vet_suffix}"
+        elif is_vet:
+            line += f" — Quantity: not specified{vet_suffix}"
         else:
             line += " — Quantity: not specified"
         prompt_parts.append(line)
@@ -1154,8 +1208,9 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
 
     # Populate actual values from combined meal result
     actual = {
-        "calories": 0, "protein": 0, "fat": 0, "fibre": 0,
+        "calories": 0, "protein": 0, "fat": 0, "carbs": 0, "fibre": 0,
         "gaps": {},
+        "top_improvements": [],
     }
 
     if meal_result:
@@ -1214,6 +1269,64 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
     breed_label = pet.breed or "your pet's breed"
     condition_context = " + " + conditions[0].name if conditions else ""
 
+    # ── New flat fields for DietAnalysisCard design ──────────────────────────
+
+    # food_label: top-3 food item labels joined with ", "
+    food_label_str = ", ".join(food_labels[:3]) if food_labels else None
+
+    # calorie_gap_pct: positive = over target, negative = under target
+    calorie_gap_pct: float | None = None
+    if target_cal and actual["calories"] > 0:
+        calorie_gap_pct = round(
+            ((actual["calories"] - target_cal) / target_cal) * 100, 1
+        )
+
+    # show_warning when any diet item has no portion specified
+    items_without_portion = [
+        item for item in diet_items
+        if not (getattr(item, "daily_portion_g", None) and item.daily_portion_g > 0)
+        and not (getattr(item, "detail", None) and str(item.detail).strip())
+    ]
+    show_warning = bool(items_without_portion) and actual["calories"] > 0
+    warning_message: str | None = (
+        "Portion sizes are missing for some foods — calorie estimate may be incomplete."
+        if show_warning else None
+    )
+
+    # prescription_context: first vet-prescribed dietary condition, then fallback
+    # to vet-tagged diet items (from document extraction or chat).
+    _PRESCRIPTION_KEYWORDS = (
+        "prescription", "renal", "kidney", "liver", "cardiac",
+        "low fat", "hypoallergenic", "gastrointestinal", "urinary",
+    )
+    prescription_context: str | None = None
+    for cond in conditions:
+        if any(kw in cond.name.lower() for kw in _PRESCRIPTION_KEYWORDS):
+            prescription_context = cond.name
+            break
+
+    if not prescription_context:
+        vet_item_labels = [
+            item.label for item in diet_items
+            if "vet prescribed" in (item.detail or "").lower()
+        ]
+        if vet_item_labels:
+            prescription_context = ", ".join(vet_item_labels[:3])
+
+    # micronutrient_gaps flat array for DietAnalysisCard (non-sufficient only)
+    micro_gaps_flat = [
+        {
+            "name": name,
+            "status": gap["status"],
+            "severity_score": gap["severity_score"],
+            "prescribed": False,
+        }
+        for name, gap in actual["gaps"].items()
+        if gap.get("status") != "sufficient"
+    ]
+    # Sort by severity_score descending
+    micro_gaps_flat.sort(key=lambda g: g["severity_score"], reverse=True)
+
     # Build explicit diet summary describing current diet and its strengths
     if food_labels or supplement_labels:
         food_list = ", ".join(food_labels[:5]) if food_labels else "not provided"
@@ -1233,6 +1346,7 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
         diet_summary = "No diet items added yet. Add your pet's food in the Nutrition tab for a detailed analysis."
 
     return {
+        # ── Legacy fields (kept for backward compat: get_diet_summary, product recs) ──
         "calories": {"actual": actual["calories"], "target": target_cal, "status": cal_status},
         "macros": macros,
         "vitamins": vitamins,
@@ -1245,6 +1359,20 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
         "analysis_context": f"Analysis based on {breed_label} breed profile{condition_context}",
         "gap_count": gap_count,
         "has_diet_items": bool(diet_items),
+        # ── New flat fields for DietAnalysisCard ──────────────────────────────
+        "calories_per_day": actual["calories"],
+        "calorie_target": target_cal,
+        "calorie_gap_pct": calorie_gap_pct,
+        "food_label": food_label_str,
+        "show_warning": show_warning,
+        "warning_message": warning_message,
+        "prescription_context": prescription_context,
+        "protein_pct": actual["protein"],
+        "fat_pct": actual["fat"],
+        "carbs_pct": actual["carbs"],
+        "fibre_pct": actual["fibre"],
+        "micronutrient_gaps": micro_gaps_flat,
+        "top_improvements": actual.get("top_improvements") or [],
     }
 
 
@@ -1254,13 +1382,19 @@ def _accumulate_from_estimation(actual: dict, est: dict) -> None:
     """Accumulate nutritional values from AI-estimated food nutrition.
 
     Handles the new prompt output format:
-    - Macros: calories_per_day, protein_pct, fat_pct, fibre_pct (numeric)
+    - Macros: calories_per_day, protein_pct, fat_pct, carbs_pct, fibre_pct (numeric)
     - Micronutrients: micronutrient_gaps array (qualitative status + severity_score)
+    - top_improvements: list of {title, detail, severity} from combined meal analysis
     """
     actual["calories"] += int(est.get("calories_per_day", 0) or est.get("calories_per_serving", 0))
     actual["protein"] = max(actual["protein"], float(est.get("protein_pct", 0)))
     actual["fat"] = max(actual["fat"], float(est.get("fat_pct", 0)))
+    actual["carbs"] = max(actual.get("carbs", 0), float(est.get("carbs_pct", 0)))
     actual["fibre"] = max(actual["fibre"], float(est.get("fibre_pct", 0)))
+
+    # Capture top_improvements from combined meal result (first non-empty result wins)
+    if not actual.get("top_improvements") and est.get("top_improvements"):
+        actual["top_improvements"] = est["top_improvements"]
 
     # Merge micronutrient gaps — worst status (highest severity_score) wins
     # when multiple foods report the same nutrient. Supplement suggestion is

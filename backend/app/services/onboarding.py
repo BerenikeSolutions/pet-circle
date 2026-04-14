@@ -1765,9 +1765,42 @@ async def _step_preventive(db, user, text, send_fn):
                 return
             # Parse the confirmed/modified preventive text.
             parsed = await _parse_preventive_care(final_preventive)
+            conf_attempts = od.get("preventive_attempts", 0)
+
+            # Apply the same follow-up question checks as the normal flow so that
+            # a user who provides fresh data via the confirm-pending path still gets
+            # asked which vaccines they use and which flea brand they apply.
+            needs_vaccine_type_q = _is_generic_vaccine_mention(parsed)
+            needs_flea_brand_q = _is_flea_without_brand(parsed)
+
+            if needs_vaccine_type_q:
+                _set_onboarding_data(user, "pending_preventive_parsed", parsed)
+                _set_onboarding_data(user, "pending_flea_brand_needed", needs_flea_brand_q)
+                _set_onboarding_data(user, "preventive_attempts", conf_attempts)
+                _set_onboarding_data(user, "preventive_missing", [])
+                user.onboarding_state = "awaiting_vaccine_type"
+                db.commit()
+                _vax_age_wks = _get_age_in_weeks(pet)
+                _vax_q = (
+                    _puppy_vaccine_question(pet.name, _vax_age_wks)
+                    if _vax_age_wks is not None and _vax_age_wks < 52
+                    else _vaccine_type_question(pet.name)
+                )
+                await send_fn(db, mobile, _vax_q)
+                return
+
+            if needs_flea_brand_q:
+                _set_onboarding_data(user, "pending_preventive_parsed", parsed)
+                _set_onboarding_data(user, "pending_flea_brand_needed", True)
+                _set_onboarding_data(user, "preventive_attempts", conf_attempts)
+                _set_onboarding_data(user, "preventive_missing", [])
+                user.onboarding_state = "awaiting_flea_brand"
+                db.commit()
+                await send_fn(db, mobile, _flea_brand_question(pet.name))
+                return
+
             conf_ambiguous = await _store_preventive_data(db, pet, parsed)
             # If confirmed text still had unparseable dates, treat as missing for retry.
-            conf_attempts = od.get("preventive_attempts", 0)
             if conf_ambiguous and conf_attempts < 1:
                 _set_onboarding_data(user, "preventive_attempts", 1)
                 user.onboarding_state = "awaiting_prev_retry"
@@ -2140,21 +2173,53 @@ async def _step_prev_retry(db, user, text, send_fn):
 # Vaccine type selection helpers (new vaccine-specific question flow)
 # ---------------------------------------------------------------------------
 
+_GENERIC_VAX_LABELS: frozenset[str] = frozenset({
+    "vaccine", "vaccines", "shot", "shots", "jab", "jabs",
+    "vaccinated", "vaccination", "annual vaccine", "annual vaccines",
+})
+
+
 def _is_generic_vaccine_mention(parsed: dict) -> bool:
     """
-    Return True if GPT detected a generic vaccine date (no specific vaccine named).
-    In that case we must ask the user which vaccines their pet actually receives.
+    Return True if the parsed data contains a generic vaccine mention with no
+    specific vaccine name provided by the user.  In that case we must ask which
+    vaccines their pet actually receives.
+
+    Handles two scenarios:
+    1. GPT correctly put the generic date in the top-level ``vaccines`` field and
+       left ``vaccine_specifics`` empty (the normal case).
+    2. GPT erroneously put a generic label (e.g. "vaccines", "shots") as an entry
+       in ``vaccine_specifics`` instead of the top-level field — we still treat it
+       as generic so the follow-up question is always asked.
     """
     generic = parsed.get("vaccines")
-    if not generic or generic == "none":
-        return False
-    specific_with_dates = [
-        s for s in (parsed.get("vaccine_specifics") or [])
+    vaccine_specifics = parsed.get("vaccine_specifics") or []
+
+    # Case 1: top-level vaccines field is set — check there are no real specifics.
+    if generic and generic != "none":
+        real_specifics = [
+            s for s in vaccine_specifics
+            if isinstance(s, dict)
+            and str(s.get("name") or "").strip().lower() not in _GENERIC_VAX_LABELS
+            and str(s.get("date") or "").strip()
+        ]
+        return len(real_specifics) == 0
+
+    # Case 2: vaccines field is null/none — check if vaccine_specifics has only
+    # generic labels (GPT mis-classified a generic mention as a specific vaccine).
+    generic_entries = [
+        s for s in vaccine_specifics
         if isinstance(s, dict)
-        and str(s.get("name") or "").strip()
+        and str(s.get("name") or "").strip().lower() in _GENERIC_VAX_LABELS
         and str(s.get("date") or "").strip()
     ]
-    return len(specific_with_dates) == 0
+    real_entries = [
+        s for s in vaccine_specifics
+        if isinstance(s, dict)
+        and str(s.get("name") or "").strip().lower() not in _GENERIC_VAX_LABELS
+        and str(s.get("date") or "").strip()
+    ]
+    return bool(generic_entries) and not real_entries
 
 
 def _is_flea_without_brand(parsed: dict) -> bool:
@@ -3599,12 +3664,18 @@ async def _parse_diet_input(text: str) -> list[tuple[str, str, str]]:
 
 
 def _strip_json_fences(raw: str) -> str:
-    """Strip markdown code fences from GPT JSON output."""
+    """Strip markdown code fences from GPT JSON output.
+
+    Raises ValueError when the result is empty so callers receive a clear
+    error message instead of a cryptic 'Expecting value' JSONDecodeError.
+    """
     if raw.startswith("```"):
         raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
         if raw.endswith("```"):
             raw = raw[:-3]
         raw = raw.strip()
+    if not raw:
+        raise ValueError("Claude returned an empty response body")
     return raw
 
 
@@ -4008,17 +4079,41 @@ async def _parse_preventive_care(
             if isinstance(combo_date, str) and combo_date and combo_date != "none":
                 parsed["vaccine_specifics"] = [{"name": combo_name, "date": combo_date}]
                 parsed["vaccines"] = None
+        # Guardrail: GPT sometimes returns a generic label (e.g. "vaccines", "shots")
+        # as a vaccine_specific entry instead of the top-level "vaccines" field.
+        # Promote it back so _is_generic_vaccine_mention detects it and asks which
+        # vaccines the pet actually receives.
+        if not parsed.get("vaccines") or parsed.get("vaccines") == "none":
+            specifics = parsed.get("vaccine_specifics") or []
+            generic_entries = [
+                s for s in specifics
+                if isinstance(s, dict)
+                and str(s.get("name") or "").strip().lower() in _GENERIC_VAX_LABELS
+                and str(s.get("date") or "").strip()
+            ]
+            real_entries = [
+                s for s in specifics
+                if isinstance(s, dict)
+                and str(s.get("name") or "").strip().lower() not in _GENERIC_VAX_LABELS
+            ]
+            if generic_entries and not real_entries:
+                # All specifics are generic labels — promote the date to vaccines field.
+                parsed["vaccines"] = generic_entries[0]["date"]
+                parsed["vaccine_specifics"] = []
         parsed = _apply_all_preventive_categories_intent(text, parsed)
         return _normalize_preventive_medicine_categories(parsed)
     except Exception as e:
         logger.warning("Preventive care GPT parse failed: %s", str(e))
+        # Return all categories as missing so the caller re-asks rather than
+        # silently skipping vaccine type / flea brand questions and moving to
+        # documents with nothing stored.
         return {
             "vaccines": None,
             "vaccine_specifics": [],
             "deworming": None,
             "flea_tick": None,
             "blood_test": None,
-            "missing": [],
+            "missing": ["vaccines", "deworming", "flea_tick", "blood_test"],
         }
 
 
@@ -4908,6 +5003,15 @@ async def _finalize_onboarding(db, user, send_fn, declined_documents: bool = Fal
         return
 
     await send_fn(db, mobile, care_plan_msg)
+
+    # Warm the recognition_bullets cache now that all onboarding data (diet + preventive)
+    # has been written. The dashboard link was just sent so this runs before the user taps it.
+    try:
+        import asyncio as _asyncio
+        from app.services.precompute_service import precompute_dashboard_enrichments
+        _asyncio.create_task(precompute_dashboard_enrichments(str(pet.id)))
+    except Exception as _exc:
+        logger.warning("onboarding finalize: failed to schedule precompute for pet=%s: %s", str(pet.id), _exc)
 
 
 async def _generate_care_plan_message(

@@ -906,6 +906,15 @@ EXTRACTION_SYSTEM_PROMPT = (
     '  - "vaccination_details": array of objects (for vaccine records; [] if none). '
     "Each object may include: vaccine_name, vaccine_name_raw, dose, dose_unit, "
     "route, manufacturer, batch_number, next_due_date, administered_by, notes\n"
+    '  - "vet_diet_recommendations": array of objects ([] if none) — dietary instructions or food recommendations '
+    "explicitly written by the vet on a Prescription. Only populate for Prescription documents. "
+    "Capture items such as prescribed therapeutic diets, foods to feed, foods to avoid, or feeding guidelines. "
+    "Each object:\n"
+    '    - "food_label": string (the food/diet name as written, e.g. "Royal Canin Renal", "boiled chicken and rice", "low-fat diet")\n'
+    '    - "food_type": "packaged" | "homemade" | "supplement" | "avoid" '
+    '(use "packaged" for commercial brands, "homemade" for home-cooked/fresh food, "supplement" for vitamins/oils/probiotics, '
+    '"avoid" for foods the vet says not to feed)\n'
+    '    - "detail": string or null (feeding instruction, e.g. "twice daily", "for 3 months", "avoid completely")\n'
     '  - "clinical_exam": object or null — ONLY for Prescriptions / vet visit records. '
     "Capture any clinical examination values written on the document, each field null when not present:\n"
     '    - "weight_kg": number or null (pet body weight in kilograms as recorded by the vet)\n'
@@ -982,6 +991,10 @@ EXTRACTION_SYSTEM_PROMPT = (
     "such as 'Treatment course' or 'Post-operative care' — never leave prescribed medications unclassified.\n"
     "- Prescribed non-preventive medications (antibiotics, analgesics, antacids, etc.) must NEVER go into "
     "preventive_medications[]. They belong in conditions[].medications[].\n"
+    "- For Prescription documents: if the vet has written any dietary instructions (e.g. 'feed low-fat diet', "
+    "'give Royal Canin Renal', 'avoid high-protein food', 'boiled chicken twice daily'), capture each as an entry "
+    "in vet_diet_recommendations[]. Use food_type='avoid' for restricted foods. Leave vet_diet_recommendations=[] "
+    "for non-Prescription documents.\n"
     "- For Prescription documents: ALWAYS populate clinical_exam with weight, temperature, pulse, "
     "respiration, mucous membranes, and any other examination notes written on the document. "
     "Leave individual fields as null when not present. Omit clinical_exam (or set null) for non-prescription documents.\n"
@@ -1125,6 +1138,22 @@ EXTRACTION_TOOL_SCHEMA: dict = {
                         "address": {"type": ["string", "null"]},
                     },
                     "required": ["name"],
+                },
+            },
+            "vet_diet_recommendations": {
+                "type": "array",
+                "description": "Dietary instructions written by the vet on a Prescription. Empty array for non-prescription documents.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "food_label": {"type": "string"},
+                        "food_type": {
+                            "type": "string",
+                            "enum": ["packaged", "homemade", "supplement", "avoid"],
+                        },
+                        "detail": {"type": ["string", "null"]},
+                    },
+                    "required": ["food_label", "food_type"],
                 },
             },
             "clinical_exam": {
@@ -1377,6 +1406,7 @@ def _validate_extraction_dict(
         "preventive_medications": [],
         "contacts": [],
         "clinical_exam": None,
+        "vet_diet_recommendations": [],
     }
     if isinstance(parsed, dict):
         document_name = parsed.get("document_name")
@@ -1407,6 +1437,9 @@ def _validate_extraction_dict(
         raw_clinical_exam = parsed.get("clinical_exam")
         if isinstance(raw_clinical_exam, dict):
             metadata["clinical_exam"] = raw_clinical_exam
+        raw_vet_diet = parsed.get("vet_diet_recommendations")
+        if isinstance(raw_vet_diet, list):
+            metadata["vet_diet_recommendations"] = raw_vet_diet
 
     # Handle both direct array and wrapper object formats.
     # GPT with json_object mode returns an object, not an array.
@@ -2065,6 +2098,73 @@ def _coerce_float(value) -> float | None:
         return None
 
 
+async def _save_vet_diet_items(
+    db: Session,
+    pet: Pet,
+    document: Document,
+    vet_diet_recommendations: list[dict],
+) -> None:
+    """
+    Persist vet-prescribed dietary recommendations as DietItem records.
+
+    Each recommendation from a Prescription becomes a diet item tagged with
+    '(Vet prescribed)' in the detail field so users and the nutrition analysis
+    can distinguish vet-recommended items from user-added ones.
+
+    food_type='avoid' entries are stored with type='homemade' and a detail
+    prefix of 'Avoid –' so they appear in the diet list as a visible warning.
+
+    Silently skips malformed entries. Does not commit — the caller's
+    surrounding transaction handles commit/rollback.
+    """
+    from app.services.diet_service import add_diet_item
+
+    if not vet_diet_recommendations:
+        return
+
+    doc_ref = document.document_name or "vet prescription"
+
+    for raw in vet_diet_recommendations:
+        if not isinstance(raw, dict):
+            continue
+
+        food_label = str(raw.get("food_label") or "").strip()[:200]
+        if not food_label:
+            continue
+
+        food_type = str(raw.get("food_type") or "").strip().lower()
+        raw_detail = str(raw.get("detail") or "").strip()
+
+        if food_type == "avoid":
+            # Store as a diet item with an 'avoid' note — use 'homemade' type
+            # so it's visible in the diet list without breaking type constraints.
+            item_type = "homemade"
+            detail = f"Avoid – {raw_detail}" if raw_detail else "Avoid (vet advised)"
+            detail = f"{detail} · Vet prescribed ({doc_ref})"[:200]
+        elif food_type == "supplement":
+            item_type = "supplement"
+            detail = f"{raw_detail} · Vet prescribed ({doc_ref})"[:200] if raw_detail else f"Vet prescribed ({doc_ref})"[:200]
+        elif food_type == "packaged":
+            item_type = "packaged"
+            detail = f"{raw_detail} · Vet prescribed ({doc_ref})"[:200] if raw_detail else f"Vet prescribed ({doc_ref})"[:200]
+        else:
+            # homemade or unknown
+            item_type = "homemade"
+            detail = f"{raw_detail} · Vet prescribed ({doc_ref})"[:200] if raw_detail else f"Vet prescribed ({doc_ref})"[:200]
+
+        try:
+            await add_diet_item(db=db, pet_id=pet.id, food_type=item_type, label=food_label, detail=detail)
+            logger.info(
+                "Vet diet item saved for pet=%s: '%s' (%s) from document=%s",
+                pet.id, food_label, item_type, document.id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to save vet diet item '%s' for pet=%s: %s",
+                food_label, pet.id, exc,
+            )
+
+
 def _save_clinical_exam_data(
     db: Session,
     pet: Pet,
@@ -2619,6 +2719,24 @@ async def extract_and_process_document(
             document=document,
             clinical_exam=metadata.get("clinical_exam"),
         )
+
+        # --- Store vet-prescribed dietary recommendations (prescriptions only) ---
+        # Each item lands in diet_items so the Nutrition tab and DietAnalysisCard
+        # automatically include vet-recommended foods in the nutrition breakdown.
+        vet_diet = metadata.get("vet_diet_recommendations") or []
+        if vet_diet:
+            try:
+                await _save_vet_diet_items(
+                    db=db,
+                    pet=pet,
+                    document=document,
+                    vet_diet_recommendations=vet_diet,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to save vet diet recommendations for pet=%s document=%s: %s",
+                    pet.id, document_id, exc,
+                )
 
         # --- Store extracted conditions ---
         extracted_conditions = metadata.get("conditions") or []

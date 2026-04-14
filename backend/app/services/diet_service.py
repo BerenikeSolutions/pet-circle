@@ -15,6 +15,27 @@ from app.models.diet_item import DietItem
 
 logger = logging.getLogger(__name__)
 
+
+async def _refresh_recognition_bullets_for_pet(db: Session, pet_id) -> None:
+    """Recompute and cache recognition_bullets after a diet item change.
+
+    Imported lazily to avoid circular imports (ai_insights_service → diet_item model,
+    not diet_service). Called after any write to diet items so all callers
+    (dashboard API, WhatsApp onboarding flow, agentic edit) stay consistent.
+    """
+    try:
+        from app.models.pet import Pet
+        from app.services.ai_insights_service import generate_recognition_bullets
+        from app.services.precompute_service import _upsert_insight
+
+        pet = db.query(Pet).filter(Pet.id == pet_id).first()
+        if not pet:
+            return
+        bullets = await generate_recognition_bullets(db, pet)
+        _upsert_insight(db, pet_id, "recognition_bullets", bullets)
+    except Exception as exc:
+        logger.warning("Failed to refresh recognition_bullets for pet=%s: %s", pet_id, exc)
+
 # Keywords that indicate packaged food
 PACKAGED_KW = [
     "royal canin", "pedigree", "hills", "drools", "purina", "kibble",
@@ -363,6 +384,10 @@ async def add_diet_item(db: Session, pet_id, food_type: str, label: str, detail:
     db.refresh(item)
 
     logger.info("Diet item added for pet %s: %s (%s)", pet_id, label, classified_type)
+
+    # Refresh the cached recognition bullets so "What We Found" reflects the new item.
+    await _refresh_recognition_bullets_for_pet(db, pet_id)
+
     return {
         "id": str(item.id),
         "type": item.type,

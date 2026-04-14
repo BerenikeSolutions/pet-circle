@@ -532,6 +532,146 @@ def _is_edit_intent(text_lower: str) -> bool:
     return False
 
 
+# ── Vet-diet intent detection ─────────────────────────────────────────────────
+# Phrases that clearly indicate the user is sharing a vet dietary recommendation
+# via chat rather than uploading a prescription document.
+_VET_DIET_PHRASES = (
+    "vet prescribed", "vet recommended", "vet said to give", "vet told to give",
+    "vet says to give", "vet said to feed", "vet told to feed",
+    "vet said to avoid", "vet told to avoid", "vet says to avoid",
+    "doctor prescribed", "doctor recommended", "doctor said to give",
+    "doctor told to give", "doctor says to give",
+    "doctor said to avoid", "doctor told to avoid",
+    "prescribed by vet", "prescribed by doctor", "prescribed by my vet",
+    "vet put on", "vet has put", "vet wants", "vet wants to",
+    "vet is recommending", "vet suggested", "vet advises",
+    "prescription diet", "therapeutic diet", "vet advised",
+    "on a vet diet", "on vet prescribed",
+)
+
+_VET_DIET_EXTRACT_SYSTEM_PROMPT = (
+    "You are a data extraction assistant for a pet health app.\n\n"
+    "Extract vet-prescribed dietary items from a pet parent's message.\n\n"
+    "Return ONLY a valid JSON array. Each item:\n"
+    "  food_label  — food, diet, or supplement name (e.g. 'Royal Canin Renal', 'fish oil')\n"
+    "  food_type   — one of: 'packaged' | 'homemade' | 'supplement' | 'avoid'\n"
+    "    packaged: branded or commercial pet food\n"
+    "    homemade: home-cooked, raw, or generic food\n"
+    "    supplement: vitamins, oils, probiotics, treats\n"
+    "    avoid: food the vet said to restrict or avoid\n"
+    "  detail      — feeding instruction or quantity if mentioned, null otherwise\n\n"
+    "Rules:\n"
+    "- Only extract items the user says are vet-prescribed or vet-recommended\n"
+    "- If nothing vet-prescribed is found, return []\n"
+    "- No explanation, no markdown — JSON array only"
+)
+
+
+def _is_vet_diet_intent(text_lower: str) -> bool:
+    """Return True when the user's message contains a vet dietary recommendation."""
+    return any(phrase in text_lower for phrase in _VET_DIET_PHRASES)
+
+
+async def _extract_vet_diet_from_chat(text: str) -> list[dict]:
+    """
+    Use a lightweight LLM call to extract vet-prescribed diet items from a chat message.
+
+    Returns a list of dicts: [{food_label, food_type, detail}].
+    Returns [] on parse failure or if nothing vet-prescribed is detected.
+    """
+    import json
+    from anthropic import AsyncAnthropic
+    from app.services.nutrition_service import _parse_json_from_response
+
+    try:
+        client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",   # fast + cheap for extraction
+            temperature=0.0,
+            max_tokens=400,
+            system=_VET_DIET_EXTRACT_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": text}],
+        )
+        raw = response.content[0].text.strip()
+        result = _parse_json_from_response(raw)
+        if isinstance(result, list):
+            return result
+        # If the LLM returned a top-level object, look for an array inside
+        if isinstance(result, dict):
+            for v in result.values():
+                if isinstance(v, list):
+                    return v
+    except Exception as exc:
+        logger.warning("_extract_vet_diet_from_chat failed: %s", exc)
+    return []
+
+
+async def _handle_vet_diet_chat(
+    db: Session, user, text: str, from_number: str, pet
+) -> None:
+    """
+    Handle a chat message that contains a vet dietary recommendation.
+
+    Extracts diet items from the message, persists them tagged as
+    'Vet prescribed (chat)', sends a confirmation, then also routes
+    to the query engine in case the message contains a question.
+    """
+    from app.services.diet_service import add_diet_item
+
+    items = await _extract_vet_diet_from_chat(text)
+    saved_labels: list[str] = []
+
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        food_label = str(raw.get("food_label") or "").strip()[:200]
+        if not food_label:
+            continue
+        food_type = str(raw.get("food_type") or "homemade").strip().lower()
+        raw_detail = str(raw.get("detail") or "").strip()
+
+        if food_type == "avoid":
+            item_type = "homemade"
+            detail = f"Avoid – {raw_detail}" if raw_detail else "Avoid (vet advised)"
+            detail = f"{detail} · Vet prescribed (chat)"[:200]
+        elif food_type == "supplement":
+            item_type = "supplement"
+            detail = f"{raw_detail} · Vet prescribed (chat)"[:200] if raw_detail else "Vet prescribed (chat)"
+        elif food_type == "packaged":
+            item_type = "packaged"
+            detail = f"{raw_detail} · Vet prescribed (chat)"[:200] if raw_detail else "Vet prescribed (chat)"
+        else:
+            item_type = "homemade"
+            detail = f"{raw_detail} · Vet prescribed (chat)"[:200] if raw_detail else "Vet prescribed (chat)"
+
+        try:
+            await add_diet_item(
+                db=db, pet_id=pet.id, food_type=item_type, label=food_label, detail=detail
+            )
+            saved_labels.append(food_label)
+            logger.info(
+                "Vet diet item saved from chat for pet=%s: '%s' (%s)",
+                pet.id, food_label, item_type,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to save vet diet item '%s' from chat for pet=%s: %s",
+                food_label, pet.id, exc,
+            )
+
+    if saved_labels:
+        items_text = ", ".join(saved_labels)
+        confirm = (
+            f"Got it! I've noted {items_text} as vet-prescribed for {pet.name} "
+            f"and added it to the diet list. It will show up in the Diet Analysis card "
+            f"with a vet-prescribed tag."
+        )
+        await send_text_message(db, from_number, confirm)
+
+    # Also route to query engine — the message may contain a follow-up question
+    await _handle_query(db, user, text)
+
+
 def _build_error_dedup_token(message_data: dict) -> str:
     """Build a stable token to identify a specific inbound message retry."""
     message_id = message_data.get("message_id")
@@ -937,6 +1077,21 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
         await handle_agentic_edit_intent(db, user, message_data, send_text_message)
         return
 
+    # --- Vet diet recommendation via chat ---
+    # When the user mentions a vet-prescribed food in a message, extract and
+    # persist it as a tagged diet item, then also answer any question present.
+    if _is_vet_diet_intent(text_lower):
+        from app.models.pet import Pet
+        chat_pet = (
+            db.query(Pet)
+            .filter(Pet.user_id == user.id, Pet.is_deleted == False)
+            .order_by(Pet.created_at.desc())
+            .first()
+        )
+        if chat_pet:
+            await _handle_vet_diet_chat(db, user, text, from_number, chat_pet)
+            return
+
     # General query — route to GPT query engine
     await _handle_query(db, user, text)
 
@@ -1120,6 +1275,13 @@ async def _handle_reminder_button(db: Session, user, payload: str) -> None:
                 db, from_number,
                 f"Marked as done! Next due: {next_due}",
             )
+            # Refresh recognition bullets — marking done sets last_done_date, which
+            # changes the preventive care bullet count in "What We Found".
+            try:
+                from app.services.precompute_service import precompute_dashboard_enrichments
+                asyncio.create_task(precompute_dashboard_enrichments(str(reminder.pet_id)))
+            except Exception as _exc:
+                logger.warning("reminder DONE: failed to schedule recognition refresh: %s", _exc)
 
         elif payload == REMINDER_SNOOZE_7:
             new_due = result.get("new_due_date", "N/A")
