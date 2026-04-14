@@ -29,9 +29,8 @@ from app.utils.retry import retry_openai_call
 
 logger = logging.getLogger(__name__)
 
-_ALLOWED_TRAIT_COLORS = {"green", "yellow", "red", "neutral"}
+_ALLOWED_TRAIT_COLORS = {"orange", "green", "neutral"}
 _MAX_TRAITS = 3
-_MAX_ESSENTIAL_CARE_ITEMS = 2
 _GENERIC_TRAIT_TOKENS = {
     "energetic", "active", "playful", "friendly", "loyal", "curious", "social",
     "calm", "happy", "alert",
@@ -56,16 +55,14 @@ class LifeStageData:
     age_months: int
     breed_size: str
     stage_boundaries: dict[str, int]
-    traits: list[dict[str, str]]
-    essential_care: list[dict[str, str]]
+    insights: list[dict[str, str]]
 
 
 @dataclass
 class _LifeStageTraitsPayload:
     """Internal normalized GPT payload for persistence/response."""
 
-    traits: list[dict[str, str]]
-    essential_care: list[dict[str, str]]
+    insights: list[dict[str, str]]
 
 
 def _get_openai_client():
@@ -80,37 +77,35 @@ def _get_openai_client():
 
 def _coerce_traits_payload(raw_payload: Any) -> _LifeStageTraitsPayload:
     """Validate and clamp model output to the expected response contract."""
-    traits: list[dict[str, str]] = []
-    essential_care: list[dict[str, str]] = []
+    insights: list[dict[str, str]] = []
 
-    raw_traits = raw_payload.get("traits") if isinstance(raw_payload, dict) else None
-    if isinstance(raw_traits, list):
-        for item in raw_traits:
+    # Accept either top-level list under "lifeStage.insights" or flat "insights".
+    if isinstance(raw_payload, dict):
+        life_stage_obj = raw_payload.get("lifeStage")
+        if isinstance(life_stage_obj, dict):
+            raw_insights = life_stage_obj.get("insights")
+        else:
+            raw_insights = raw_payload.get("insights")
+    else:
+        raw_insights = None
+
+    if isinstance(raw_insights, list):
+        for item in raw_insights:
             if not isinstance(item, dict):
                 continue
-            label = str(item.get("label", "")).strip()
+            text = str(item.get("text", "")).strip()
             color = str(item.get("color", "")).strip().lower()
-            if not label or color not in _ALLOWED_TRAIT_COLORS:
+            if not text or color not in _ALLOWED_TRAIT_COLORS:
                 continue
-            traits.append({"label": label[:100], "color": color})
-            if len(traits) >= _MAX_TRAITS:
+            # Enforce max-12-word contract at parse time.
+            words = text.split()
+            if len(words) > 12:
+                text = " ".join(words[:12])
+            insights.append({"text": text, "color": color})
+            if len(insights) >= _MAX_TRAITS:
                 break
 
-    raw_essential = raw_payload.get("essential_care") if isinstance(raw_payload, dict) else None
-    if isinstance(raw_essential, list):
-        for item in raw_essential:
-            if not isinstance(item, dict):
-                continue
-            icon = str(item.get("icon", "")).strip()[:16]
-            title = str(item.get("title", "")).strip()[:80]
-            detail = str(item.get("detail", "")).strip()[:180]
-            if not title or not detail:
-                continue
-            essential_care.append({"icon": icon, "title": title, "detail": detail})
-            if len(essential_care) >= _MAX_ESSENTIAL_CARE_ITEMS:
-                break
-
-    return _LifeStageTraitsPayload(traits=traits, essential_care=essential_care)
+    return _LifeStageTraitsPayload(insights=insights)
 
 
 async def _generate_life_stage_traits_gpt(
@@ -124,16 +119,15 @@ async def _generate_life_stage_traits_gpt(
     safe_breed = (breed or "mixed breed").strip()
 
     system_prompt = (
-        "You generate up to 3 breed- and life-stage-specific watch-outs for a pet.\n"
-        "Return ONLY a valid JSON object with keys: traits, essential_care.\n\n"
+        "You generate breed- and life-stage-specific health insights for a pet dashboard.\n"
+        "Return ONLY a valid JSON object matching this exact schema:\n"
+        '{"lifeStage": {"insights": [{\"text\": \"...\", \"color\": \"orange\"|\"green\"|\"neutral\"}]}}\n\n'
         "LIFE STAGE DETERMINATION:\n"
         "Before determining life stage, estimate age-to-life-stage mapping using "
         "breed-specific thresholds — large and giant breeds are considered senior "
         "earlier (6–7 years) than small breeds (10–11 years).\n\n"
-        "traits: list of up to 3 items. Each item {label, color}. "
-        "color must be one of: green, yellow, red, neutral.\n\n"
-        "For the life stage section, include breed- and lifestage-specific watch-outs "
-        "and screenings only.\n\n"
+        "INSIGHT RULES:\n"
+        "Include only breed- and life-stage-specific watch-outs and vet screenings.\n\n"
         "DO NOT include:\n"
         "  - Normal aging observations (energy, metabolism, appetite, vision decline)\n"
         "  - Supplement or nutrition recommendations (handled separately)\n"
@@ -145,13 +139,21 @@ async def _generate_life_stage_traits_gpt(
         "  (B) VET SCREENINGS — for conditions not observable at home but this breed "
         "is predisposed to: cardiac checks, thyroid panels, eye screenings etc. "
         "Frame as: what to screen for and why it's relevant at this age/breed.\n\n"
-        "Maximum 3 items total. Mix based on breed predispositions.\n"
-        "Keep language calm, specific, and non-generic.\n"
-        "Do not label insights as \"home\" or \"vet\" in the output.\n"
-        "Present each as a single clean watch-out statement.\n\n"
-        "essential_care: list of up to 2 items {icon, title, detail}; one concise "
-        "line per detail; each detail MUST explicitly reference one documented risk "
-        "fact from the user prompt."
+        "RANKING & SELECTION:\n"
+        "Rank all candidate insights by clinical importance to this specific breed at "
+        "this specific age. Select ONLY the top 3 — do not pad if fewer than 3 genuine "
+        "issues exist. If two insights are of equal clinical weight, prefer the one more "
+        "specific to the breed over the generic one.\n"
+        "Mix home watch-outs and vet screenings based on what is most clinically "
+        "relevant — do not force a fixed ratio.\n\n"
+        "FORMAT:\n"
+        "Each text is ONE complete sentence, maximum 12 words. "
+        "Keep language calm, specific, and non-generic. "
+        "Do not label insights as 'home' or 'vet' in the output.\n\n"
+        "COLOR ASSIGNMENT:\n"
+        "  orange — watch-out or early warning the parent should actively monitor\n"
+        "  green  — positive milestone or condition being managed well at this stage\n"
+        "  neutral — vet screening indicated but not urgent\n"
     )
 
     user_prompt = (
@@ -183,7 +185,7 @@ async def _generate_life_stage_traits_gpt(
         parsed = json.loads(cleaned)
     except Exception as exc:
         logger.warning("Life stage trait parse failed: %s | raw=%s", exc, raw)
-        return _LifeStageTraitsPayload(traits=[], essential_care=[])
+        return _LifeStageTraitsPayload(insights=[])
 
     return _coerce_traits_payload(parsed)
 
@@ -197,54 +199,6 @@ def _is_stage_specific_trait(label: str) -> bool:
         return True
     return not any(token in value for token in _GENERIC_TRAIT_TOKENS)
 
-
-def _risk_keywords(documented_risks: list[str]) -> set[str]:
-    """Extract normalized keywords from risk strings for lightweight matching."""
-    keywords: set[str] = set()
-    for risk in documented_risks:
-        for token in str(risk).lower().replace("/", " ").replace("-", " ").split():
-            clean = token.strip(".,:;()[]{}")
-            if len(clean) >= 4:
-                keywords.add(clean)
-    return keywords
-
-
-def _is_risk_tied_care_item(item: dict[str, str], risk_keywords: set[str]) -> bool:
-    """Return True when care item title/detail references documented risk context."""
-    text = f"{item.get('title', '')} {item.get('detail', '')}".lower()
-    return any(keyword in text for keyword in risk_keywords)
-
-
-def _fallback_essential_care_from_risks(documented_risks: list[str]) -> list[dict[str, str]]:
-    """Build deterministic essential care highlights when GPT output is not risk-grounded."""
-    items: list[dict[str, str]] = []
-    for risk in documented_risks[:_MAX_ESSENTIAL_CARE_ITEMS]:
-        risk_l = risk.lower()
-        if "weight" in risk_l or "body condition" in risk_l or "bcs" in risk_l:
-            items.append({
-                "icon": "⚖️",
-                "title": "Weight check this stage",
-                "detail": f"Body condition risk noted ({risk}); review portions and track BCS monthly.",
-            })
-        elif "diet" in risk_l or "micronutrient" in risk_l or "supplement" in risk_l or "kibble" in risk_l:
-            items.append({
-                "icon": "🥣",
-                "title": "Close nutrition gaps",
-                "detail": f"Diet risk noted ({risk}); discuss targeted supplements with your vet.",
-            })
-        elif "condition" in risk_l:
-            items.append({
-                "icon": "🩺",
-                "title": "Condition follow-up",
-                "detail": f"Existing condition risk noted ({risk}); keep follow-up checks on schedule.",
-            })
-        else:
-            items.append({
-                "icon": "📌",
-                "title": "Stage-risk follow-up",
-                "detail": f"Track this documented risk during {risk} and review at next vet visit.",
-            })
-    return items[:_MAX_ESSENTIAL_CARE_ITEMS]
 
 
 def _collect_documented_risks(db: Session, pet: Pet) -> list[str]:
@@ -294,11 +248,6 @@ async def get_life_stage_data(db: Session, pet: Pet) -> LifeStageData:
     stage = _get_life_stage(age_months, breed_size)
     boundaries = BREED_SIZE_BOUNDARIES[breed_size]
     documented_risks = _collect_documented_risks(db, pet)
-    risk_keywords = _risk_keywords(documented_risks)
-    has_specific_risks = any(
-        not risk.lower().startswith("life-stage transition risk")
-        for risk in documented_risks
-    )
 
     existing_rows = db.query(PetLifeStageTrait).filter_by(pet_id=pet.id).all()
     exact_row = next(
@@ -311,16 +260,9 @@ async def get_life_stage_data(db: Session, pet: Pet) -> LifeStageData:
     )
 
     if exact_row:
-        cached_traits = exact_row.traits if isinstance(exact_row.traits, list) else []
-        cached_essential = exact_row.essential_care if isinstance(exact_row.essential_care, list) else []
-        essential_ok = (
-            True
-            if not has_specific_risks
-            else bool(cached_essential)
-            and all(_is_risk_tied_care_item(item, risk_keywords) for item in cached_essential)
-        )
+        cached_insights = exact_row.traits if isinstance(exact_row.traits, list) else []
 
-        if essential_ok:
+        if cached_insights:
             return LifeStageData(
                 stage=stage.value,
                 age_months=age_months,
@@ -330,12 +272,11 @@ async def get_life_stage_data(db: Session, pet: Pet) -> LifeStageData:
                     "adult_start": int(boundaries["adult_start"]),
                     "senior_start": int(boundaries["senior_start"]),
                 },
-                traits=cached_traits,
-                essential_care=cached_essential,
+                insights=cached_insights,
             )
 
         logger.info(
-            "Refreshing cached life-stage traits for pet=%s due to quality/risk mismatch",
+            "Refreshing cached life-stage insights for pet=%s (empty cache row)",
             pet.id,
         )
 
@@ -347,7 +288,7 @@ async def get_life_stage_data(db: Session, pet: Pet) -> LifeStageData:
             documented_risks,
         )
     except Exception as exc:
-        logger.warning("Life stage trait generation failed for pet=%s: %s", pet.id, exc)
+        logger.warning("Life stage insight generation failed for pet=%s: %s", pet.id, exc)
         return LifeStageData(
             stage=stage.value,
             age_months=age_months,
@@ -357,20 +298,12 @@ async def get_life_stage_data(db: Session, pet: Pet) -> LifeStageData:
                 "adult_start": int(boundaries["adult_start"]),
                 "senior_start": int(boundaries["senior_start"]),
             },
-            traits=[],
-            essential_care=[],
+            insights=[],
         )
 
-    filtered_traits = [t for t in generated.traits if _is_stage_specific_trait(t.get("label", ""))]
-    filtered_essential = [
-        item for item in generated.essential_care
-        if _is_risk_tied_care_item(item, risk_keywords)
-    ]
-    if not filtered_essential:
-        filtered_essential = _fallback_essential_care_from_risks(documented_risks)
-
-    filtered_traits = filtered_traits[:_MAX_TRAITS]
-    filtered_essential = filtered_essential[:_MAX_ESSENTIAL_CARE_ITEMS]
+    filtered_insights = [
+        i for i in generated.insights if _is_stage_specific_trait(i.get("text", ""))
+    ][:_MAX_TRAITS]
 
     for row in existing_rows:
         if row is not exact_row:
@@ -378,16 +311,14 @@ async def get_life_stage_data(db: Session, pet: Pet) -> LifeStageData:
 
     if exact_row:
         exact_row.breed_size = breed_size.value
-        exact_row.traits = filtered_traits
-        exact_row.essential_care = filtered_essential
+        exact_row.traits = filtered_insights
         exact_row.generated_at = datetime.now(UTC).replace(tzinfo=None)
     else:
         cache_row = PetLifeStageTrait(
             pet_id=pet.id,
             life_stage=stage.value,
             breed_size=breed_size.value,
-            traits=filtered_traits,
-            essential_care=filtered_essential,
+            traits=filtered_insights,
             generated_at=datetime.now(UTC).replace(tzinfo=None),
         )
         db.add(cache_row)
@@ -402,6 +333,5 @@ async def get_life_stage_data(db: Session, pet: Pet) -> LifeStageData:
             "adult_start": int(boundaries["adult_start"]),
             "senior_start": int(boundaries["senior_start"]),
         },
-        traits=filtered_traits,
-        essential_care=filtered_essential,
+        insights=filtered_insights,
     )

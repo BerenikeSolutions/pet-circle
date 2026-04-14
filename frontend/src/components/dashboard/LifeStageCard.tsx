@@ -1,6 +1,6 @@
 "use client";
 
-import type { DashboardData, LifeStageTrait } from "@/lib/api";
+import type { DashboardData, LifeStageInsight } from "@/lib/api";
 import {
   ageMonthsFromDob,
   formatAgeLabel,
@@ -14,11 +14,10 @@ interface LifeStageCardProps {
   compact?: boolean;
 }
 
-const TRAIT_CLASS: Record<LifeStageTrait["color"], string> = {
-  green: "trait-g",
-  yellow: "trait-y",
-  red: "trait-r",
-  neutral: "trait-p",
+const INSIGHT_BG: Record<LifeStageInsight["color"], { bg: string; color: string }> = {
+  orange:  { bg: "var(--ta)",  color: "#b85c00" },
+  green:   { bg: "var(--tg)",  color: "#1e8c3a" },
+  neutral: { bg: "#F0EDE9",    color: "var(--t2)" },
 };
 
 function getStageStarts() {
@@ -28,54 +27,18 @@ function getStageStarts() {
   }, []);
 }
 
-function clamp01(value: number): number {
-  return Math.max(0, Math.min(1, value));
-}
-
 function markerPositionPct(
   ageMonths: number,
   stageIndex: number,
   starts: number[],
   boundaries?: { junior_start: number; adult_start: number; senior_start: number },
 ): number {
-  const fallbackBounds = {
-    junior_start: 12,
-    adult_start: 24,
-    senior_start: 84,
-  };
-  const b = boundaries || fallbackBounds;
-
-  let segmentStartAge = 0;
-  let segmentEndAge = b.junior_start;
-
-  if (stageIndex === 1) {
-    segmentStartAge = b.junior_start;
-    segmentEndAge = b.adult_start;
-  } else if (stageIndex === 2) {
-    segmentStartAge = b.adult_start;
-    segmentEndAge = b.senior_start;
-  } else if (stageIndex === 3) {
-    segmentStartAge = b.senior_start;
-    // Senior stage is open-ended; use a stable 48-month window for bar positioning.
-    segmentEndAge = b.senior_start + 48;
-  }
-
-  const denom = Math.max(1, segmentEndAge - segmentStartAge);
-  const segmentProgress = clamp01((ageMonths - segmentStartAge) / denom);
-
-  return starts[stageIndex] + segmentProgress * STAGE_WIDTHS[stageIndex];
-}
-
-function traitOrder(label: string): number {
-  const value = label.toLowerCase();
-  const behaviorKeywords = ["energy", "play", "playful", "anxiety", "anxious", "active", "restless", "behavior", "temperament", "social"];
-  const physiologyKeywords = ["appetite", "weight", "metabolism", "digestion", "sleep", "hydration", "coat", "hunger", "thirst"];
-  const clinicalKeywords = ["joint", "dental", "pain", "stiff", "limp", "vomit", "diarr", "itch", "rash", "infection", "cardiac"];
-
-  if (behaviorKeywords.some((keyword) => value.includes(keyword))) return 0;
-  if (physiologyKeywords.some((keyword) => value.includes(keyword))) return 1;
-  if (clinicalKeywords.some((keyword) => value.includes(keyword))) return 2;
-  return 1;
+  const b = boundaries ?? { junior_start: 12, adult_start: 24, senior_start: 84 };
+  const stageBounds = [0, b.junior_start, b.adult_start, b.senior_start, b.senior_start + 48];
+  const start = stageBounds[stageIndex];
+  const end   = stageBounds[stageIndex + 1];
+  const progress = Math.max(0, Math.min(1, (ageMonths - start) / Math.max(1, end - start)));
+  return Math.min(starts[stageIndex] + progress * STAGE_WIDTHS[stageIndex], 98);
 }
 
 export default function LifeStageCard({ data, compact = false }: LifeStageCardProps) {
@@ -88,23 +51,10 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
 
   const stageIndex = getStageIndex(lifeStage?.stage);
   const starts = getStageStarts();
+  const markerPct = markerPositionPct(effectiveAge, stageIndex, starts, lifeStage?.stage_boundaries);
 
-  const markerPctRaw = markerPositionPct(
-    effectiveAge,
-    stageIndex,
-    starts,
-    lifeStage?.stage_boundaries,
-  );
-  const markerPct = Math.max(0, Math.min(100, markerPctRaw));
+  const insights = (lifeStage?.insights ?? []).slice(0, 3);
 
-  const traits = (lifeStage?.traits || [])
-    .map((trait, index) => ({ trait, index }))
-    .sort((a, b) => {
-      const orderDiff = traitOrder(a.trait.label) - traitOrder(b.trait.label);
-      return orderDiff !== 0 ? orderDiff : a.index - b.index;
-    })
-    .map((entry) => entry.trait)
-    .slice(0, 8);
   if (!hasAge) {
     return (
       <div className={compact ? undefined : "card"} style={{ paddingBottom: 12 }}>
@@ -120,6 +70,7 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
     <div className={compact ? undefined : "card"} style={{ paddingBottom: 12 }}>
       <div className="sec-lbl">What to expect as {data.pet.name} turns {ageLabel}</div>
 
+      {/* Stage labels */}
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "var(--t3)", marginBottom: 4 }}>
         {STAGE_LABELS.map((label, index) => (
           <span
@@ -136,6 +87,7 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
         ))}
       </div>
 
+      {/* Progress bar */}
       <div className="stage-bar" style={{ marginBottom: 3 }}>
         {STAGE_LABELS.map((label, index) => (
           <div
@@ -146,44 +98,46 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
               width: `${STAGE_WIDTHS[index]}%`,
               top: 0,
               bottom: 0,
-              background:
-                index === stageIndex ? "linear-gradient(90deg,#FF8C5A,#FF6B35)" : "#E0DDD9",
+              background: index === stageIndex ? "linear-gradient(90deg,#FF8C5A,#FF6B35)" : "#E0DDD9",
               opacity: index === stageIndex ? 1 : 0.5,
-              borderRadius:
-                index === 0 ? "6px 0 0 6px" : index === STAGE_LABELS.length - 1 ? "0 6px 6px 0" : 0,
+              borderRadius: index === 0 ? "6px 0 0 6px" : index === STAGE_LABELS.length - 1 ? "0 6px 6px 0" : 0,
             }}
           />
         ))}
-        <div className="stage-marker" style={{ left: `clamp(12px, ${markerPct}%, calc(100% - 12px))` }} />
+        <div className="stage-marker" style={{ left: `${markerPct}%` }} />
       </div>
 
-      <div
-        style={{
-          position: "relative",
-          height: 18,
-          marginTop: 4,
-          marginBottom: 8,
-        }}
-      >
-        <div className="stage-caption" style={{ left: `clamp(60px, ${markerPct}%, calc(100% - 60px))` }}>
-          {data.pet.name} is here · {ageLabel}
-        </div>
+      <div className="stage-caption" style={{ fontSize: 11, marginTop: 4, marginBottom: 12 }}>
+        {data.pet.name} is here · {ageLabel}
       </div>
 
-      {traits.length > 0 && (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 10 }}>
-          {traits.map((trait) => (
-            <span
-              key={trait.label}
-              className={`trait-pill ${TRAIT_CLASS[trait.color]}`}
-              style={{ fontSize: 10, padding: "3px 8px", whiteSpace: "normal", maxWidth: "100%", wordBreak: "break-word" }}
-            >
-              {trait.label}
-            </span>
-          ))}
+      {/* Full-sentence insight cards */}
+      {insights.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {insights.map((insight, i) => {
+            const style = INSIGHT_BG[insight.color] ?? INSIGHT_BG.neutral;
+            return (
+              <div
+                key={i}
+                style={{
+                  background: style.bg,
+                  borderRadius: 10,
+                  padding: "10px 14px",
+                  fontSize: 13,
+                  fontWeight: 500,
+                  color: style.color,
+                  lineHeight: 1.45,
+                  overflowWrap: "break-word",
+                  wordBreak: "break-word",
+                  minWidth: 0,
+                }}
+              >
+                {insight.text}
+              </div>
+            );
+          })}
         </div>
       )}
-
     </div>
   );
 }

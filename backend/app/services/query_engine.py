@@ -472,15 +472,10 @@ def _build_pet_context(db: Session, pet_id: UUID) -> str:
         if life_stage.breed_size:
             context_parts.append(f"Breed size: {life_stage.breed_size}")
         if life_stage.traits:
-            traits = life_stage.traits if isinstance(life_stage.traits, list) else []
-            for t in traits[:5]:
-                context_parts.append(f"- {t}")
-        if life_stage.essential_care:
-            care = life_stage.essential_care if isinstance(life_stage.essential_care, list) else []
-            if care:
-                context_parts.append("Essential care:")
-                for c in care[:5]:
-                    context_parts.append(f"- {c}")
+            insights = life_stage.traits if isinstance(life_stage.traits, list) else []
+            for i in insights[:5]:
+                text = i.get("text", i) if isinstance(i, dict) else i
+                context_parts.append(f"- {text}")
 
     # --- AI Insights (cached) ---
     insights = (

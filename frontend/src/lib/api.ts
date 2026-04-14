@@ -238,15 +238,9 @@ export interface VetSummary {
   last_visit: string | null;
 }
 
-export interface LifeStageTrait {
-  label: string;
-  color: "green" | "yellow" | "red" | "neutral";
-}
-
-export interface LifeStageEssentialCare {
-  icon: string;
-  title: string;
-  detail: string;
+export interface LifeStageInsight {
+  text: string;
+  color: "orange" | "green" | "neutral";
 }
 
 export interface LifeStageData {
@@ -258,9 +252,11 @@ export interface LifeStageData {
     adult_start: number;
     senior_start: number;
   };
-  traits: LifeStageTrait[];
-  essential_care: LifeStageEssentialCare[];
+  insights: LifeStageInsight[];
 }
+
+/** @deprecated Use LifeStageInsight */
+export type LifeStageTrait = LifeStageInsight;
 
 export interface HealthConditionSummary {
   id: string;
