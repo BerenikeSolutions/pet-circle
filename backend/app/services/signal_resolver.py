@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.models.condition import Condition
@@ -1061,6 +1062,53 @@ def resolve_supplement_signal(
         products = _resolve_supplement_l3(db, sup_type)
         if products:
             return _build_supplement_result(SignalLevel.L3, products)
+
+    # ---- Ingredient fallback -----------------------------------------------
+    # When no products match by type (L3 empty), search key_ingredients using
+    # the supplement label text.  This recovers products whose DB type column
+    # differs from the SUPPLEMENT_TYPE_KEYWORDS mapping but whose
+    # key_ingredients DO mention the nutrient (e.g. a product typed
+    # "coat_supplement" that lists "Omega 3 & 6" in key_ingredients).
+    # Uses SUPPLEMENT_AMBIGUITY_MAP to expand generic labels before searching
+    # (e.g. "omega" → also search "omega 3", "omega 6", "omega 9").
+    _STRIP_SUFFIXES = (
+        "supplement", "tablet", "capsule", "capsules",
+        "oil", "chew", "chews", "powder",
+    )
+    ingredient_term = _normalize(
+        " ".join(filter(None, [diet_item.label, diet_item.detail]))
+    ).replace("-", " ")
+    for _suffix in _STRIP_SUFFIXES:
+        if ingredient_term.endswith(f" {_suffix}"):
+            ingredient_term = ingredient_term[: -(len(_suffix) + 1)].strip()
+            break
+
+    if ingredient_term:
+        from app.services.diet_service import SUPPLEMENT_AMBIGUITY_MAP  # avoid circular at module level
+
+        # Build a list of search terms: the base term + any expansions from the
+        # ambiguity map (e.g. "omega" → ["omega 3", "omega 6", "omega 9"]).
+        search_terms: list[str] = [ingredient_term]
+        for key, expansions in SUPPLEMENT_AMBIGUITY_MAP.items():
+            if ingredient_term == key or ingredient_term.startswith(key + " "):
+                for exp in expansions:
+                    search_terms.append(exp.lower().replace("-", " "))
+                break
+
+        conditions = [
+            ProductSupplement.key_ingredients.ilike(f"%{t}%")
+            for t in search_terms
+        ]
+        rows = (
+            _filter_active_supplement(db.query(ProductSupplement))
+            .filter(or_(*conditions))
+            .order_by(ProductSupplement.popularity_rank)
+            .limit(3)
+            .all()
+        )
+        rows = _apply_oos_rule_supplement(rows)
+        if rows:
+            return _build_supplement_result(SignalLevel.L3, rows)
 
     # ---- L1 (generic mention) ----------------------------------------------
     return SignalResult(
