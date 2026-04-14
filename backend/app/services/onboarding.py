@@ -3966,11 +3966,14 @@ def _keyword_parse_preventive_care(text: str) -> dict:
     """
     Rule-based fallback for preventive care parsing when the GPT API call fails.
 
-    Splits the user's message into comma/conjunction-separated segments, detects
-    which preventive category each segment mentions, and extracts an approximate
-    date using common relative-date patterns.  This preserves data the user
-    already provided rather than marking all categories as missing when the API
-    is temporarily unavailable.
+    Strategy: locate each category keyword in the text by position, then assign
+    each keyword a span from its position to the next keyword's position (or end).
+    This correctly handles both comma-separated input ("vaccines last dec, deworming
+    today") and comma-free run-on sentences ("vaccines last december deworming today
+    flea 3 months back") — the latter is a common WhatsApp typing style.
+
+    Dates are extracted from each per-category span using relative-date patterns.
+    Only categories not found in the text appear in missing[].
 
     Returns a dict with the same shape as _parse_preventive_care().
     """
@@ -4015,7 +4018,7 @@ def _keyword_parse_preventive_care(text: str) -> dict:
                 yr -= 1
             return f"{calendar.month_name[mo]} {yr}"
         # Match month names: "last dec", "in jan", or just "jan".
-        # Use strict less-than so "last april" when today is April → previous year.
+        # Strict less-than: "last april" when today is April → previous year.
         for name, num in sorted(_MONTH_NUMS.items(), key=lambda x: -len(x[0])):
             if re.search(rf"\b{re.escape(name)}\b", seg):
                 yr = today_d.year if num < today_d.month else today_d.year - 1
@@ -4044,41 +4047,44 @@ def _keyword_parse_preventive_care(text: str) -> dict:
         "blood_test": None,
         "missing": [],
     }
-    found: set[str] = set()
 
-    # Split on commas, semicolons, and conjunctions to get per-category segments.
-    segments = re.split(r"[,;]|\band\b|\bthen\b|\bbut\b", t)
-    segments = [s.strip() for s in segments if s.strip()]
+    # Build a list of (category, match_start) for every category keyword found.
+    # Sorting by position lets us slice text[start:next_start] as per-category spans,
+    # which correctly handles comma-free run-on sentences like:
+    #   "vaccines last december deworming today flea 3 months back"
+    keyword_hits: list[tuple[str, int]] = []
+    for cat, pat in (
+        ("vaccines", _vaccine_re),
+        ("deworming", _deworm_re),
+        ("flea_tick", _flea_re),
+        ("blood_test", _blood_re),
+    ):
+        m = pat.search(t)
+        if m:
+            keyword_hits.append((cat, m.start()))
 
-    for seg in segments:
+    keyword_hits.sort(key=lambda x: x[1])
+
+    # Assign each category the text from its keyword to the next keyword (or end).
+    spans: list[tuple[str, str]] = []
+    for i, (cat, start) in enumerate(keyword_hits):
+        end = keyword_hits[i + 1][1] if i + 1 < len(keyword_hits) else len(t)
+        spans.append((cat, t[start:end]))
+
+    for cat, seg in spans:
         is_none = bool(_none_re.search(seg))
+        dt = "none" if is_none else (_extract_date(seg) or today_d.strftime("%B %Y"))
 
-        if _vaccine_re.search(seg):
-            found.add("vaccines")
-            if result["vaccines"] is None:
-                result["vaccines"] = "none" if is_none else (
-                    _extract_date(seg) or today_d.strftime("%B %Y")
-                )
+        if cat == "vaccines":
+            result["vaccines"] = dt
+        elif cat == "deworming":
+            result["deworming"] = {"date": dt, "medicine": None, "prevention_targets": []}
+        elif cat == "flea_tick":
+            result["flea_tick"] = {"date": dt, "medicine": None, "prevention_targets": []}
+        elif cat == "blood_test":
+            result["blood_test"] = dt
 
-        if _deworm_re.search(seg):
-            found.add("deworming")
-            if result["deworming"] is None:
-                dt = "none" if is_none else (_extract_date(seg) or today_d.strftime("%B %Y"))
-                result["deworming"] = {"date": dt, "medicine": None, "prevention_targets": []}
-
-        if _flea_re.search(seg):
-            found.add("flea_tick")
-            if result["flea_tick"] is None:
-                dt = "none" if is_none else (_extract_date(seg) or today_d.strftime("%B %Y"))
-                result["flea_tick"] = {"date": dt, "medicine": None, "prevention_targets": []}
-
-        if _blood_re.search(seg):
-            found.add("blood_test")
-            if result["blood_test"] is None:
-                result["blood_test"] = "none" if is_none else (
-                    _extract_date(seg) or today_d.strftime("%B %Y")
-                )
-
+    found = {cat for cat, _ in spans}
     result["missing"] = [
         k for k in ("vaccines", "deworming", "flea_tick", "blood_test") if k not in found
     ]
@@ -4118,6 +4124,10 @@ async def _parse_preventive_care(
         "Extract preventive care information from this message about a pet. "
         "Look for four categories: vaccines, deworming, flea & tick treatment, and blood tests. "
         "For each, extract the approximate date or timeframe when it was last done. "
+        "IMPORTANT: The user may list multiple categories in a comma-free run-on sentence "
+        "(e.g. 'vaccines last december deworming today flea 3 months back'). "
+        "In such cases each category keyword (vaccines, deworming, flea, blood test) "
+        "should be paired with the date phrase that immediately follows it. "
         "IMPORTANT: Convert ALL relative dates (e.g. 'last Dec', '2 months ago', 'Jan') "
         "to absolute dates in 'Month YYYY' or 'DD Month YYYY' format using today's date as reference. "
         "For example, if today is 2026-04-06 and user says 'last Dec', return 'December 2025'. "

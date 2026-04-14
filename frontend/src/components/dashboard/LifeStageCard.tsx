@@ -109,16 +109,19 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
         <div className="stage-marker" style={{ left: `${markerPct}%` }} />
       </div>
 
-      {/* Caption centred under the marker dot */}
+      {/* Caption tracks the marker — anchors right when dot is in the right half */}
       <div style={{ position: "relative", height: 20, marginBottom: 12 }}>
         <span
           className="stage-caption"
           style={{
             position: "absolute",
             fontSize: 11,
-            left: `${markerPct}%`,
-            transform: "translateX(-50%)",
             whiteSpace: "nowrap",
+            ...(markerPct >= 60
+              ? { right: `${100 - markerPct}%`, left: "auto" }
+              : markerPct <= 40
+              ? { left: `${markerPct}%`, right: "auto" }
+              : { left: `${markerPct}%`, transform: "translateX(-50%)" }),
           }}
         >
           {data.pet.name} is here · {ageLabel}
