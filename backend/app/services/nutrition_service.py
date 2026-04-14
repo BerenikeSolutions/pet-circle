@@ -653,7 +653,7 @@ async def _call_openai_combined_meal_estimation(
         prompt_parts.append(f"Gender: {gender}")
     if conditions:
         prompt_parts.append(f"Conditions: {', '.join(conditions)}")
-    prompt_parts.append("\nFoods (complete daily diet):")
+    prompt_parts.append("\nDiet items (complete daily intake):")
     for i, item in enumerate(diet_items, 1):
         line = f"{i}. {item.label} (type: {item.type})"
         portion_g = getattr(item, "daily_portion_g", None)
