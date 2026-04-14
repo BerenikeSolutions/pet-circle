@@ -18,6 +18,7 @@ from app.services.message_router import (
     start_document_window_sweeper,
     stop_document_window_sweeper,
 )
+from app.services import queue_service, document_consumer
 
 # Application initialization.
 # Settings are validated at import time (app/config.py).
@@ -75,13 +76,21 @@ app.include_router(dashboard.router)
 
 @app.on_event("startup")
 async def _start_background_reconciliation() -> None:
-    """Start background reconciliation loops required for durable onboarding."""
+    """Start background reconciliation loops and the RabbitMQ consumer."""
     start_document_window_sweeper()
+    # Connect to CloudAMQP and declare queues (no-op if CLOUDAMQP_URL not set).
+    await queue_service.connect()
+    # Start the in-process consumer as a background asyncio task.
+    # Consumes document.extract and dashboard.precompute queues.
+    import asyncio
+    asyncio.create_task(document_consumer.start_consuming())
 
 
 @app.on_event("shutdown")
 async def _stop_background_reconciliation() -> None:
-    """Stop background reconciliation loops cleanly on service shutdown."""
+    """Stop the RabbitMQ consumer and background reconciliation loops cleanly."""
+    document_consumer.stop()
+    await queue_service.close()
     await stop_document_window_sweeper()
 
 

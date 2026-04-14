@@ -3358,14 +3358,22 @@ async def extract_and_process_document(
         )
 
         # --- Step 6: Pre-warm dashboard cache ---
-        # Runs diet_summary, recognition_bullets, and care_plan_reasons in the
-        # background so the next dashboard load reads from DB with no API calls.
+        # Publishes a precompute job to the dashboard.precompute queue.
+        # The in-process consumer calls precompute_dashboard_enrichments() so the
+        # next dashboard load reads from DB with no API calls.
+        # Falls back to a direct asyncio task if the queue is unavailable.
         try:
-            import asyncio as _asyncio
-            from app.services.precompute_service import precompute_dashboard_enrichments
-            _asyncio.create_task(precompute_dashboard_enrichments(str(pet.id)))
+            from app.services import queue_service as _qs
+            _published = await _qs.publish_precompute_job(
+                pet_id=str(pet.id),
+                user_id=str(pet.user_id) if hasattr(pet, "user_id") else "",
+            )
+            if not _published:
+                import asyncio as _asyncio
+                from app.services.precompute_service import precompute_dashboard_enrichments
+                _asyncio.create_task(precompute_dashboard_enrichments(str(pet.id)))
         except Exception as _precompute_exc:
-            logger.warning("precompute task scheduling failed: %s", _precompute_exc)
+            logger.warning("precompute scheduling failed: %s", _precompute_exc)
 
         # Note: Post-extraction WhatsApp nudges are now sent by the daily cron
         # (nudge_scheduler.run_nudge_scheduler) instead of per-upload triggers.

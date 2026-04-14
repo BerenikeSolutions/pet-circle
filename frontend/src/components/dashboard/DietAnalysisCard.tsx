@@ -177,8 +177,6 @@ export default function DietAnalysisCard({ token, compact = false }: DietAnalysi
     return () => { cancelled = true; };
   }, [token]);
 
-  if (loading) return null;
-
   const n = nutrition;
 
   // No macros available — show placeholder donuts with contextual message

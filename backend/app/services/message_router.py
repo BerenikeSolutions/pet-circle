@@ -1745,15 +1745,224 @@ def _schedule_batch_extraction(
     )
 
 
+async def run_extraction_batch(
+    pet_id: str,
+    document_ids: list,
+    user_id: str,
+    from_number,
+    pet_name: str,
+) -> None:
+    """
+    Run GPT extraction for a batch of pending documents and send the result summary.
+
+    This is the core extraction loop, decoupled from the debounce timer so it
+    can be called by the in-process RabbitMQ consumer (document_consumer.py) or
+    directly as a fallback when the queue is unavailable.
+
+    Args:
+        pet_id:        UUID string of the pet.
+        document_ids:  List of Document UUID strings to extract.
+        user_id:       UUID string of the owning user.
+        from_number:   WhatsApp mobile number for replies (None = dashboard upload).
+        pet_name:      Pet's display name for error messages.
+    """
+    from app.database import get_fresh_session
+    from app.models.user import User
+    from app.services.gpt_extraction import extract_and_process_document
+
+    pet_key = str(pet_id)
+    bg_db = get_fresh_session()
+
+    try:
+        pending_docs = (
+            bg_db.query(Document)
+            .filter(
+                Document.pet_id == pet_id,
+                Document.extraction_status == "pending",
+                Document.id.in_(document_ids),
+            )
+            .order_by(Document.created_at.asc())
+            .all()
+        )
+
+        if not pending_docs:
+            logger.info(
+                "[extraction] No pending docs found for pet=%s (already processed?)",
+                pet_key,
+            )
+            return
+
+        total = len(pending_docs)
+        user = bg_db.query(User).filter(User.id == user_id).first()
+        pet = bg_db.query(Pet).filter(Pet.id == pet_id).first()
+        if user and from_number:
+            user._plaintext_mobile = from_number
+
+        logger.info(
+            "[extraction] Starting batch: pet=%s, %d docs", pet_key, total
+        )
+
+        success_count = 0
+        fail_count = 0
+        failed_docs: list[dict] = []
+        all_results = []
+
+        doc_id_to_name: dict[str, str] = {
+            str(doc.id): (doc.document_name or doc.file_path.split("/")[-1])
+            for doc in pending_docs
+        }
+
+        for idx, doc in enumerate(pending_docs, 1):
+            async with _get_extraction_semaphore():
+                try:
+                    from app.services.document_upload import download_from_supabase
+                    file_bytes = await download_from_supabase(
+                        doc.file_path,
+                        backend=getattr(doc, "storage_backend", "supabase"),
+                    )
+
+                    if not file_bytes:
+                        fail_count += 1
+                        doc_label = doc_id_to_name.get(str(doc.id), doc.file_path.split("/")[-1])
+                        failed_docs.append({"name": doc_label, "reason": "download_failed", "extra": ""})
+                        doc.extraction_status = "failed"
+                        logger.error(
+                            "File download returned None for doc %s (backend=%s, path=%s)",
+                            str(doc.id), getattr(doc, "storage_backend", "supabase"), doc.file_path,
+                        )
+                        bg_db.commit()
+                        continue
+
+                    result = await asyncio.wait_for(
+                        extract_and_process_document(
+                            bg_db, doc.id,
+                            f"[file: {doc.file_path}]",
+                            file_bytes=file_bytes,
+                        ),
+                        timeout=120,
+                    )
+                    all_results.append(result)
+
+                    doc_label = doc_id_to_name.get(str(doc.id), doc.file_path.split("/")[-1])
+                    if result.get("status") == "failed":
+                        fail_count += 1
+                        failed_docs.append({"name": doc_label, "reason": "unclear", "extra": ""})
+                    elif result.get("status") == "rejected":
+                        doc_type = result.get("document_type", "")
+                        if doc_type == "not_pet_related":
+                            failed_docs.append({"name": doc_label, "reason": "not_health", "extra": ""})
+                        elif doc_type == "pet_name_mismatch":
+                            errors = result.get("errors") or []
+                            other_pet = ""
+                            for err in errors:
+                                if "appears to be for" in err:
+                                    import re
+                                    m = re.search(r"appears to be for ['\"]?([^'\",.]+)['\"]?", err)
+                                    if m:
+                                        other_pet = m.group(1).strip()
+                                    break
+                            failed_docs.append({"name": doc_label, "reason": "wrong_pet", "extra": other_pet})
+                        else:
+                            failed_docs.append({"name": doc_label, "reason": "unclear", "extra": ""})
+                    else:
+                        success_count += 1
+
+                    logger.info(
+                        "Extracted doc %d/%d (id=%s) for pet %s: status=%s",
+                        idx, total, str(doc.id), str(pet_id), result.get("status"),
+                    )
+
+                except TimeoutError:
+                    fail_count += 1
+                    doc_label = doc_id_to_name.get(str(doc.id), doc.file_path.split("/")[-1])
+                    failed_docs.append({"name": doc_label, "reason": "timeout", "extra": ""})
+                    logger.error(
+                        "Extraction timed out for doc %s (%d/%d) pet %s",
+                        str(doc.id), idx, total, str(pet_id),
+                    )
+                    try:
+                        doc.extraction_status = "failed"
+                        bg_db.commit()
+                    except Exception:
+                        try:
+                            bg_db.rollback()
+                        except Exception:
+                            pass
+
+                except Exception as e:
+                    fail_count += 1
+                    doc_label = doc_id_to_name.get(str(doc.id), doc.file_path.split("/")[-1])
+                    failed_docs.append({"name": doc_label, "reason": "unclear", "extra": ""})
+                    logger.error(
+                        "Extraction failed for doc %s (%d/%d): %s",
+                        str(doc.id), idx, total, str(e),
+                    )
+                    try:
+                        bg_db.rollback()
+                    except Exception:
+                        pass
+                    try:
+                        doc.extraction_status = "failed"
+                        bg_db.commit()
+                    except Exception:
+                        try:
+                            bg_db.rollback()
+                        except Exception:
+                            pass
+
+        # Send one consolidated summary after all extractions complete.
+        # Only send via WhatsApp if we have a phone number (dashboard uploads skip this).
+        if from_number and user and pet:
+            user._plaintext_mobile = from_number
+            if _has_pending_deferred_care_plan(bg_db, pet.id, user=user):
+                await _send_deferred_care_plan(
+                    bg_db, user, pet, from_number,
+                    all_results=all_results,
+                    success_count=success_count,
+                    fail_count=fail_count,
+                    failed_docs=failed_docs,
+                    doc_id_to_name=doc_id_to_name,
+                )
+            else:
+                await _send_batch_summary(
+                    bg_db, user, pet, from_number,
+                    all_results, success_count, fail_count, failed_docs,
+                )
+
+    except Exception as e:
+        logger.error("[extraction] Batch failed for pet=%s: %s", pet_key, str(e))
+        try:
+            bg_db.rollback()
+        except Exception:
+            pass
+        if from_number:
+            try:
+                from app.database import get_fresh_session as _get_fresh_session
+                _err_db = _get_fresh_session()
+                try:
+                    await send_text_message(
+                        _err_db, from_number,
+                        f"Extraction encountered an issue for {pet_name}. "
+                        f"Try uploading again.",
+                    )
+                finally:
+                    _err_db.close()
+            except Exception:
+                pass
+    finally:
+        bg_db.close()
+
+
 async def _delayed_batch_extraction(
     pet_id, pet_name, user_id, from_number,
 ) -> None:
     """
-    Wait for uploads to settle, then extract all pending documents for the pet.
+    Wait for uploads to settle, then hand off to the RabbitMQ extraction queue.
 
-    Waits _EXTRACTION_DELAY_SECONDS, then queries all pending documents
-    for the pet and extracts them one-by-one (each under the semaphore).
-    Sends a single batch summary when all extractions are done.
+    Handles the debounce window (15s sleep), onboarding finalization, and the
+    pre-extraction acknowledgment. The actual GPT extraction loop is handled by
+    the in-process consumer via run_extraction_batch(). Falls back to a direct
+    asyncio task if the queue is unavailable (no CLOUDAMQP_URL configured).
     """
     await asyncio.sleep(_EXTRACTION_DELAY_SECONDS)
 
@@ -1763,7 +1972,6 @@ async def _delayed_batch_extraction(
     _extraction_timers.pop(pet_key, None)
 
     from app.database import get_fresh_session
-    from app.services.gpt_extraction import extract_and_process_document
 
     bg_db = get_fresh_session()
     try:
@@ -1813,7 +2021,7 @@ async def _delayed_batch_extraction(
 
         total = len(pending_docs)
         logger.info(
-            "Starting batch extraction for pet %s: %d pending documents",
+            "Debounce settled for pet %s: %d docs ready for queue",
             str(pet_id), total,
         )
 
@@ -1839,8 +2047,18 @@ async def _delayed_batch_extraction(
             and user.onboarding_state == "awaiting_documents"
             and not is_upload_window_extended(user.id)
         )
+        # Read unsupported count before clearing state.
+        unsupported_count = _unsupported_format_count.pop(pet_key, 0)
+
+        # --- Clear in-memory batch state (the batch window is now closed) ---
+        # Do this before publishing so the state is never stale if the
+        # publish raises an exception and we re-enter via the fallback path.
+        _recent_uploads.pop(pet_key, None)
+        _rejection_sent.pop(pet_key, None)
+        _batch_document_ids.pop(pet_key, None)
         _batch_is_onboarding.pop(pet_key, None)
 
+        # --- Onboarding finalization (must happen before extraction starts) ---
         if should_finalize_onboarding:
             try:
                 from app.services.onboarding import _finalize_onboarding
@@ -1862,13 +2080,11 @@ async def _delayed_batch_extraction(
         # Onboarding batches already have the "That's everything, building care
         # plan..." transition message, so we skip the ack there.
         if not should_finalize_onboarding and pet and user:
-            unsupported_count = _unsupported_format_count.get(pet_key, 0)
             ack = (
                 f"Got it — I've received your documents 🐾\n\n"
                 f"I'm starting to process them now to update {pet.name}'s records."
             )
             if unsupported_count > 0:
-                _doc_s = "s" if unsupported_count != 1 else ""
                 _they_re = "they're" if unsupported_count != 1 else "it's"
                 _these = "these" if unsupported_count != 1 else "this"
                 _them = "them" if unsupported_count != 1 else "it"
@@ -1887,186 +2103,55 @@ async def _delayed_batch_extraction(
                 # user will still get the batch summary at the end even if the
                 # pre-extraction acknowledgment failed to deliver.
                 logger.warning(
-                    "Pre-extraction ack failed for pet=%s, continuing extraction: %s",
+                    "Pre-extraction ack failed for pet=%s, continuing: %s",
                     str(pet_id), _ack_err,
                 )
 
-        success_count = 0
-        fail_count = 0
-        failed_docs: list[dict] = []  # {"name": str, "reason": str, "extra": str}
-        all_results = []
+        # --- Publish extraction job to RabbitMQ ---
+        # The consumer (document_consumer.py) picks this up and calls
+        # run_extraction_batch(). Falls back to a direct asyncio task
+        # when CLOUDAMQP_URL is not set (local dev / broker down).
+        doc_ids_str = [str(d.id) for d in pending_docs]
+        try:
+            from app.services import queue_service
+            published = await queue_service.publish_extraction_job(
+                pet_id=str(pet_id),
+                document_ids=doc_ids_str,
+                user_id=str(user_id),
+                from_number=from_number,
+                pet_name=pet_name,
+                source="whatsapp",
+            )
+        except Exception as _q_exc:
+            logger.warning("[queue] publish_extraction_job raised: %s", _q_exc)
+            published = False
 
-        # Build a name lookup so error messages can reference files by name.
-        doc_id_to_name: dict[str, str] = {
-            str(doc.id): (doc.document_name or doc.file_path.split("/")[-1])
-            for doc in pending_docs
-        }
-
-        # Extract each document sequentially under the semaphore.
-        # Each extraction is given a 120s timeout to prevent one stuck GPT
-        # call from blocking the entire pipeline for all other users.
-        for idx, doc in enumerate(pending_docs, 1):
-            async with _get_extraction_semaphore():
-                try:
-                    # Download file content from storage (GCP or Supabase) for GPT processing.
-                    from app.services.document_upload import download_from_supabase
-                    file_bytes = await download_from_supabase(
-                        doc.file_path,
-                        backend=getattr(doc, "storage_backend", "supabase"),
-                    )
-
-                    if not file_bytes:
-                        fail_count += 1
-                        doc_label = doc_id_to_name.get(str(doc.id), doc.file_path.split("/")[-1])
-                        failed_docs.append({"name": doc_label, "reason": "download_failed", "extra": ""})
-                        doc.extraction_status = "failed"
-                        logger.error(
-                            "File download returned None for doc %s (backend=%s, path=%s)",
-                            str(doc.id),
-                            getattr(doc, "storage_backend", "supabase"),
-                            doc.file_path,
-                        )
-                        bg_db.commit()
-                        continue
-
-                    result = await asyncio.wait_for(
-                        extract_and_process_document(
-                            bg_db, doc.id,
-                            f"[file: {doc.file_path}]",
-                            file_bytes=file_bytes,
-                        ),
-                        timeout=120,
-                    )
-                    all_results.append(result)
-
-                    doc_label = doc_id_to_name.get(str(doc.id), doc.file_path.split("/")[-1])
-                    if result.get("status") == "failed":
-                        fail_count += 1
-                        failed_docs.append({"name": doc_label, "reason": "unclear", "extra": ""})
-                    elif result.get("status") == "rejected":
-                        # Rejected docs surface in the confirmation message with
-                        # a friendly reason; they don't inflate fail_count.
-                        doc_type = result.get("document_type", "")
-                        if doc_type == "not_pet_related":
-                            failed_docs.append({"name": doc_label, "reason": "not_health", "extra": ""})
-                        elif doc_type == "pet_name_mismatch":
-                            # Extract the other pet's name from the error string.
-                            errors = result.get("errors") or []
-                            other_pet = ""
-                            for err in errors:
-                                if "appears to be for" in err:
-                                    # e.g. "This document appears to be for 'Bruno', not for Zayn."
-                                    import re
-                                    m = re.search(r"appears to be for ['\"]?([^'\",.]+)['\"]?", err)
-                                    if m:
-                                        other_pet = m.group(1).strip()
-                                    break
-                            failed_docs.append({"name": doc_label, "reason": "wrong_pet", "extra": other_pet})
-                        else:
-                            failed_docs.append({"name": doc_label, "reason": "unclear", "extra": ""})
-                    else:
-                        success_count += 1
-
-                    logger.info(
-                        "Extracted doc %d/%d (id=%s) for pet %s: status=%s",
-                        idx, total, str(doc.id), str(pet_id),
-                        result.get("status"),
-                    )
-                except TimeoutError:
-                    fail_count += 1
-                    doc_label = doc_id_to_name.get(str(doc.id), doc.file_path.split("/")[-1])
-                    failed_docs.append({"name": doc_label, "reason": "timeout", "extra": ""})
-                    logger.error(
-                        "Extraction timed out for doc %s (%d/%d) pet %s",
-                        str(doc.id), idx, total, str(pet_id),
-                    )
-                    try:
-                        doc.extraction_status = "failed"
-                        bg_db.commit()
-                    except Exception:
-                        try:
-                            bg_db.rollback()
-                        except Exception:
-                            pass
-                except Exception as e:
-                    fail_count += 1
-                    doc_label = doc_id_to_name.get(str(doc.id), doc.file_path.split("/")[-1])
-                    failed_docs.append({"name": doc_label, "reason": "unclear", "extra": ""})
-                    logger.error(
-                        "Extraction failed for doc %s (%d/%d): %s",
-                        str(doc.id), idx, total, str(e),
-                    )
-                    try:
-                        bg_db.rollback()
-                    except Exception:
-                        pass
-                    # Mark as failed so it doesn't get re-extracted in
-                    # future batches. Without this, the document stays
-                    # 'pending' and gets picked up by the next upload's
-                    # batch extraction — causing ghost re-processing.
-                    try:
-                        doc.extraction_status = "failed"
-                        bg_db.commit()
-                    except Exception:
-                        try:
-                            bg_db.rollback()
-                        except Exception:
-                            pass
-
-        # --- Send ONE consolidated summary after all extractions complete ---
-        if user and pet:
-            user._plaintext_mobile = from_number
-
-            if _has_pending_deferred_care_plan(bg_db, pet.id, user=user):
-                await _send_deferred_care_plan(
-                    bg_db, user, pet, from_number,
-                    all_results=all_results,
-                    success_count=success_count,
-                    fail_count=fail_count,
-                    failed_docs=failed_docs,
-                    doc_id_to_name=doc_id_to_name,
-                )
-            else:
-                await _send_batch_summary(
-                    bg_db, user, pet, from_number,
-                    all_results, success_count, fail_count, failed_docs,
-                )
-
-        # Clear the batch counter and rejection flag so user can upload again.
-        _recent_uploads.pop(pet_key, None)
-        _rejection_sent.pop(pet_key, None)
-        _batch_document_ids.pop(pet_key, None)
-        _batch_is_onboarding.pop(pet_key, None)
-        _unsupported_format_count.pop(pet_key, None)
+        if not published:
+            # Queue unavailable — run extraction directly in this process.
+            logger.info(
+                "[queue] Fallback: running extraction directly for pet=%s", str(pet_id)
+            )
+            asyncio.create_task(run_extraction_batch(
+                pet_id=str(pet_id),
+                document_ids=doc_ids_str,
+                user_id=str(user_id),
+                from_number=from_number,
+                pet_name=pet_name,
+            ))
 
     except Exception as e:
         logger.error(
-            "Batch extraction failed for pet %s: %s", str(pet_id), str(e),
+            "Delayed batch extraction setup failed for pet %s: %s", str(pet_id), str(e),
         )
         try:
             bg_db.rollback()
-        except Exception:
-            pass
-        # bg_db may be in a broken/dead state after rollback — use a fresh session
-        # so the fallback error message always reaches the user even when the
-        # original session had an SSL drop or pool error.
-        try:
-            from app.database import get_fresh_session as _get_fresh_session
-            _err_db = _get_fresh_session()
-            try:
-                await send_text_message(
-                    _err_db, from_number,
-                    f"Extraction encountered an issue for {pet_name}. "
-                    f"Try uploading again.",
-                )
-            finally:
-                _err_db.close()
         except Exception:
             pass
         # Clear batch counter even on failure so user is never stuck.
         _recent_uploads.pop(pet_key, None)
         _batch_document_ids.pop(pet_key, None)
         _batch_is_onboarding.pop(pet_key, None)
+        _unsupported_format_count.pop(pet_key, None)
     finally:
         bg_db.close()
 

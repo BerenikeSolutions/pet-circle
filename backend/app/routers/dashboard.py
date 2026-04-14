@@ -686,29 +686,44 @@ async def dashboard_upload_document(
     except RuntimeError:
         raise HTTPException(status_code=503, detail="File upload failed. Please try again.")
 
-    # Trigger GPT extraction in background, gated by the shared extraction
-    # semaphore (document_upload.get_extraction_semaphore).  The same semaphore
-    # is used by the WhatsApp batch extractor, so WhatsApp and dashboard uploads
-    # compete fairly for the DB pool budget — no separate per-path limits that
-    # could together still exhaust the pool.
-    async def _run_extraction():
-        from app.database import SessionLocal
-        from app.services.gpt_extraction import extract_and_process_document
-        async with _get_extraction_semaphore():
-            extraction_db = SessionLocal()
-            try:
-                await extract_and_process_document(
-                    db=extraction_db,
-                    document_id=document.id,
-                    document_text="",
-                    file_bytes=file_content,
-                )
-            except Exception as exc:
-                logger.error("Dashboard upload extraction failed: doc=%s, error=%s", document.id, exc)
-            finally:
-                extraction_db.close()
+    # Trigger GPT extraction via RabbitMQ queue.
+    # The in-process consumer (document_consumer.py) picks up the job and calls
+    # run_extraction_batch(), which is gated by the shared extraction semaphore.
+    # Falls back to a direct asyncio task if the queue is unavailable.
+    try:
+        from app.services import queue_service
+        _published = await queue_service.publish_extraction_job(
+            pet_id=str(pet.id),
+            document_ids=[str(document.id)],
+            user_id=str(pet.user_id),
+            from_number=None,  # Dashboard upload — no WhatsApp reply needed.
+            pet_name=pet.name,
+            source="dashboard",
+        )
+    except Exception as _q_exc:
+        logger.warning("Dashboard queue publish failed: %s", _q_exc)
+        _published = False
 
-    asyncio.create_task(_run_extraction())
+    if not _published:
+        # Fallback: run extraction directly if queue is unavailable.
+        async def _run_extraction():
+            from app.database import SessionLocal
+            from app.services.gpt_extraction import extract_and_process_document
+            async with _get_extraction_semaphore():
+                extraction_db = SessionLocal()
+                try:
+                    await extract_and_process_document(
+                        db=extraction_db,
+                        document_id=document.id,
+                        document_text="",
+                        file_bytes=file_content,
+                    )
+                except Exception as exc:
+                    logger.error("Dashboard extraction fallback failed: doc=%s, error=%s", document.id, exc)
+                finally:
+                    extraction_db.close()
+
+        asyncio.create_task(_run_extraction())
 
     return {
         "id": str(document.id),
