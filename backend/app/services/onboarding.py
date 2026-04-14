@@ -5093,6 +5093,17 @@ async def _finalize_onboarding(db, user, send_fn, declined_documents: bool = Fal
     # Fetch diet items for AI supplement recommendation.
     diet_items = db.query(DietItem).filter(DietItem.pet_id == pet.id).all()
 
+    # Pre-generate all AI enrichments (life stage, diet summary, recognition
+    # bullets, care plan reasons) before building the care plan message so the
+    # dashboard is fully populated the moment the user taps the link.
+    # precompute_dashboard_enrichments opens its own session and handles all
+    # upserts; failures are logged but never propagate.
+    try:
+        from app.services.precompute_service import precompute_dashboard_enrichments
+        await precompute_dashboard_enrichments(str(pet.id))
+    except Exception as _pre_exc:
+        logger.warning("finalize: precompute failed for pet=%s: %s", str(pet.id), _pre_exc)
+
     # Try GPT-generated message, fall back to templates.
     care_plan_msg = await _generate_care_plan_message(
         db=db,
@@ -5148,15 +5159,6 @@ async def _finalize_onboarding(db, user, send_fn, declined_documents: bool = Fal
         return
 
     await send_fn(db, mobile, care_plan_msg)
-
-    # Warm the recognition_bullets cache now that all onboarding data (diet + preventive)
-    # has been written. The dashboard link was just sent so this runs before the user taps it.
-    try:
-        import asyncio as _asyncio
-        from app.services.precompute_service import precompute_dashboard_enrichments
-        _asyncio.create_task(precompute_dashboard_enrichments(str(pet.id)))
-    except Exception as _exc:
-        logger.warning("onboarding finalize: failed to schedule precompute for pet=%s: %s", str(pet.id), _exc)
 
 
 async def _generate_care_plan_message(

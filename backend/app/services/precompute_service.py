@@ -126,6 +126,16 @@ async def precompute_dashboard_enrichments(pet_id_str: str) -> None:
         except Exception as exc:
             logger.warning("precompute: care_plan_reasons failed for pet=%s: %s", pet_id_str, exc)
 
+        # --- 4. life_stage insights (Anthropic — stored in pet_life_stage_traits) ---
+        # Pre-generate so the dashboard shows insights immediately on first visit,
+        # not blank while waiting for on-demand generation.
+        try:
+            from app.services.life_stage_service import get_life_stage_data
+            await get_life_stage_data(db, pet)
+            logger.info("precompute: life_stage_insights cached for pet=%s", pet_id_str)
+        except Exception as exc:
+            logger.warning("precompute: life_stage_insights failed for pet=%s: %s", pet_id_str, exc)
+
         logger.info("precompute_dashboard_enrichments: completed for pet=%s", pet_id_str)
 
     except Exception as exc:

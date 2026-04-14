@@ -275,6 +275,29 @@ async def get_life_stage_data(db: Session, pet: Pet) -> LifeStageData:
                 insights=cached_insights,
             )
 
+        # Cache row exists but has no insights (previously filtered to empty).
+        # Only regenerate if the row is older than 10 minutes to avoid hammering
+        # the Claude API on every dashboard request.
+        generated_at = getattr(exact_row, "generated_at", None)
+        if generated_at is not None:
+            age_seconds = (datetime.now(UTC).replace(tzinfo=None) - generated_at).total_seconds()
+            if age_seconds < 600:
+                logger.info(
+                    "Skipping life-stage regeneration for pet=%s (empty cache row is recent, %.0fs old)",
+                    pet.id, age_seconds,
+                )
+                return LifeStageData(
+                    stage=stage.value,
+                    age_months=age_months,
+                    breed_size=breed_size.value,
+                    stage_boundaries={
+                        "junior_start": int(boundaries["junior_start"]),
+                        "adult_start": int(boundaries["adult_start"]),
+                        "senior_start": int(boundaries["senior_start"]),
+                    },
+                    insights=[],
+                )
+
         logger.info(
             "Refreshing cached life-stage insights for pet=%s (empty cache row)",
             pet.id,
@@ -301,9 +324,7 @@ async def get_life_stage_data(db: Session, pet: Pet) -> LifeStageData:
             insights=[],
         )
 
-    filtered_insights = [
-        i for i in generated.insights if _is_stage_specific_trait(i.get("text", ""))
-    ][:_MAX_TRAITS]
+    filtered_insights = generated.insights[:_MAX_TRAITS]
 
     for row in existing_rows:
         if row is not exact_row:

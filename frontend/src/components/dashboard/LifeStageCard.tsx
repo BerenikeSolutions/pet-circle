@@ -129,7 +129,7 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
       </div>
 
       {/* Full-sentence insight cards */}
-      {insights.length > 0 && (
+      {insights.length > 0 ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {insights.map((insight, i) => {
             const style = INSIGHT_BG[insight.color] ?? INSIGHT_BG.neutral;
@@ -153,6 +153,10 @@ export default function LifeStageCard({ data, compact = false }: LifeStageCardPr
               </div>
             );
           })}
+        </div>
+      ) : (
+        <div style={{ fontSize: 12, color: "var(--t3)", textAlign: "center", padding: "8px 0" }}>
+          Personalised insights are being prepared for {data.pet.name}.
         </div>
       )}
     </div>
