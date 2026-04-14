@@ -32,7 +32,7 @@ from fastapi.responses import Response as FastAPIResponse
 from pydantic import BaseModel, Field
 import re as _re
 
-from sqlalchemy import func as sqlfunc, or_
+from sqlalchemy import func as sqlfunc, or_, text
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -1923,9 +1923,23 @@ async def dashboard_nutrition_analysis(
     token: str,
     db: Session = Depends(get_db),
 ):
-    """Get nutrition analysis for a pet based on their diet items."""
+    """Get nutrition analysis for a pet based on their diet items.
+
+    Served from the pet_ai_insights cache (populated by precompute_service);
+    falls back to a live compute if the cache row is missing.
+    """
     try:
         dt = validate_dashboard_token(db, token)
+        cached = db.execute(
+            text(
+                "SELECT content_json FROM pet_ai_insights "
+                "WHERE pet_id = :pet_id AND insight_type = 'nutrition_analysis' "
+                "LIMIT 1"
+            ),
+            {"pet_id": str(dt.pet_id)},
+        ).fetchone()
+        if cached and cached[0]:
+            return cached[0]
         return await analyze_nutrition(db, dt.pet_id)
     except ValueError:
         raise HTTPException(status_code=404, detail="Dashboard not found or link has expired.")

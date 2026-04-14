@@ -44,8 +44,21 @@ _channel: Optional[AbstractRobustChannel] = None
 
 
 def _broker_url() -> Optional[str]:
-    """Return the broker URL from environment, or None if not configured."""
-    return os.environ.get("CLOUDAMQP_URL") or os.environ.get("RABBITMQ_URL")
+    """
+    Return the broker URL, or None if not configured.
+
+    Checks os.environ first (set by hosting provider), then falls back to
+    pydantic Settings which reads the env file (envs/.env.{APP_ENV}) in
+    development/test environments.
+    """
+    url = os.environ.get("CLOUDAMQP_URL") or os.environ.get("RABBITMQ_URL")
+    if url:
+        return url
+    try:
+        from app.config import settings as _settings
+        return _settings.CLOUDAMQP_URL
+    except Exception:
+        return None
 
 
 async def connect() -> None:

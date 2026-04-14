@@ -103,7 +103,18 @@ async def precompute_dashboard_enrichments(pet_id_str: str) -> None:
         except Exception as exc:
             logger.warning("precompute: recognition_bullets failed for pet=%s: %s", pet_id_str, exc)
 
-        # --- 3. care_plan_reasons (Anthropic, 1h TTL via generate_care_plan_reasons) ---
+        # --- 3. nutrition_analysis (Anthropic — calorie/macro/micro breakdown) ---
+        # Runs before care_plan_reasons because care plan composition references
+        # the same nutrition signals; caching here keeps the dashboard read-only.
+        try:
+            from app.services.nutrition_service import analyze_nutrition
+            analysis = await analyze_nutrition(db, pet_id)
+            _upsert_insight(db, pet_id, "nutrition_analysis", analysis)
+            logger.info("precompute: nutrition_analysis cached for pet=%s", pet_id_str)
+        except Exception as exc:
+            logger.warning("precompute: nutrition_analysis failed for pet=%s: %s", pet_id_str, exc)
+
+        # --- 4. care_plan_reasons (Anthropic, 1h TTL via generate_care_plan_reasons) ---
         try:
             from app.services.care_plan_engine import compute_care_plan
             from app.services.ai_insights_service import generate_care_plan_reasons
@@ -126,7 +137,7 @@ async def precompute_dashboard_enrichments(pet_id_str: str) -> None:
         except Exception as exc:
             logger.warning("precompute: care_plan_reasons failed for pet=%s: %s", pet_id_str, exc)
 
-        # --- 4. life_stage insights (Anthropic — stored in pet_life_stage_traits) ---
+        # --- 5. life_stage insights (Anthropic — stored in pet_life_stage_traits) ---
         # Pre-generate so the dashboard shows insights immediately on first visit,
         # not blank while waiting for on-demand generation.
         try:
@@ -136,7 +147,7 @@ async def precompute_dashboard_enrichments(pet_id_str: str) -> None:
         except Exception as exc:
             logger.warning("precompute: life_stage_insights failed for pet=%s: %s", pet_id_str, exc)
 
-        # --- 5. health_conditions_v2 (Health Prompt 5) ---
+        # --- 6. health_conditions_v2 (Health Prompt 5) ---
         # Aggregates condition signals across all uploaded documents and runs the
         # multi-step Health Prompt 5 to classify types, assign statuses, and build
         # the structured conditions dashboard payload.  Result is cached in

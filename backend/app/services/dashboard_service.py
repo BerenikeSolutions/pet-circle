@@ -971,6 +971,7 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         "health_summary": None,
         "vet_questions": None,
         "health_conditions_v2": None,
+        "nutrition_analysis": None,
     }
     try:
         stale_cutoff = datetime.utcnow() - timedelta(days=AI_INSIGHT_CACHE_DAYS)
@@ -978,7 +979,7 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
             db.query(PetAiInsight)
             .filter(
                 PetAiInsight.pet_id == pet_id,
-                PetAiInsight.insight_type.in_(["health_summary", "vet_questions", "health_conditions_v2"]),
+                PetAiInsight.insight_type.in_(["health_summary", "vet_questions", "health_conditions_v2", "nutrition_analysis"]),
                 PetAiInsight.generated_at >= stale_cutoff,
             )
             .all()
@@ -1031,6 +1032,7 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         "cached_health_summary": cached_insights.get("health_summary"),
         "cached_vet_questions": cached_insights.get("vet_questions"),
         "health_conditions_v2": cached_insights.get("health_conditions_v2"),
+        "nutrition_analysis": cached_insights.get("nutrition_analysis"),
         # Internal pet_id exposed only for intra-service use (not sent to frontend).
         # Allows callers to avoid a second validate_dashboard_token() call.
         "_pet_id": str(pet_id),

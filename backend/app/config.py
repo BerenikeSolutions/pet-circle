@@ -116,6 +116,11 @@ class Settings(BaseSettings):
     GCP_CREDENTIALS_JSON: str | None = None
     GCP_BUCKET_NAME: str | None = None
 
+    # --- RabbitMQ (CloudAMQP free tier) ---
+    # amqps://user:pass@host/vhost from CloudAMQP dashboard.
+    # If not set, document extraction falls back to in-process asyncio tasks.
+    CLOUDAMQP_URL: str | None = None
+
     # --- Razorpay ---
     # Live/test keys from Razorpay dashboard → Settings → API Keys.
     # Optional at startup — payment endpoints will raise 503 if missing.

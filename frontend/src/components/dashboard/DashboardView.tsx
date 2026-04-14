@@ -173,7 +173,7 @@ export default function DashboardView({
       <RecognitionCard data={data} onGoToRecords={onGoToRecords} />
       <LifeStageCard data={data} />
       <HealthConditionsCard data={data} onGoToTrends={onGoToTrends} />
-      <DietAnalysisCard token={token} />
+      <DietAnalysisCard nutrition={data.nutrition_analysis} />
       <CarePlanCard
         petName={data.pet.name}
         buckets={buckets}

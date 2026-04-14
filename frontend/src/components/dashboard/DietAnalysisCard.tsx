@@ -1,44 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import Donut from "@/components/charts/Donut";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import type { NutritionAnalysis } from "@/lib/api";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-interface MicronutrientGap {
-  name: string;
-  status: string;
-  severity_score: number;
-  prescribed?: boolean;
-}
-
-interface Improvement {
-  title: string;
-  detail: string;
-  severity: "high" | "medium" | "prescribed";
-}
-
-interface NutritionAnalysis {
-  calories_per_day?: number;
-  calorie_target?: number;
-  calorie_gap_pct?: number;
-  food_label?: string;
-  show_warning?: boolean;
-  warning_message?: string;
-  prescription_context?: string;
-  protein_pct?: number;
-  fat_pct?: number;
-  carbs_pct?: number;
-  fibre_pct?: number;
-  micronutrient_gaps?: MicronutrientGap[];
-  top_improvements?: Improvement[];
-  has_diet_items?: boolean;
-}
-
 interface DietAnalysisCardProps {
-  token: string;
+  nutrition: NutritionAnalysis | null | undefined;
   compact?: boolean;
 }
 
@@ -156,28 +124,8 @@ function CalTag({ calorie_gap_pct }: { calorie_gap_pct?: number | null }) {
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export default function DietAnalysisCard({ token, compact = false }: DietAnalysisCardProps) {
-  const [nutrition, setNutrition] = useState<NutritionAnalysis | null>(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    fetch(`${API_BASE}/dashboard/${token}/nutrition-analysis`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data: NutritionAnalysis | null) => {
-        if (!cancelled) {
-          setNutrition(data);
-          setLoading(false);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => { cancelled = true; };
-  }, [token]);
-
-  const n = nutrition;
+export default function DietAnalysisCard({ nutrition, compact = false }: DietAnalysisCardProps) {
+  const n = nutrition ?? null;
 
   // No macros available — show placeholder donuts with contextual message
   if (!n?.calories_per_day && !n?.protein_pct && !n?.fat_pct) {

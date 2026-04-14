@@ -567,6 +567,7 @@ export interface DashboardData {
   life_stage?: LifeStageData | null;
   health_conditions_summary?: HealthConditionSummary[];
   health_conditions_v2?: HealthConditionsV2 | null;
+  nutrition_analysis?: NutritionAnalysis | null;
   care_plan_v2?: CarePlanV2;
   diet_summary?: DietSummary;
   recognition?: Recognition;

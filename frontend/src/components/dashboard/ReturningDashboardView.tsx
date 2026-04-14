@@ -152,7 +152,7 @@ export default function ReturningDashboardView({
     <div ref={containerRef} className="app">
       <ProfileBanner data={data} token={token} onGoToReminders={onGoToReminders} />
       <RecognitionCard data={data} onGoToRecords={onGoToRecords} isReturning />
-      <AnalysisSummaryCard data={data} token={token} onGoToTrends={onGoToTrends} />
+      <AnalysisSummaryCard data={data} onGoToTrends={onGoToTrends} />
       <CarePlanCard
         petName={data.pet.name}
         buckets={buckets}
