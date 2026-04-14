@@ -208,9 +208,6 @@ body {
 }
 
 .stage-caption {
-  position: absolute;
-  transform: translateX(-50%);
-  max-width: min(92%, 240px);
   text-align: center;
   line-height: 1.2;
   font-size: 12px;
