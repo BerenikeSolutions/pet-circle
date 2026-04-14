@@ -38,6 +38,7 @@ from uuid import UUID
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, selectinload
 
+from app.database import SessionLocal
 from app.core.encryption import decrypt_field
 from app.models.condition import Condition
 from app.models.conflict_flag import ConflictFlag
@@ -338,7 +339,6 @@ async def _record_dashboard_visit_bg(user_id, pet_id, token: str) -> None:
     block on an extra write that the caller never reads back.
     """
     try:
-        from app.database import SessionLocal
         from app.models.dashboard_visit import DashboardVisit
         bg_db = SessionLocal()
         try:
@@ -394,6 +394,235 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         raise ValueError("Pet not found or has been removed.")
     user = pet.user  # already loaded — no extra query
 
+    # =========================================================================
+    # PHASE 1 — Submit independent DB queries to thread pool
+    # =========================================================================
+    # With cross-region deployment (Render Oregon → Supabase Southeast) each
+    # DB round-trip costs ~150 ms. 7 queries run concurrently in background
+    # threads while Phase 2 executes on the event loop, collapsing ~1050 ms
+    # of sequential network overhead to ~150 ms.
+    # Each helper opens its own session so there is no shared-state risk.
+    # =========================================================================
+    _exec_loop = asyncio.get_event_loop()
+    _pet_id_str = str(pet_id)
+    _pet_species = pet.species
+
+    # TTL map for AI insight cache (used inside _fetch_insights_sync below).
+    _INSIGHT_TTL: dict[str, timedelta] = {
+        "diet_summary":         timedelta(hours=24),
+        "recognition_bullets":  timedelta(hours=24),
+        "care_plan_reasons":    timedelta(hours=1),
+        "health_summary":       timedelta(days=AI_INSIGHT_CACHE_DAYS),
+        "vet_questions":        timedelta(days=AI_INSIGHT_CACHE_DAYS),
+        "health_conditions_v2": timedelta(days=AI_INSIGHT_CACHE_DAYS),
+        "nutrition_analysis":   timedelta(days=AI_INSIGHT_CACHE_DAYS),
+    }
+
+    def _fetch_conditions_sync():
+        own_db = SessionLocal()
+        try:
+            rows = (
+                own_db.query(Condition)
+                .options(
+                    selectinload(Condition.medications),
+                    selectinload(Condition.monitoring),
+                )
+                .filter(Condition.pet_id == pet_id, Condition.is_active == True)
+                .order_by(Condition.created_at.desc())
+                .all()
+            )
+            own_db.expunge_all()  # detach while keeping eager-loaded attrs
+            return rows
+        except Exception as exc:
+            logger.warning("parallel _fetch_conditions failed pet=%s: %s", _pet_id_str, exc)
+            return []
+        finally:
+            own_db.close()
+
+    def _fetch_diet_sync():
+        own_db = SessionLocal()
+        try:
+            rows = (
+                own_db.query(DietItem)
+                .filter(DietItem.pet_id == pet_id)
+                .order_by(DietItem.created_at.asc())
+                .all()
+            )
+            own_db.expunge_all()
+            return rows
+        except Exception as exc:
+            logger.warning("parallel _fetch_diet failed pet=%s: %s", _pet_id_str, exc)
+            return []
+        finally:
+            own_db.close()
+
+    def _fetch_insights_sync():
+        _now_q = datetime.utcnow()
+        own_db = SessionLocal()
+        try:
+            rows = (
+                own_db.query(PetAiInsight)
+                .filter(
+                    PetAiInsight.pet_id == pet_id,
+                    PetAiInsight.insight_type.in_(list(_INSIGHT_TTL)),
+                )
+                .all()
+            )
+            # Build cache dict in-thread (pure Python, no further I/O).
+            return {
+                row.insight_type: row.content_json
+                for row in rows
+                if row.generated_at >= _now_q - _INSIGHT_TTL.get(row.insight_type, timedelta(hours=24))
+            }
+        except Exception as exc:
+            logger.warning("parallel _fetch_insights failed pet=%s: %s", _pet_id_str, exc)
+            return {}
+        finally:
+            own_db.close()
+
+    def _fetch_documents_sync():
+        own_db = SessionLocal()
+        try:
+            docs = (
+                own_db.query(Document)
+                .filter(
+                    Document.pet_id == pet_id,
+                    Document.extraction_status.in_(["pending", "success", "failed", "rejected"]),
+                )
+                .order_by(Document.created_at.desc())
+                .all()
+            )
+            result = []
+            for doc in docs:
+                inferred_category = _infer_document_category(
+                    document_name=doc.document_name,
+                    file_path=doc.file_path,
+                    items=[],
+                    vaccination_details=[],
+                    diagnostic_values=[],
+                )
+                result.append({
+                    "id": str(doc.id),
+                    "document_name": doc.document_name,
+                    "document_category": _resolve_document_category(
+                        doc.document_category,
+                        inferred_category,
+                        document_name=doc.document_name,
+                        file_path=doc.file_path,
+                    ),
+                    "doctor_name": doc.doctor_name,
+                    "hospital_name": doc.hospital_name,
+                    "mime_type": doc.mime_type,
+                    "extraction_status": doc.extraction_status,
+                    "rejection_reason": doc.rejection_reason,
+                    "uploaded_at": str(doc.created_at) if doc.created_at else None,
+                    "event_date": str(doc.event_date) if doc.event_date else None,
+                })
+            return result
+        except Exception as exc:
+            logger.warning("parallel _fetch_documents failed pet=%s: %s", _pet_id_str, exc)
+            return []
+        finally:
+            own_db.close()
+
+    def _fetch_diagnostics_sync():
+        own_db = SessionLocal()
+        try:
+            rows = (
+                own_db.query(DiagnosticTestResult)
+                .filter(DiagnosticTestResult.pet_id == pet_id)
+                .order_by(
+                    DiagnosticTestResult.observed_at.desc().nullslast(),
+                    DiagnosticTestResult.created_at.desc(),
+                )
+                .all()
+            )
+            return [
+                {
+                    "test_type": row.test_type,
+                    "parameter_name": row.parameter_name,
+                    "value_numeric": float(row.value_numeric) if row.value_numeric is not None else None,
+                    "value_text": row.value_text,
+                    "unit": row.unit,
+                    "reference_range": row.reference_range,
+                    "status_flag": row.status_flag,
+                    "observed_at": str(row.observed_at) if row.observed_at else None,
+                    "document_id": str(row.document_id) if row.document_id else None,
+                    "created_at": str(row.created_at) if row.created_at else None,
+                }
+                for row in rows
+            ]
+        except Exception as exc:
+            logger.warning("parallel _fetch_diagnostics failed pet=%s: %s", _pet_id_str, exc)
+            return []
+        finally:
+            own_db.close()
+
+    def _fetch_contacts_sync():
+        own_db = SessionLocal()
+        try:
+            rows = (
+                own_db.query(Contact)
+                .filter(Contact.pet_id == pet_id)
+                .order_by(Contact.created_at.desc())
+                .all()
+            )
+            return [
+                {
+                    "id": str(c.id),
+                    "role": c.role,
+                    "name": c.name,
+                    "clinic_name": c.clinic_name,
+                    "phone": c.phone,
+                    "email": c.email,
+                    "address": c.address,
+                    "source": c.source,
+                    "created_at": str(c.created_at) if c.created_at else None,
+                }
+                for c in rows
+            ]
+        except Exception as exc:
+            logger.warning("parallel _fetch_contacts failed pet=%s: %s", _pet_id_str, exc)
+            return []
+        finally:
+            own_db.close()
+
+    def _fetch_health_masters_sync():
+        own_db = SessionLocal()
+        try:
+            rows = (
+                own_db.query(PreventiveMaster)
+                .filter(
+                    PreventiveMaster.circle == "health",
+                    PreventiveMaster.species.in_([_pet_species, "both"]),
+                )
+                .all()
+            )
+            own_db.expunge_all()
+            return rows
+        except Exception as exc:
+            logger.warning("parallel _fetch_health_masters failed pet=%s: %s", _pet_id_str, exc)
+            return []
+        finally:
+            own_db.close()
+
+    # Submit all 7 to the default thread-pool executor.
+    # They start running immediately while Phase 2 runs below.
+    _fut_conditions  = _exec_loop.run_in_executor(None, _fetch_conditions_sync)
+    _fut_diet        = _exec_loop.run_in_executor(None, _fetch_diet_sync)
+    _fut_insights    = _exec_loop.run_in_executor(None, _fetch_insights_sync)
+    _fut_documents   = _exec_loop.run_in_executor(None, _fetch_documents_sync)
+    _fut_diagnostics = _exec_loop.run_in_executor(None, _fetch_diagnostics_sync)
+    _fut_contacts    = _exec_loop.run_in_executor(None, _fetch_contacts_sync)
+    _fut_masters     = _exec_loop.run_in_executor(None, _fetch_health_masters_sync)
+
+    # =========================================================================
+    # PHASE 2 — Sequential main-session queries (run while Phase 1 executes)
+    # =========================================================================
+    # Only queries with inter-dependencies stay on the main session:
+    # visit_count → preventive_data → reminders → conflict_flags.
+    # =========================================================================
+
     # --- Record dashboard visit for nudge level tracking (N8) ---
     # Best-effort: never crash the dashboard load on a logging failure.
     # Count previous visits BEFORE inserting new one to determine first visit.
@@ -407,9 +636,6 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
             or 0
         )
         is_first_visit = previous_visit_count == 0
-        # Defer the INSERT into a background task — the dashboard response
-        # never reads it back, so there's no reason to keep callers waiting
-        # on another write inside the main transaction.
         asyncio.create_task(
             _record_dashboard_visit_bg(pet.user_id, pet_id, token)
         )
@@ -417,9 +643,6 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         logger.warning("Failed to record dashboard visit for token=%s...", token[:8])
 
     # --- Load preventive records with master item names ---
-    # Also compute health score inline to avoid a duplicate DB query.
-    # Eager-load custom_preventive_item so the conflict-rows loop below
-    # doesn't fire N+1 lazy queries when rendering user-scoped custom items.
     preventive_data = (
         db.query(PreventiveRecord, PreventiveMaster)
         .join(
@@ -433,7 +656,6 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
     )
 
     def _record_sort_key(r: PreventiveRecord) -> tuple:
-        # Prefer newest completion date; fallback to next due, then created_at.
         return (
             r.last_done_date or date.min,
             r.next_due_date or date.min,
@@ -443,8 +665,6 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
     vaccine_latest_by_name: dict[str, tuple[PreventiveRecord, PreventiveMaster]] = {}
     non_vaccine_records: list[tuple[PreventiveRecord, PreventiveMaster]] = []
 
-    # Puppy-series items (recurrence_days >= 36500) are one-time doses.
-    # Hide them for adult dogs (>= 12 months old).
     _is_adult_dog = (
         pet.species == "dog"
         and pet.dob is not None
@@ -452,14 +672,10 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
     )
 
     for record, master in preventive_data:
-        # Skip puppy-series records for adult dogs.
         if _is_adult_dog and master.recurrence_days and master.recurrence_days >= 36500:
             continue
-
-        # Hide non-mandatory vaccines unless the user has a logged completion date.
         if _is_vaccine_item_name(master.item_name) and not master.is_mandatory and not record.last_done_date:
             continue
-
         if _is_vaccine_item_name(master.item_name):
             existing = vaccine_latest_by_name.get(master.item_name)
             if not existing or _record_sort_key(record) >= _record_sort_key(existing[0]):
@@ -467,7 +683,6 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         else:
             non_vaccine_records.append((record, master))
 
-    # Dashboard list: all non-vaccine records + only latest record per vaccine name.
     selected_records = non_vaccine_records + list(vaccine_latest_by_name.values())
     selected_records.sort(
         key=lambda rm: (
@@ -477,38 +692,17 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
     )
 
     preventive_records = []
-
-    # --- Pre-load conditions with eager-loaded relationships ---
-    # selectinload fires 2 IN-queries (medications, monitoring) instead of
-    # N*2 lazy queries — one per condition row.
-    condition_rows = (
-        db.query(Condition)
-        .options(
-            selectinload(Condition.medications),
-            selectinload(Condition.monitoring),
-        )
-        .filter(Condition.pet_id == pet_id, Condition.is_active == True)
-        .order_by(Condition.created_at.desc())
-        .all()
-    )
-
     for record, master in selected_records:
-        # Determine test_type for life-stage-based recurrence lookup.
         test_type = _normalize_item_name(master.item_name)
         _LIFE_STAGE_TYPES = {"deworming", "tick_flea"}
 
         if record.custom_recurrence_days:
-            # Respect user-set custom interval always.
             effective_recurrence = record.custom_recurrence_days
         elif test_type in _LIFE_STAGE_TYPES:
-            # Override master.recurrence_days with life-stage-adjusted baseline so that
-            # Care Plan, Care Reminders, and Cadence all display the same next-due date.
             effective_recurrence = get_preventive_baseline_days(pet, test_type)
         else:
             effective_recurrence = master.recurrence_days
 
-        # Recompute next_due_date from last_done_date + effective_recurrence so the
-        # displayed date is always consistent with care_plan_engine's computation.
         if record.last_done_date and test_type in _LIFE_STAGE_TYPES:
             display_next_due = str(record.last_done_date + timedelta(days=effective_recurrence))
         else:
@@ -524,75 +718,16 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
             "recurrence_days": effective_recurrence,
             "custom_recurrence_days": record.custom_recurrence_days,
             "medicine_dependent": master.medicine_dependent,
-            "medicine_name": record.medicine_name if hasattr(record, 'medicine_name') and record.medicine_name else None,
+            "medicine_name": record.medicine_name if hasattr(record, "medicine_name") and record.medicine_name else None,
             "created_at": record.created_at.isoformat() if record.created_at else None,
             "is_core": bool(master.is_core) if master.is_core is not None else False,
         })
 
-    # --- Inject preventive_master items that have no record yet ---
-    # Ensures all health-circle items (vaccines, deworming, flea/tick, checkups) appear
-    # on the dashboard even before any documents are uploaded. Items with existing
-    # records are skipped to avoid duplicates.
-    #
-    # Puppy-series items (recurrence_days=36500) are excluded for dogs older
-    # than 12 months — adults should only see the annual DHPPi + Rabies cycle.
-    health_masters = (
-        db.query(PreventiveMaster)
-        .filter(
-            PreventiveMaster.circle == "health",
-            PreventiveMaster.species.in_([pet.species, "both"]),
-        )
-        .all()
-    )
-    existing_names = {r["item_name"] for r in preventive_records}
-    for master in health_masters:
-        # Skip puppy-series items for adult dogs.
-        if _is_adult_dog and master.recurrence_days and master.recurrence_days >= 36500:
-            continue
-
-        # Inject only mandatory vaccines by default. Non-mandatory vaccines should
-        # appear only after a logged completion date exists.
-        if _is_vaccine_item_name(master.item_name) and not master.is_mandatory:
-            continue
-
-        if master.item_name not in existing_names:
-            preventive_records.append({
-                "item_name": master.item_name,
-                "category": master.category,
-                "circle": master.circle,
-                "last_done_date": None,
-                "next_due_date": None,
-                "status": "missing",
-                "recurrence_days": master.recurrence_days,
-                "custom_recurrence_days": None,
-                "medicine_dependent": master.medicine_dependent,
-                "medicine_name": None,
-                "created_at": None,
-                "is_core": bool(master.is_core) if master.is_core is not None else False,
-            })
-
-    # --- Load diet items early — needed by health_score and nutrition tab ---
-    diet_rows = (
-        db.query(DietItem)
-        .filter(DietItem.pet_id == pet_id)
-        .order_by(DietItem.created_at.asc())
-        .all()
-    )
-
-    # Health score removed — not computed.
-    health_score = None
-
     # --- Load active reminders ---
     reminders = (
         db.query(Reminder, PreventiveRecord, PreventiveMaster)
-        .join(
-            PreventiveRecord,
-            Reminder.preventive_record_id == PreventiveRecord.id,
-        )
-        .join(
-            PreventiveMaster,
-            PreventiveRecord.preventive_master_id == PreventiveMaster.id,
-        )
+        .join(PreventiveRecord, Reminder.preventive_record_id == PreventiveRecord.id)
+        .join(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
         .filter(
             PreventiveRecord.pet_id == pet_id,
             Reminder.status.in_(["pending", "sent"]),
@@ -612,70 +747,88 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
             "recurrence_days": effective_recurrence,
         })
 
-    # --- Load documents (metadata only — no storage URLs) ---
-    # Show documents with all statuses including failed — users can retry
-    # failed extractions from the dashboard.
-    documents = (
-        db.query(Document)
-        .filter(
-            Document.pet_id == pet_id,
-            Document.extraction_status.in_(["pending", "success", "failed", "rejected"]),
+    # --- Load pending conflict flags ---
+    # Store (record, master) tuples so the loop can read master.item_name
+    # directly from the tuple instead of triggering a lazy load on the
+    # record.preventive_master relationship.
+    conflict_rows = []
+    pet_rec_map = {str(r.id): (r, m) for r, m in preventive_data}
+    if pet_rec_map:
+        cf_rows = (
+            db.query(ConflictFlag)
+            .filter(
+                ConflictFlag.preventive_record_id.in_(list(pet_rec_map.keys())),
+                ConflictFlag.status == "pending",
+            )
+            .order_by(ConflictFlag.created_at.desc())
+            .all()
         )
-        .order_by(Document.created_at.desc())
-        .all()
+        for cf in cf_rows:
+            r_m = pet_rec_map.get(str(cf.preventive_record_id))
+            item_name = None
+            if r_m:
+                r, m = r_m
+                item_name = m.item_name  # from tuple — no lazy load
+                if not item_name and r.custom_preventive_item:
+                    item_name = r.custom_preventive_item.item_name
+            conflict_rows.append({
+                "id": str(cf.id),
+                "item_name": item_name,
+                "existing_date": str(r_m[0].last_done_date) if r_m and r_m[0].last_done_date else None,
+                "new_date": str(cf.new_date),
+                "status": cf.status,
+                "created_at": str(cf.created_at) if cf.created_at else None,
+            })
+
+    # =========================================================================
+    # PHASE 3 — Await all parallel results
+    # =========================================================================
+    # Phase 1 queries finish in ~150 ms. By the time we reach here Phase 2
+    # has taken ~4 RTTs (~600 ms), so futures are almost certainly complete
+    # and this gather returns immediately.
+    # =========================================================================
+    (condition_rows, diet_rows, _insight_cache,
+     document_data, diagnostic_results, contacts_data, health_masters) = await asyncio.gather(
+        _fut_conditions, _fut_diet, _fut_insights,
+        _fut_documents, _fut_diagnostics, _fut_contacts, _fut_masters,
     )
 
-    document_data = []
-    for doc in documents:
-        inferred_category = _infer_document_category(
-            document_name=doc.document_name,
-            file_path=doc.file_path,
-            items=[],
-            vaccination_details=[],
-            diagnostic_values=[],
-        )
-        document_data.append({
-            "id": str(doc.id),
-            "document_name": doc.document_name,
-            "document_category": _resolve_document_category(
-                doc.document_category,
-                inferred_category,
-                document_name=doc.document_name,
-                file_path=doc.file_path,
-            ),
-            "doctor_name": doc.doctor_name,
-            "hospital_name": doc.hospital_name,
-            "mime_type": doc.mime_type,
-            "extraction_status": doc.extraction_status,
-            "rejection_reason": doc.rejection_reason,
-            "uploaded_at": str(doc.created_at) if doc.created_at else None,
-            "event_date": str(doc.event_date) if doc.event_date else None,
-        })
+    # =========================================================================
+    # PHASE 4 — Process parallel results
+    # =========================================================================
 
-    # --- Diagnostic values (blood/urine) for dashboard ---
-    diagnostic_rows = (
-        db.query(DiagnosticTestResult)
-        .filter(DiagnosticTestResult.pet_id == pet_id)
-        .order_by(DiagnosticTestResult.observed_at.desc().nullslast(), DiagnosticTestResult.created_at.desc())
-        .all()
-    )
+    # --- Inject preventive_master items with no record yet ---
+    # health_masters from parallel fetch; preventive_records built in Phase 2.
+    existing_names = {r["item_name"] for r in preventive_records}
+    for master in health_masters:
+        if _is_adult_dog and master.recurrence_days and master.recurrence_days >= 36500:
+            continue
+        if _is_vaccine_item_name(master.item_name) and not master.is_mandatory:
+            continue
+        if master.item_name not in existing_names:
+            preventive_records.append({
+                "item_name": master.item_name,
+                "category": master.category,
+                "circle": master.circle,
+                "last_done_date": None,
+                "next_due_date": None,
+                "status": "missing",
+                "recurrence_days": master.recurrence_days,
+                "custom_recurrence_days": None,
+                "medicine_dependent": master.medicine_dependent,
+                "medicine_name": None,
+                "created_at": None,
+                "is_core": bool(master.is_core) if master.is_core is not None else False,
+            })
 
-    diagnostic_results = []
-    for row in diagnostic_rows:
-        diagnostic_results.append({
-            "test_type": row.test_type,
-            "parameter_name": row.parameter_name,
-            "value_numeric": float(row.value_numeric) if row.value_numeric is not None else None,
-            "value_text": row.value_text,
-            "unit": row.unit,
-            "reference_range": row.reference_range,
-            "status_flag": row.status_flag,
-            "observed_at": str(row.observed_at) if row.observed_at else None,
-            "document_id": str(row.document_id) if row.document_id else None,
-            "created_at": str(row.created_at) if row.created_at else None,
-        })
+    # Health score removed — not computed.
+    health_score = None
 
-    # --- Build conditions response from pre-loaded rows ---
+    # _insight_cache already built inside _fetch_insights_sync (Phase 1 result).
+
+    # --- Build conditions_data from parallel-fetched condition_rows ---
+    # selectinload relationships (medications, monitoring) remain accessible
+    # after expunge_all() because they were eagerly populated before session close.
     conditions_data = []
     for cond in condition_rows:
         medications = []
@@ -719,29 +872,7 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
             "created_at": str(cond.created_at) if cond.created_at else None,
         })
 
-    # --- Load contacts ---
-    contact_rows = (
-        db.query(Contact)
-        .filter(Contact.pet_id == pet_id)
-        .order_by(Contact.created_at.desc())
-        .all()
-    )
-
-    contacts_data = []
-    for contact in contact_rows:
-        contacts_data.append({
-            "id": str(contact.id),
-            "role": contact.role,
-            "name": contact.name,
-            "clinic_name": contact.clinic_name,
-            "phone": contact.phone,
-            "email": contact.email,
-            "address": contact.address,
-            "source": contact.source,
-            "created_at": str(contact.created_at) if contact.created_at else None,
-        })
-
-    # --- Format diet items for nutrition tab (diet_rows already loaded above) ---
+    # --- Format diet items from parallel-fetched diet_rows ---
     diet_items_data = [
         {
             "id": str(d.id),
@@ -754,38 +885,8 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         for d in diet_rows
     ]
 
-    # --- Load pending conflict flags ---
-    # Fetches conflicts for all preventive records belonging to this pet.
-    # Only 'pending' conflicts are surfaced — resolved/auto-resolved are historical.
-    # Reuse already-loaded preventive_data ORM tuples to avoid a redundant full table scan.
-    conflict_rows = []
-    pet_rec_map = {str(r.id): r for r, _ in preventive_data}
-    if pet_rec_map:
-        cf_rows = (
-            db.query(ConflictFlag)
-            .filter(
-                ConflictFlag.preventive_record_id.in_(list(pet_rec_map.keys())),
-                ConflictFlag.status == "pending",
-            )
-            .order_by(ConflictFlag.created_at.desc())
-            .all()
-        )
-        for cf in cf_rows:
-            rec = pet_rec_map.get(str(cf.preventive_record_id))
-            item_name = None
-            if rec:
-                if rec.preventive_master:
-                    item_name = rec.preventive_master.item_name
-                elif rec.custom_preventive_item:
-                    item_name = rec.custom_preventive_item.item_name
-            conflict_rows.append({
-                "id": str(cf.id),
-                "item_name": item_name,
-                "existing_date": str(rec.last_done_date) if rec and rec.last_done_date else None,
-                "new_date": str(cf.new_date),
-                "status": cf.status,
-                "created_at": str(cf.created_at) if cf.created_at else None,
-            })
+    # document_data, diagnostic_results, contacts_data are plain dicts
+    # already built inside their respective Phase 1 sync helpers.
 
     # --- Dashboard Rebuild v2 enrichments ---
     # Timeout for non-DB enrichments (life_stage, vet_summary are pure-DB/sync;
@@ -810,91 +911,44 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
             return default
 
     async def _safe_sync_call(label: str, default, fn, *args):
+        # Kept for backward compatibility — no longer used for compute_care_plan
+        # or get_vet_summary (those run via _run_care_plan / _run_vet_summary).
         try:
             return fn(*args)
         except Exception as exc:
             logger.error("%s failed for pet=%s: %s", label, pet_id, exc)
             return default
 
-    # --- Read diet_summary from cache (pet_ai_insights) — no API call on critical path ---
-    # precompute_service warms this before the dashboard link is sent.
-    def _read_diet_summary_cache() -> dict:
-        try:
-            cutoff = datetime.utcnow() - timedelta(hours=24)
-            row = (
-                db.query(PetAiInsight)
-                .filter(
-                    PetAiInsight.pet_id == pet_id,
-                    PetAiInsight.insight_type == "diet_summary",
-                    PetAiInsight.generated_at >= cutoff,
-                )
-                .first()
-            )
-            if row and isinstance(row.content_json, dict):
-                return row.content_json
-        except Exception:
-            pass
-        return {"macros": [], "missing_micros": []}
+    # --- Read diet_summary and recognition_bullets from pre-loaded batch cache ---
+    # _insight_cache was populated in one round-trip above; no extra DB queries needed.
+    _cached_diet = _insight_cache.get("diet_summary")
+    diet_summary: dict = (
+        _cached_diet if isinstance(_cached_diet, dict)
+        else {"macros": [], "missing_micros": []}
+    )
 
-    # --- Read recognition_bullets from cache (pet_ai_insights) — no API call on critical path ---
-    def _read_recognition_bullets_cache() -> list:
-        try:
-            cutoff = datetime.utcnow() - timedelta(hours=24)
-            row = (
-                db.query(PetAiInsight)
-                .filter(
-                    PetAiInsight.pet_id == pet_id,
-                    PetAiInsight.insight_type == "recognition_bullets",
-                    PetAiInsight.generated_at >= cutoff,
-                )
-                .first()
-            )
-            if row and isinstance(row.content_json, list):
-                bullets = row.content_json
-                # Sanity-check: if cache claims no diet entries but diet items exist in DB,
-                # the cache is stale (e.g. item was inserted directly in DB bypassing the API).
-                # Return [] so the frontend uses its client-side fallback and we trigger a refresh.
-                diet_bullet_stale = any(
-                    isinstance(b, dict) and "no diet entries" in (b.get("label") or "").lower()
-                    for b in bullets
-                )
-                if diet_bullet_stale:
-                    has_diet_items = (
-                        db.query(func.count(DietItem.id))
-                        .filter(DietItem.pet_id == pet_id)
-                        .scalar()
-                        or 0
-                    ) > 0
-                    if has_diet_items:
-                        return []
-                # If cache claims zero preventive items but records now exist,
-                # the cache was computed before document upload — force a refresh.
-                preventive_bullet_stale = any(
-                    isinstance(b, dict) and "0 preventive" in (b.get("label") or "").lower()
-                    for b in bullets
-                )
-                if preventive_bullet_stale:
-                    has_preventive = (
-                        db.query(func.count(PreventiveRecord.id))
-                        .outerjoin(PreventiveMaster, PreventiveRecord.preventive_master_id == PreventiveMaster.id)
-                        .outerjoin(CustomPreventiveItem, PreventiveRecord.custom_preventive_item_id == CustomPreventiveItem.id)
-                        .filter(
-                            PreventiveRecord.pet_id == pet_id,
-                            PreventiveRecord.last_done_date.isnot(None),
-                            or_(PreventiveMaster.is_core.is_(True), CustomPreventiveItem.id.isnot(None)),
-                        )
-                        .scalar()
-                        or 0
-                    ) > 0
-                    if has_preventive:
-                        return []
-                return bullets
-        except Exception:
-            pass
-        return []
-
-    diet_summary = _read_diet_summary_cache()
-    recognition_bullets = _read_recognition_bullets_cache()
+    recognition_bullets: list = []
+    _cached_bullets = _insight_cache.get("recognition_bullets")
+    if isinstance(_cached_bullets, list):
+        # Staleness check 1: cache says "no diet entries" but diet rows now exist.
+        # Use already-loaded diet_rows — avoids an extra COUNT query.
+        _diet_stale = any(
+            isinstance(b, dict) and "no diet entries" in (b.get("label") or "").lower()
+            for b in _cached_bullets
+        )
+        # Staleness check 2: cache says "0 preventive" but completed core records now exist.
+        # Use already-loaded preventive_data — avoids an extra COUNT query.
+        _prev_stale = any(
+            isinstance(b, dict) and "0 preventive" in (b.get("label") or "").lower()
+            for b in _cached_bullets
+        )
+        _has_diet = len(diet_rows) > 0
+        _has_preventive = any(
+            r.last_done_date is not None and (m.is_core or r.custom_preventive_item_id is not None)
+            for r, m in preventive_data
+        )
+        if not (_diet_stale and _has_diet) and not (_prev_stale and _has_preventive):
+            recognition_bullets = _cached_bullets
 
     # If cache is cold/stale, regenerate inline — generate_recognition_bullets is
     # pure-DB (no GPT) so it's safe to call on the critical path.
@@ -908,35 +962,69 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
 
     empty_care_plan = {"continue_items": [], "attend_items": [], "add_items": []}
 
+    # compute_care_plan and get_vet_summary are sync functions that hit the DB.
+    # Running them directly on the event loop blocks every concurrent request.
+    # Each gets its own session so they can run in thread-pool workers without
+    # sharing session state with each other or with the main coroutine.
+
+    async def _run_care_plan() -> dict:
+        def _sync() -> dict:
+            own_db = SessionLocal()
+            try:
+                own_pet = own_db.query(Pet).filter(Pet.id == pet_id).first()
+                return compute_care_plan(own_db, own_pet) if own_pet else empty_care_plan
+            except Exception as exc:
+                logger.error("compute_care_plan failed for pet=%s: %s", pet_id, exc)
+                return empty_care_plan
+            finally:
+                own_db.close()
+
+        loop = asyncio.get_event_loop()
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, _sync),
+                timeout=_ENRICHMENT_TIMEOUT_SECONDS,
+            )
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.error("compute_care_plan timed out after %ds for pet=%s", _ENRICHMENT_TIMEOUT_SECONDS, pet_id)
+            return empty_care_plan
+
+    async def _run_vet_summary():
+        def _sync():
+            own_db = SessionLocal()
+            try:
+                return get_vet_summary(own_db, pet_id)
+            except Exception as exc:
+                logger.error("get_vet_summary failed for pet=%s: %s", pet_id, exc)
+                return None
+            finally:
+                own_db.close()
+
+        loop = asyncio.get_event_loop()
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, _sync),
+                timeout=_ENRICHMENT_TIMEOUT_SECONDS,
+            )
+        except (TimeoutError, asyncio.TimeoutError):
+            logger.error("get_vet_summary timed out after %ds for pet=%s", _ENRICHMENT_TIMEOUT_SECONDS, pet_id)
+            return None
+
     care_plan_v2, life_stage_data, vet_summary = await asyncio.gather(
-        _safe_sync_call("care_plan_engine.compute_care_plan", empty_care_plan, compute_care_plan, db, pet),
+        _run_care_plan(),
         _safe_async_call("life_stage_service.get_life_stage_data", None, get_life_stage_data(db, pet)),
-        _safe_sync_call("vet_summary_service.get_vet_summary", None, get_vet_summary, db, pet.id),
+        _run_vet_summary(),
     )
 
     care_plan_v2 = _normalize_care_plan_shape(care_plan_v2)
 
     orderable_items = _collect_orderable_items(care_plan_v2)
 
-    # --- Read care_plan_reasons from cache only — no API call on critical path ---
-    # If cache is stale/missing, return empty (items still render without reason text).
-    # precompute_service regenerates this in the background after each document upload.
-    care_plan_reasons: dict = {}
-    try:
-        cutoff = datetime.utcnow() - timedelta(hours=1)
-        cached_reasons_row = (
-            db.query(PetAiInsight)
-            .filter(
-                PetAiInsight.pet_id == pet_id,
-                PetAiInsight.insight_type == "care_plan_reasons",
-                PetAiInsight.generated_at >= cutoff,
-            )
-            .first()
-        )
-        if cached_reasons_row and isinstance(cached_reasons_row.content_json, dict):
-            care_plan_reasons = cached_reasons_row.content_json.get("reasons", {})
-    except Exception:
-        pass
+    # --- Read care_plan_reasons from pre-loaded batch cache (1h TTL) ---
+    _cached_reasons = _insight_cache.get("care_plan_reasons")
+    care_plan_reasons: dict = (
+        _cached_reasons.get("reasons", {}) if isinstance(_cached_reasons, dict) else {}
+    )
 
     care_plan_v2 = _apply_reasons_to_care_plan(care_plan_v2, care_plan_reasons)
     care_plan_v2 = _inject_supplement_recommendations(care_plan_v2, diet_summary)
@@ -964,30 +1052,14 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         "bullets": recognition_bullets,
     }
 
-    # --- Load cached AI insights (no GPT calls — DB lookup only) ---
-    # Include health_summary, vet_questions, and health_conditions_v2 if they exist and are fresh.
-    # This lets the frontend render immediately without waiting for separate API calls.
+    # --- Serve health_summary, vet_questions, health_conditions_v2, nutrition_analysis
+    #     from the pre-loaded batch cache — no extra DB query needed. ---
     cached_insights: dict[str, dict | None] = {
-        "health_summary": None,
-        "vet_questions": None,
-        "health_conditions_v2": None,
-        "nutrition_analysis": None,
+        "health_summary":       _insight_cache.get("health_summary"),       # type: ignore[assignment]
+        "vet_questions":        _insight_cache.get("vet_questions"),         # type: ignore[assignment]
+        "health_conditions_v2": _insight_cache.get("health_conditions_v2"), # type: ignore[assignment]
+        "nutrition_analysis":   _insight_cache.get("nutrition_analysis"),   # type: ignore[assignment]
     }
-    try:
-        stale_cutoff = datetime.utcnow() - timedelta(days=AI_INSIGHT_CACHE_DAYS)
-        insight_rows = (
-            db.query(PetAiInsight)
-            .filter(
-                PetAiInsight.pet_id == pet_id,
-                PetAiInsight.insight_type.in_(["health_summary", "vet_questions", "health_conditions_v2", "nutrition_analysis"]),
-                PetAiInsight.generated_at >= stale_cutoff,
-            )
-            .all()
-        )
-        for row in insight_rows:
-            cached_insights[row.insight_type] = row.content_json
-    except Exception:
-        logger.warning("Failed to load cached AI insights for pet=%s", pet_id)
 
     # --- Build response (no internal IDs exposed) ---
     # photo_url: serve via dashboard endpoint if pet has a photo, else None.

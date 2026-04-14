@@ -3153,7 +3153,7 @@ async def _transition_to_documents(db, user, pet, send_fn):
     await send_fn(
         db, mobile,
         "Do you have any health records handy — a vaccination card, vet prescription, "
-        "or lab report? Share a photo or PDF (up to 5 at a time) and I'll pull the "
+        "or lab report? Share a photo or PDF and I'll pull the "
         "details in automatically. No worries if not, we can always add them later.",
     )
 

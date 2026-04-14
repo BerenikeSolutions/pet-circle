@@ -1,0 +1,36 @@
+name: Render Keepalive
+
+# Pings the backend health endpoint every 10 minutes to prevent Render
+# from spinning down the free-tier instance. A cold start adds 30–60 s
+# to the first dashboard load after idle — this eliminates it.
+#
+# Setup:
+#   Add RENDER_BACKEND_URL to GitHub repository secrets.
+#   Example value: https://your-app.onrender.com
+#
+# Note: GitHub Actions cron has a minimum granularity of 5 minutes.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:  # allow manual trigger for testing
+
+jobs:
+  ping:
+    name: Ping backend health
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Ping /health endpoint
+        run: |
+          STATUS=$(curl --silent --output /dev/null --write-out "%{http_code}" \
+            --max-time 30 \
+            "${{ secrets.RENDER_BACKEND_URL }}/health")
+          echo "HTTP status: $STATUS"
+          if [ "$STATUS" -ge 200 ] && [ "$STATUS" -lt 400 ]; then
+            echo "Keepalive ping succeeded."
+          else
+            echo "Warning: health endpoint returned $STATUS — instance may be degraded."
+            exit 0  # non-fatal: don't fail the workflow on a flaky ping
+          fi

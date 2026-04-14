@@ -86,7 +86,7 @@ _upload_processing_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOAD_PROCESSIN
 _upload_queue_depth: int = 0
 
 # --- Batch upload tracking ---
-# Tracks recent upload timestamps per pet to enforce the 5-file batch limit.
+# Tracks recent upload timestamps per pet to enforce the per-session batch limit.
 # Key: str(pet_id), Value: list of upload timestamps (epoch seconds).
 # This is in-memory to avoid DB race conditions when many files arrive at once.
 _recent_uploads: dict[str, list[float]] = {}
@@ -1567,9 +1567,8 @@ async def _handle_media(db: Session, user, message_data: dict) -> None:
             _rejection_sent[pet_key] = True
             await send_text_message(
                 db, from_number,
-                f"You can share up to *{MAX_DOCS_PER_SESSION} documents at a time*. "
-                f"I've got these — let's continue with {pet.name}'s care plan, "
-                f"and you can send more once I've processed this batch.",
+                f"I've got these — let's continue with {pet.name}'s care plan. "
+                f"You can send more once I've processed this batch.",
             )
         return
 

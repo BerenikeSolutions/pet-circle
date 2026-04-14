@@ -27,7 +27,10 @@ import logging
 from typing import Any
 
 import razorpay as razorpay_sdk
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
+import hashlib
+import json
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import Response as FastAPIResponse
 from pydantic import BaseModel, Field
 import re as _re
@@ -203,6 +206,7 @@ def _get_pet_for_dashboard_token(db: Session, token: str) -> Pet:
 @router.get("/{token}")
 async def dashboard_get(
     token: str,
+    request: Request,
     response: Response,
     db: Session = Depends(get_db),
 ):
@@ -217,23 +221,37 @@ async def dashboard_get(
         - Token must not be revoked.
         - Token must not be expired.
 
-    Cache-Control: no-store prevents browser/CDN caching of sensitive pet data.
+    ETag + 304: browser may cache the response body; it must revalidate
+    before use (Cache-Control: no-cache). If data is unchanged the server
+    returns 304 with no body — saves bandwidth and latency on refreshes.
 
     Args:
         token: Dashboard access token from URL path.
+        request: FastAPI Request for reading If-None-Match header.
         response: FastAPI Response object for setting headers.
         db: SQLAlchemy database session (injected).
 
     Returns:
-        Complete dashboard data dictionary.
+        Complete dashboard data dictionary, or 304 if unchanged.
 
     Raises:
         HTTPException 404: If token is invalid, revoked, or expired.
     """
     try:
         data = await get_dashboard_data(db, token)
-        # Prevent caching of sensitive pet health data.
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+
+        # Compute ETag from content so identical payloads get 304 on refresh.
+        etag = hashlib.md5(
+            json.dumps(data, sort_keys=True, default=str).encode()
+        ).hexdigest()
+
+        if request.headers.get("If-None-Match") == etag:
+            return Response(status_code=304)
+
+        # no-cache: browser may store but must revalidate — enables ETag flow.
+        # Sensitive data is still protected because every request is verified.
+        response.headers["Cache-Control"] = "no-cache"
+        response.headers["ETag"] = etag
         return data
     except ValueError as e:
         error_msg = str(e)
