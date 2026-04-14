@@ -107,10 +107,10 @@ interface MacroEntry {
 
 function deriveMacros(n: NutritionAnalysis): MacroEntry[] {
   const entries = [
-    { label: "Protein", pct: Math.round(n.protein_pct ?? 0) },
-    { label: "Fat",     pct: Math.round(n.fat_pct     ?? 0) },
-    { label: "Carbs",   pct: Math.round(n.carbs_pct   ?? 0) },
-    { label: "Fibre",   pct: Math.round(n.fibre_pct   ?? 0) },
+    { label: "Protein", pct: n.protein_pct ?? 0 },
+    { label: "Fat",     pct: n.fat_pct     ?? 0 },
+    { label: "Carbs",   pct: n.carbs_pct   ?? 0 },
+    { label: "Fibre",   pct: n.fibre_pct   ?? 0 },
   ];
 
   return entries

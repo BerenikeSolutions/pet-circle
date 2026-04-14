@@ -488,8 +488,11 @@ COMBINED_MEAL_SYSTEM_PROMPT = (
     "- Estimate TOTAL DAILY intake based on determined serving size.\n"
     "- Ensure values are realistic and internally consistent.\n"
     "- Prevent extreme or biologically impossible outputs.\n"
-    "- Macro percentages must remain within realistic biological limits.\n"
-    "- Total calories must fall within realistic daily intake ranges.\n\n"
+    "- Total calories must fall within realistic daily intake ranges.\n"
+    "- For protein_pct, fat_pct, carbs_pct, fibre_pct: express each as\n"
+    "  % of the pet's DAILY REQUIREMENT met by this diet (NOT % of calories).\n"
+    "  Example: if a 22kg adult dog needs 50g protein/day and the diet provides 33g → protein_pct = 66.\n"
+    "  Values can exceed 100 if the diet overshoots the requirement.\n\n"
     "-----------------------------------\n"
     "STEP 5 — SHOW WARNING FLAG\n"
     "-----------------------------------\n\n"
@@ -595,11 +598,11 @@ COMBINED_MEAL_SYSTEM_PROMPT = (
     '  "warning_message": string (omit if show_warning is false),\n'
     '  "calories_per_day": int,\n'
     '  "calorie_target": int,\n'
-    '  "calorie_gap_pct": int,\n'
-    '  "protein_pct": float,\n'
-    '  "fat_pct": float,\n'
-    '  "carbs_pct": float,\n'
-    '  "fibre_pct": float,\n'
+    '  "calorie_gap_pct": int (positive = over, negative = under),\n'
+    '  "protein_pct": float (% of daily protein REQUIREMENT met, e.g. 65 means 65% of need — NOT % of calories),\n'
+    '  "fat_pct": float (% of daily fat REQUIREMENT met),\n'
+    '  "carbs_pct": float (% of daily carbohydrate REQUIREMENT met),\n'
+    '  "fibre_pct": float (% of daily fibre REQUIREMENT met),\n'
     '  "micronutrient_gaps": [\n'
     '    {\n'
     '      "name": string,\n'
@@ -962,6 +965,12 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
         "calories": 0, "protein": 0, "fat": 0, "carbs": 0, "fibre": 0,
         "gaps": {},
         "top_improvements": [],
+        "llm_calories_per_day": None,
+        "llm_calorie_target": None,
+        "llm_calorie_gap_pct": None,
+        "llm_serving_description": None,
+        "llm_show_warning": None,
+        "llm_warning_message": None,
     }
 
     if meal_result:
@@ -1020,29 +1029,13 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
     breed_label = pet.breed or "your pet's breed"
     condition_context = " + " + conditions[0].name if conditions else ""
 
-    # ── New flat fields for DietAnalysisCard design ──────────────────────────
-
-    # food_label: top-3 food item labels joined with ", "
-    food_label_str = ", ".join(food_labels[:3]) if food_labels else None
-
-    # calorie_gap_pct: positive = over target, negative = under target
-    calorie_gap_pct: float | None = None
-    if target_cal and actual["calories"] > 0:
-        calorie_gap_pct = round(
-            ((actual["calories"] - target_cal) / target_cal) * 100, 1
-        )
-
-    # show_warning when any diet item has no portion specified
-    items_without_portion = [
-        item for item in diet_items
-        if not (getattr(item, "daily_portion_g", None) and item.daily_portion_g > 0)
-        and not (getattr(item, "detail", None) and str(item.detail).strip())
-    ]
-    show_warning = bool(items_without_portion) and actual["calories"] > 0
-    warning_message: str | None = (
-        "Portion sizes are missing for some foods — calorie estimate may be incomplete."
-        if show_warning else None
+    # ── New flat fields for DietAnalysisCard — all sourced from LLM ─────────
+    food_label_str = actual.get("llm_serving_description") or (
+        ", ".join(food_labels[:3]) if food_labels else None
     )
+    calorie_gap_pct = actual.get("llm_calorie_gap_pct")
+    show_warning = bool(actual.get("llm_show_warning")) if actual.get("llm_show_warning") is not None else False
+    warning_message: str | None = actual.get("llm_warning_message") if show_warning else None
 
     # prescription_context: first vet-prescribed dietary condition, then fallback
     # to vet-tagged diet items (from document extraction or chat).
@@ -1110,9 +1103,9 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
         "analysis_context": f"Analysis based on {breed_label} breed profile{condition_context}",
         "gap_count": gap_count,
         "has_diet_items": bool(diet_items),
-        # ── New flat fields for DietAnalysisCard ──────────────────────────────
-        "calories_per_day": actual["calories"],
-        "calorie_target": target_cal,
+        # ── New flat fields for DietAnalysisCard — sourced from LLM ─────────
+        "calories_per_day": actual.get("llm_calories_per_day") or actual["calories"],
+        "calorie_target": actual.get("llm_calorie_target") or target_cal,
         "calorie_gap_pct": calorie_gap_pct,
         "food_label": food_label_str,
         "show_warning": show_warning,
@@ -1146,6 +1139,19 @@ def _accumulate_from_estimation(actual: dict, est: dict) -> None:
     # Capture top_improvements from combined meal result (first non-empty result wins)
     if not actual.get("top_improvements") and est.get("top_improvements"):
         actual["top_improvements"] = est["top_improvements"]
+
+    # Capture all LLM-computed display fields (first non-None result wins)
+    if actual.get("llm_calories_per_day") is None and est.get("calories_per_day"):
+        actual["llm_calories_per_day"] = est["calories_per_day"]
+    if actual.get("llm_calorie_target") is None and est.get("calorie_target"):
+        actual["llm_calorie_target"] = est["calorie_target"]
+    if actual.get("llm_calorie_gap_pct") is None and est.get("calorie_gap_pct") is not None:
+        actual["llm_calorie_gap_pct"] = est["calorie_gap_pct"]
+    if actual.get("llm_serving_description") is None and est.get("serving_description"):
+        actual["llm_serving_description"] = est["serving_description"]
+    if actual.get("llm_show_warning") is None and est.get("show_warning") is not None:
+        actual["llm_show_warning"] = est["show_warning"]
+        actual["llm_warning_message"] = est.get("warning_message")
 
     # Merge micronutrient gaps — worst status (highest severity_score) wins
     # when multiple foods report the same nutrient. Supplement suggestion is
