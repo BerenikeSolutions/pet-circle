@@ -126,11 +126,23 @@ export default function DietAnalysisCard({ token, compact = false }: DietAnalysi
     );
   }
 
-  if (!nutrition) {
+  const hasAnyMacroValue = macros.some((m) => m.pct > 0);
+
+  if (!nutrition || !hasAnyMacroValue) {
     return (
       <div className={compact ? undefined : "card"}>
         <div className="sec-lbl">Diet Analysis</div>
-        <div style={{ color: "var(--t3)", fontSize: 13, padding: "12px 0" }}>No diet data yet.</div>
+        <div
+          style={{
+            color: "var(--t3)",
+            fontSize: 13,
+            padding: "14px 4px",
+            lineHeight: 1.5,
+          }}
+        >
+          Not enough diet information yet. Log meals and portion sizes to see
+          the breakdown across calories, protein, fat and fibre.
+        </div>
       </div>
     );
   }

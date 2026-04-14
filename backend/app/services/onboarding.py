@@ -545,18 +545,22 @@ async def handle_onboarding_step(
         user.onboarding_data = None
         db.commit()
         profile_name = user.full_name if user.full_name != "_pending" else "there"
-        await send_fn(
-            db, mobile,
-            f"Hi {profile_name}, welcome to PetCircle — your pet care companion.\n\n"
-            f"We're here to make pet parenting simpler, helping you stay on top of your pet's health, nutrition, and everyday wellness.\n\n"
-            f"Here's how we support you:\n"
-            f"• Organise your pet's complete health records\n"
-            f"• Send timely reminders with one-click reordering\n"
-            f"• Deliver personalised diet and nutrition recommendations\n"
-            f"• Highlight health patterns and support better vet conversations\n\n"
-            f"Because your pet deserves the very best care.\n\n"
-            f"Let's get started — what's your pet's name?",
-        )
+        await send_fn(db, mobile, build_welcome_message(profile_name))
+
+
+def build_welcome_message(name: str) -> str:
+    """Return the PetCircle welcome message personalised with the given name."""
+    return (
+        f"Hi {name}, welcome to PetCircle — your pet care companion.\n\n"
+        "We're here to make pet parenting simpler, helping you stay on top of your pet's health, nutrition, and everyday wellness.\n\n"
+        "Here's how we support you:\n"
+        "• Organise health records\n"
+        "• Timely reminders & one-click ordering\n"
+        "• Personalised diet & nutrition\n"
+        "• Health insights & what to ask your vet\n\n"
+        "Because your pet deserves the very best care.\n\n"
+        "Let's get started — what's your pet's name?"
+    )
 
 
 def _is_greeting(text_lower: str) -> bool:
@@ -3084,8 +3088,8 @@ async def _transition_to_documents(db, user, pet, send_fn):
     await send_fn(
         db, mobile,
         "Do you have any health records handy — a vaccination card, vet prescription, "
-        "or lab report? Share a photo or PDF and I'll pull the details in automatically. "
-        "No worries if not, we can always add them later.",
+        "or lab report? Share a photo or PDF (up to 5 at a time) and I'll pull the "
+        "details in automatically. No worries if not, we can always add them later.",
     )
 
 
@@ -4529,7 +4533,7 @@ async def _step_awaiting_documents(db, user, text_lower, send_fn):
             clear_upload_window_extended(user.id)
         except Exception:
             pass
-        await _finalize_onboarding(db, user, send_fn)
+        await _finalize_onboarding(db, user, send_fn, declined_documents=True)
         return
 
     # If the user is asking for the dashboard/link before the care plan is
@@ -4623,7 +4627,7 @@ async def _step_awaiting_documents(db, user, text_lower, send_fn):
                 clear_upload_window_extended(user.id)
             except Exception:
                 pass
-            await _finalize_onboarding(db, user, send_fn)
+            await _finalize_onboarding(db, user, send_fn, declined_documents=True)
             return
         if intent == "dashboard":
             _set_onboarding_data(user, "awaiting_docs_last_reply_at", now_ts)
@@ -4704,12 +4708,15 @@ def _get_active_reminders_text(db: Session, pet_id) -> str:
         return ""
 
 
-async def _finalize_onboarding(db, user, send_fn):
+async def _finalize_onboarding(db, user, send_fn, declined_documents: bool = False):
     """
     Finalize onboarding: mark complete, clear deadline, send GPT-generated
     "care plan ready" message with hardcoded fallback templates.
 
     Record seeding and token generation already happened in _transition_to_documents().
+
+    If ``declined_documents`` is True and no documents were uploaded, a shorter,
+    reassuring transition message is sent instead of the default one.
     """
     mobile = user._plaintext_mobile
     pet = _get_pending_pet(db, user.id)
@@ -4829,13 +4836,20 @@ async def _finalize_onboarding(db, user, send_fn):
     # will be delivered as soon as GPT returns.
     _persist_deferred_marker_with_fallback(db, user, pet)
 
-    # Transition message first.
-    await send_fn(
-        db, mobile,
-        f"That's everything. 🐾 Building {pet.name}'s personalised care plan now "
-        f"— their health dashboard, care reminders, and nutrition breakdown "
-        f"will be ready in just a moment.",
-    )
+    # Transition message first. If the user explicitly declined documents and
+    # none were uploaded, use a shorter, reassuring line instead.
+    if declined_documents and docs_uploaded == 0:
+        transition_msg = (
+            f"No problem, you can add it later. "
+            f"I'm working on {pet.name}'s care plan."
+        )
+    else:
+        transition_msg = (
+            f"That's everything. 🐾 Building {pet.name}'s personalised care plan now "
+            f"— their health dashboard, care reminders, and nutrition breakdown "
+            f"will be ready in just a moment."
+        )
+    await send_fn(db, mobile, transition_msg)
 
     # Fetch diet items for AI supplement recommendation.
     diet_items = db.query(DietItem).filter(DietItem.pet_id == pet.id).all()

@@ -1180,6 +1180,34 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
                 for k in iks:
                     dual_use_override[k] = shortest
 
+        # ── ProductMedicines.repeat_frequency lookup ─────────────────────
+        # The care plan displays the freq_label for each item. When an item
+        # is backed by a known medicine (e.g., Bravecto), prefer the human
+        # label stored in product_medicines.repeat_frequency over the
+        # computed _days_to_freq_label(effective_days), which is based on
+        # life-stage baselines and will always read "Monthly" for 30-day
+        # baselines regardless of the actual product cadence.
+        product_freq_by_medicine: dict[str, str] = {}
+        if medicine_by_key:
+            try:
+                from app.models.product_medicines import ProductMedicines
+                _names_lc = {m for m in medicine_by_key.values() if m}
+                if _names_lc:
+                    rows = (
+                        db.query(ProductMedicines.product_name, ProductMedicines.repeat_frequency)
+                        .filter(ProductMedicines.repeat_frequency.isnot(None))
+                        .all()
+                    )
+                    for product_name, repeat_freq in rows:
+                        if not product_name or not repeat_freq:
+                            continue
+                        key = product_name.strip().lower()
+                        if key in _names_lc and key not in product_freq_by_medicine:
+                            product_freq_by_medicine[key] = repeat_freq.strip()
+            except Exception:
+                # Fallback silently — baseline-derived label remains the default.
+                product_freq_by_medicine = {}
+
         # Buckets keyed by item_key (conflict resolution applied inline).
         attend_items: dict[str, CarePlanItemDict] = {}
         continue_items: dict[str, CarePlanItemDict] = {}
@@ -1211,7 +1239,15 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
 
             raw_name = item_names_by_key.get(item_key, test_type.replace("_", " ").title())
             name = _DISPLAY_NAME.get(raw_name.lower(), raw_name)
-            freq_label = _days_to_freq_label(effective_days)
+            # Prefer product_medicines.repeat_frequency when a matching medicine
+            # is linked — avoids defaulting e.g. Bravecto to "Monthly" just
+            # because its life-stage baseline is 30 days.
+            _med_lc = medicine_by_key.get(item_key)
+            freq_label = (
+                product_freq_by_medicine.get(_med_lc)
+                if _med_lc and _med_lc in product_freq_by_medicine
+                else _days_to_freq_label(effective_days)
+            )
             status_tag = _status_tag(next_due, classification)
 
             item: CarePlanItemDict = {

@@ -334,6 +334,25 @@ def validate_dashboard_token(db: Session, token: str) -> DashboardToken:
     return dashboard_token
 
 
+async def _record_dashboard_visit_bg(user_id, pet_id, token: str) -> None:
+    """Fire-and-forget insert of a DashboardVisit row on its own DB session.
+
+    Separated from the main dashboard transaction so the response doesn't
+    block on an extra write that the caller never reads back.
+    """
+    try:
+        from app.database import SessionLocal
+        from app.models.dashboard_visit import DashboardVisit
+        bg_db = SessionLocal()
+        try:
+            bg_db.add(DashboardVisit(user_id=user_id, pet_id=pet_id, token=token))
+            bg_db.commit()
+        finally:
+            bg_db.close()
+    except Exception:
+        logger.warning("Background dashboard visit insert failed for token=%s...", token[:8])
+
+
 async def get_dashboard_data(db: Session, token: str) -> dict:
     """
     Retrieve all dashboard data for a pet via its access token.
@@ -359,6 +378,9 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
     Raises:
         ValueError: If token is invalid, revoked, or pet not found.
     """
+    import time as _time
+    _t0 = _time.monotonic()
+
     # --- Validate token ---
     dashboard_token = validate_dashboard_token(db, token)
     pet_id = dashboard_token.pet_id
@@ -379,13 +401,13 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
                 or 0
             )
             is_first_visit = previous_visit_count == 0
-            visit = DashboardVisit(
-                user_id=_visit_pet.user_id,
-                pet_id=pet_id,
-                token=token,
+            # Defer the INSERT into a background task — the dashboard response
+            # never reads it back, so there's no reason to keep callers waiting
+            # on another write inside the main transaction.
+            _visit_user_id = _visit_pet.user_id
+            asyncio.create_task(
+                _record_dashboard_visit_bg(_visit_user_id, pet_id, token)
             )
-            db.add(visit)
-            db.flush()  # Write within current transaction; committed below with the rest.
     except Exception:
         logger.warning("Failed to record dashboard visit for token=%s...", token[:8])
 
@@ -868,7 +890,7 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
     # photo_url: serve via dashboard endpoint if pet has a photo, else None.
     photo_url = f"/dashboard/{token}/pet-photo" if pet.photo_path else None
 
-    return {
+    _result = {
         "pet": {
             "name": pet.name,
             "species": pet.species,
@@ -910,6 +932,10 @@ async def get_dashboard_data(db: Session, token: str) -> dict:
         # Allows callers to avoid a second validate_dashboard_token() call.
         "_pet_id": str(pet_id),
     }
+    logger.info(
+        "get_dashboard_data: pet=%s elapsed=%.3fs", str(pet_id), _time.monotonic() - _t0
+    )
+    return _result
 
 
 async def get_document_file_for_token(

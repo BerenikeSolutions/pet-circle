@@ -401,33 +401,32 @@ export default function RemindersView({ data, token, onBack, onDashboardDataUpda
       return;
     }
 
-    try {
-      // Fire all writes in parallel instead of sequentially.
-      await Promise.all(updates);
+    // Apply optimistic update and close editor IMMEDIATELY so the UI never
+    // buffers on the network round-trip. Reconcile (or surface errors) once
+    // the writes settle.
+    setItems(optimisticItems);
+    setEditingId(null);
+    setSaving(false);
 
-      // Apply optimistic update and close editor immediately.
-      setItems(optimisticItems);
-      setEditingId(null);
-      setSaving(false);
-
-      // Reconcile with server data in background (non-blocking).
-      fetchDashboardFresh(token)
-        .then((latest) => {
-          setItems(toReminderItems(latest.preventive_records || []));
-          onDashboardDataUpdated?.(latest);
-        })
-        .catch(() => {
-          onDashboardDataUpdated?.(patchedData());
-        });
-    } catch (err: unknown) {
-      // At least one write failed. Apply optimistic values for any that succeeded
-      // and propagate to parent.
-      setItems(optimisticItems);
-      onDashboardDataUpdated?.(patchedData());
-      setEditingId(null);
-      setSaving(false);
-      setSaveError(err instanceof Error ? err.message : 'Some changes may not have saved. Refresh to confirm.');
-    }
+    Promise.all(updates)
+      .then(() => {
+        fetchDashboardFresh(token)
+          .then((latest) => {
+            setItems(toReminderItems(latest.preventive_records || []));
+            onDashboardDataUpdated?.(latest);
+          })
+          .catch(() => {
+            onDashboardDataUpdated?.(patchedData());
+          });
+      })
+      .catch((err: unknown) => {
+        onDashboardDataUpdated?.(patchedData());
+        setSaveError(
+          err instanceof Error
+            ? err.message
+            : 'Some changes may not have saved. Refresh to confirm.'
+        );
+      });
   };
 
   return (

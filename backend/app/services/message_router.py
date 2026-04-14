@@ -36,6 +36,7 @@ from app.core.constants import (
     GREETINGS,
     HELP_COMMANDS,
     MAX_CONCURRENT_UPLOAD_PROCESSING,
+    MAX_DOCS_PER_SESSION,
     MAX_PENDING_DOCS_PER_PET,
     MAX_PETS_PER_USER,
     NUDGE_ACTION,
@@ -222,6 +223,7 @@ from app.models.user import User
 from app.services.onboarding import (
     _count_tracked_preventive_items,
     _generate_care_plan_message,
+    build_welcome_message,
     create_pending_user,
     get_or_create_user,
     handle_onboarding_step,
@@ -579,18 +581,7 @@ async def route_message(db: Session, message_data: dict) -> None:
                         except Exception:
                             pass
                 greeting_name = profile_name.split()[0] if profile_name else "there"
-                await send_text_message(
-                    db, from_number,
-                    f"Hi {greeting_name}, welcome to PetCircle — your pet care companion.\n\n"
-                    f"We're here to make pet parenting simpler, helping you stay on top of your pet's health, nutrition, and everyday wellness.\n\n"
-                    f"Here's how we support you:\n"
-                    f"• Organise your pet's complete health records\n"
-                    f"• Send timely reminders with one-click reordering\n"
-                    f"• Deliver personalised diet and nutrition recommendations\n"
-                    f"• Highlight health patterns and support better vet conversations\n\n"
-                    f"Because your pet deserves the very best care.\n\n"
-                    f"Let's get started — what's your pet's name?",
-                )
+                await send_text_message(db, from_number, build_welcome_message(greeting_name))
                 return
             # Otherwise fall through to handle user as existing.
 
@@ -1330,16 +1321,15 @@ async def _handle_media(db: Session, user, message_data: dict) -> None:
 
     recent_count = len(_recent_uploads[pet_key])
 
-    if recent_count >= MAX_PENDING_DOCS_PER_PET:
+    if recent_count >= MAX_DOCS_PER_SESSION:
         # Only send the rejection message once per batch to avoid spamming.
         if not _rejection_sent.get(pet_key):
             _rejection_sent[pet_key] = True
             await send_text_message(
                 db, from_number,
-                f"Too many files! You've sent {recent_count} documents for "
-                f"{pet.name} already.\n\n"
-                f"Please upload maximum *{MAX_PENDING_DOCS_PER_PET} files at a time* "
-                f"and wait for extraction to finish before sending more.",
+                f"You can share up to *{MAX_DOCS_PER_SESSION} documents at a time*. "
+                f"I've got these — let's continue with {pet.name}'s care plan, "
+                f"and you can send more once I've processed this batch.",
             )
         return
 
