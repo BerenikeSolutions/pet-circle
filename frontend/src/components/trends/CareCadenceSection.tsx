@@ -41,18 +41,31 @@ export default function CareCadenceSection({ data }: CareCadenceSectionProps) {
 
   return (
     <section>
-      {data.vaccines && (
-        <div className="card">
-          <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.6px", textTransform: "uppercase", marginBottom: 5, color: "var(--green)" }}>
-            💉 Vaccinations · Cadence
+      {data.vaccines && (() => {
+        const doneRounds = data.vaccines.rounds.filter((r) => r.done);
+        const vaccineCount = doneRounds.reduce((sum, r) => {
+          const names = r.vaccines.split("·").map((s) => s.trim()).filter(Boolean);
+          return sum + (names.length || 1);
+        }, 0);
+        return (
+          <div className="card">
+            <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.6px", textTransform: "uppercase", marginBottom: 8, color: "var(--green)" }}>
+              💉 Vaccinations · Cadence
+            </div>
+            {vaccineCount > 0 && (
+              <div>
+                <span style={{ fontSize: 12, fontWeight: 600, padding: "3px 10px", borderRadius: 12, background: "var(--bg2)", color: "var(--t2)" }}>
+                  {vaccineCount} vaccine{vaccineCount !== 1 ? "s" : ""} administered
+                </span>
+              </div>
+            )}
+            <div style={{ marginTop: 12 }}>
+              <VaccinationCadence data={data.vaccines} />
+            </div>
+            {footerPill(data.vaccines.footer.text, data.vaccines.footer.bg, data.vaccines.footer.color)}
           </div>
-          <div style={{ fontSize: 15, fontWeight: 700, color: "var(--t1)", lineHeight: 1.35 }}>{data.vaccines.headline}</div>
-          <div style={{ marginTop: 12 }}>
-            <VaccinationCadence data={data.vaccines} />
-          </div>
-          {footerPill(data.vaccines.footer.text, data.vaccines.footer.bg, data.vaccines.footer.color)}
-        </div>
-      )}
+        );
+      })()}
 
       {data.flea_tick && (
         <div className="card">
