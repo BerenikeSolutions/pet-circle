@@ -186,6 +186,26 @@ _DOC_SKIP_PHRASES = (
     "nothing to upload",
     "don't have",
     "dont have",
+    "not right now",
+    "not now",
+    "later",
+    "maybe later",
+    "do it later",
+    "upload later",
+    "ill upload later",
+    "i'll upload later",
+    "move on",
+    "moving on",
+    "lets move on",
+    "let's move on",
+    "continue",
+    "next",
+    "what next",
+    "what's next",
+    "whats next",
+    "proceed",
+    "go ahead",
+    "carry on",
 )
 _DOC_UPLOAD_INTENT_WORDS = ("upload", "sending", "send", "attach", "attached")
 
@@ -214,10 +234,10 @@ def _is_doc_skip_intent(text_lower: str) -> bool:
         return False
 
     collapsed = re.sub(r"\s+", " ", normalized)
+    # Strip trailing punctuation (and whitespace around it) so "what next ?" → "what next".
+    stripped = re.sub(r"[\s.!?]+$", "", collapsed)
     for phrase in _DOC_SKIP_PHRASES:
-        if collapsed == phrase:
-            return True
-        if re.fullmatch(rf"{re.escape(phrase)}[.!?]*", collapsed):
+        if stripped == phrase:
             return True
 
     return False
@@ -1153,12 +1173,16 @@ async def _step_breed_age(db, user, text, send_fn):
     if attempts < 1 and (not has_breed or not has_age):
         _set_onboarding_data(user, "breed_age_attempts", attempts + 1)
         db.commit()
+        _breed_age_prior = f"What's {pet.name}'s breed and approximate age?"
+        _breed_age_next = "ask for the pet's gender and approximate weight"
         if not has_breed and not has_age:
             clarification = await _ai_clarify_input(
                 user_message=text,
                 step_context="the pet's breed and approximate age",
                 expected_format="e.g., golden retriever, 4 years",
                 pet_name=pet.name,
+                prior_assistant_message=_breed_age_prior,
+                next_step_description=_breed_age_next,
             )
         elif not has_breed:
             clarification = await _ai_clarify_input(
@@ -1166,6 +1190,8 @@ async def _step_breed_age(db, user, text, send_fn):
                 step_context=f"the pet's breed (age already noted as {pet.age_text})",
                 expected_format="e.g., golden retriever, labrador, or just say 'mixed'",
                 pet_name=pet.name,
+                prior_assistant_message=_breed_age_prior,
+                next_step_description=_breed_age_next,
             )
         else:
             clarification = await _ai_clarify_input(
@@ -1173,6 +1199,8 @@ async def _step_breed_age(db, user, text, send_fn):
                 step_context=f"the pet's age (breed already noted as {pet.breed})",
                 expected_format="e.g., 4 years, 6 months, puppy",
                 pet_name=pet.name,
+                prior_assistant_message=_breed_age_prior,
+                next_step_description=_breed_age_next,
             )
         await send_fn(db, mobile, clarification)
         return
@@ -1233,6 +1261,13 @@ async def _step_gender_weight(db, user, text, send_fn):
                 step_context="the pet's gender and approximate weight",
                 expected_format="e.g., male, 22 kg",
                 pet_name=pet.name,
+                prior_assistant_message=(
+                    f"What's {pet.name}'s gender and approximate weight? (e.g., male, 22 kg)"
+                ),
+                next_step_description=(
+                    "decide whether to ask about neutering/spaying based on gender & age, "
+                    "then move to food type"
+                ),
             )
             await send_fn(db, mobile, clarification)
             return
@@ -1379,6 +1414,10 @@ async def _step_food_type(db, user, text, send_fn):
                 step_context="what type of food the pet eats",
                 expected_format="Reply with *home food*, *packaged food*, or *mix*",
                 pet_name=pet.name,
+                prior_assistant_message=(
+                    f"What does {pet.name} usually eat — home food, packaged, or a mix?"
+                ),
+                next_step_description="ask for a typical daily meal breakdown",
             )
             await send_fn(db, mobile, clarification)
             return
@@ -1502,6 +1541,11 @@ async def _step_meal_details(db, user, text, send_fn):
                 step_context=f"what {pet.name}'s typical daily diet looks like — the actual meals they eat",
                 expected_format=f"e.g., {example_shown}" if example_shown else "e.g., boiled chicken + rice in the morning, dal + roti at night",
                 pet_name=pet.name,
+                prior_assistant_message=(
+                    f"What does {pet.name}'s typical daily diet look like?"
+                    + (f" (e.g., {example_shown})" if example_shown else "")
+                ),
+                next_step_description="ask about supplements the pet currently takes",
             )
             await send_fn(db, mobile, clarification)
             return
@@ -1815,6 +1859,14 @@ async def _step_preventive(db, user, text, send_fn):
             step_context=_clarify_context,
             expected_format=f"e.g., {example_shown}" if example_shown else _default_fmt,
             pet_name=pet.name,
+            prior_assistant_message=(
+                f"When was {pet.name}'s last vaccination, deworming, "
+                + ("and blood test? " if flea_excluded else "flea & tick treatment, and blood test? ")
+                + "(rough dates are fine)"
+            ),
+            next_step_description=(
+                "offer the optional health-record document upload window before finalizing onboarding"
+            ),
         )
         await send_fn(db, mobile, clarification)
         return
@@ -3026,16 +3078,27 @@ async def _ai_clarify_input(
     step_context: str,
     expected_format: str,
     pet_name: str = "your pet",
+    prior_assistant_message: str = "",
+    next_step_description: str = "",
 ) -> str:
     """
     Use GPT to generate a friendly clarifying question when user input
     doesn't match the expected format for the current onboarding step.
 
+    The LLM is given the surrounding conversational context — the previous
+    assistant message, what the current step collects, and what happens
+    next — so the clarification is phrased in a way that makes sense in the
+    flow rather than in isolation.
+
     Args:
         user_message: The user's original message that couldn't be parsed.
-        step_context: Description of what information is being collected.
+        step_context: Description of what information is being collected (current step purpose).
         expected_format: Examples of valid input for this step.
         pet_name: The pet's name for personalization.
+        prior_assistant_message: The assistant's previous message (the question the user was
+            replying to). Helps the LLM understand the user's reply relative to what was asked.
+        next_step_description: Short description of what comes after the current step,
+            so the LLM can frame the clarification without contradicting the flow.
 
     Returns:
         A friendly, concise clarifying question (AI-generated).
@@ -3044,10 +3107,14 @@ async def _ai_clarify_input(
     prompt = (
         "You are a friendly pet care assistant on WhatsApp helping a user register their pet. "
         f"The user's pet is named {pet_name}.\n\n"
-        f"You are currently asking about: {step_context}\n"
-        f"Expected input format/examples: {expected_format}\n"
+        "CONTEXT (use to interpret the user's reply in relation to the flow):\n"
+        f"- Previous assistant message: \"{prior_assistant_message or '(not available)'}\"\n"
+        f"- Current step purpose: {step_context}\n"
+        f"- What happens next if the user moves on: {next_step_description or '(not specified)'}\n"
+        f"- Expected input format/examples: {expected_format}\n\n"
         f"The user replied: \"{user_message}\"\n\n"
-        "Their reply doesn't clearly match what's needed. "
+        "Their reply doesn't clearly match what's needed. Interpret their meaning against "
+        "the previous assistant message and the next step before phrasing your clarification. "
         "Generate a short, clear clarifying question (1-2 sentences max) that:\n"
         "- Starts by saying you didn't fully understand/catch their reply\n"
         "- Does NOT sound congratulatory or appreciative (avoid phrases like 'Great', 'Awesome', 'Thanks for sharing', 'Got it')\n"
@@ -4292,21 +4359,24 @@ async def _generate_doc_upload_reply(
 ) -> str:
     """Generate a natural GPT reply for text messages during the document upload window."""
     client = _get_openai_onboarding_client()
+    at_limit = remaining <= 0
+    has_uploaded_any = docs_uploaded > 0
     prompt = (
         "You are a friendly pet care assistant helping a user upload health records "
         f"for their pet {pet_name} during onboarding.\n\n"
-        f"FACTS (use these EXACT numbers — do NOT invent or change them):\n"
-        f"- Files already uploaded: {docs_uploaded}\n"
-        f"- Files they can still upload: {remaining}\n"
+        "CONTEXT:\n"
+        f"- User has uploaded at least one file already: {has_uploaded_any}\n"
+        f"- User has reached the upload limit: {at_limit}\n"
         f"- Accepted formats: JPEG, PNG, PDF\n\n"
         f"The user sent a TEXT message (not a file): \"{user_message}\"\n\n"
         "CRITICAL RULES:\n"
-        "- The user has NOT uploaded or shared anything — this is a text message only.\n"
-        "- NEVER say 'Thanks for sharing', 'Got it', 'Great', 'Awesome', or any phrase that implies they already shared a file.\n"
+        "- NEVER mention any specific number of files, upload limits, remaining count, or totals. Do not include digits referring to file counts.\n"
+        "- The user has NOT uploaded or shared anything with THIS message — it is text only.\n"
+        "- NEVER say 'Thanks for sharing', 'Got it', 'Great', 'Awesome', or any phrase that implies they already shared a file in this message.\n"
         "- Do NOT treat words like 'sharing', 'sending', 'uploading' in their text as if they already did it.\n"
         "- If they seem to be indicating they will upload soon (e.g. 'sharing', 'sending now'), simply encourage them to go ahead and send the file.\n"
-        f"- If they're asking whether they can add more, tell them they can send {remaining} more.\n"
-        "- If remaining is 0, let them know they've hit the upload limit.\n\n"
+        "- If they're asking whether they can add more, say yes they can send additional files — without quoting any number.\n"
+        "- If at_limit is True, let them know they've hit the upload limit without stating the number.\n\n"
         "Reply in 1-2 short, warm sentences that match the actual context. "
         "Do NOT mention 'skip', 'skipping', or any way to exit/continue the upload step. "
         "Do NOT use markdown headings. Use *bold* sparingly for key info only."
@@ -4322,12 +4392,12 @@ async def _generate_doc_upload_reply(
         return response.content[0].text.strip()
     except Exception as e:
         logger.warning("Doc upload reply GPT failed, using fallback: %s", str(e))
-        if remaining > 0:
+        if not at_limit:
             return (
-                f"You can still upload *{remaining} more* file(s) for {pet_name} "
-                f"(JPEG, PNG, or PDF)."
+                f"You can go ahead and share {pet_name}'s health records "
+                f"in JPEG, PNG, or PDF format whenever you're ready."
             )
-        return f"You've uploaded all {docs_uploaded} files for {pet_name}."
+        return f"You've reached the upload limit for {pet_name}."
 
 
 _ADD_MORE_KEYWORDS: tuple[str, ...] = (
@@ -4342,6 +4412,70 @@ def _is_add_more_intent(text_lower: str) -> bool:
     if not text_lower:
         return False
     return any(kw in text_lower for kw in _ADD_MORE_KEYWORDS)
+
+
+_DOC_INTENT_LABELS = {"skip", "add_more", "upload_soon", "dashboard", "other"}
+
+
+async def _classify_doc_upload_intent(
+    user_message: str,
+    pet_name: str,
+    prior_assistant_message: str = "",
+    current_step_purpose: str = "",
+    next_step_description: str = "",
+) -> str:
+    """
+    Use the LLM to classify a free-text reply during the document upload window.
+
+    The classifier is given the conversational context — the previous assistant
+    message, what the current step is trying to accomplish, and what happens
+    next — so phrases like "what next?" or "ok" are interpreted relative to the
+    flow instead of in isolation.
+
+    Returns one of: skip, add_more, upload_soon, dashboard, other.
+    Falls back to 'other' on any error so the caller degrades gracefully.
+    """
+    if not user_message or not user_message.strip():
+        return "other"
+
+    client = _get_openai_onboarding_client()
+    prompt = (
+        "You are classifying a user's WhatsApp reply inside a pet onboarding flow. "
+        "Interpret the reply in context: what the assistant just asked, what this "
+        "step is collecting, and what happens next if the user moves on.\n\n"
+        f"Pet name: {pet_name}\n"
+        f"Current step purpose: {current_step_purpose or 'collect optional health-record uploads (JPEG/PNG/PDF).'}\n"
+        f"What happens next if the user moves past this step: "
+        f"{next_step_description or 'onboarding finalizes and the care plan / dashboard link is generated.'}\n"
+        f"Previous assistant message: \"{prior_assistant_message or '(not available)'}\"\n"
+        f"User reply: \"{user_message}\"\n\n"
+        "Return ONE label (lowercase, no punctuation, nothing else) from this set:\n"
+        "- skip: user wants to skip uploading, do it later, move on, continue to the next step, "
+        "has nothing to upload, or is otherwise signalling they do not want to share docs right now. "
+        "Phrases like 'not right now', 'later', 'what next', 'move on', 'proceed', 'no' map here "
+        "BECAUSE the next step is finalization — asking 'what next' implies they want to advance.\n"
+        "- add_more: user is asking whether they can upload additional/more documents.\n"
+        "- upload_soon: user says they are about to upload / sending now / will share a file shortly.\n"
+        "- dashboard: user is asking for the dashboard link, care plan, or status of plan building.\n"
+        "- other: none of the above; an ambiguous question or small-talk that does not fit above.\n\n"
+        "Judge based on the user's apparent goal given the previous assistant message and what comes next, "
+        "not just the literal words. Reply with exactly one word from the label set."
+    )
+    try:
+        response = await retry_openai_call(
+            client.messages.create,
+            model=OPENAI_QUERY_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=10,
+        )
+        label = (response.content[0].text or "").strip().lower()
+        label = re.sub(r"[^a-z_]", "", label)
+        if label in _DOC_INTENT_LABELS:
+            return label
+    except Exception as e:
+        logger.warning("Doc upload intent classification failed: %s", str(e))
+    return "other"
 
 
 async def _step_awaiting_documents(db, user, text_lower, send_fn):
@@ -4447,6 +4581,51 @@ async def _step_awaiting_documents(db, user, text_lower, send_fn):
             mark_upload_window_extended(user.id)
         except Exception as e:
             logger.warning("Failed to mark upload window extended: %s", str(e))
+    else:
+        # Keyword fast-paths didn't match — ask the LLM to classify the user's
+        # intent so replies like "what next", "move on", "later" advance the
+        # flow instead of getting another upload nudge on loop. Pass the
+        # conversational context so the LLM judges meaning against the previous
+        # assistant prompt and what happens after this step.
+        prior_assistant_msg = str(od.get("awaiting_docs_last_reply_text") or "")
+        intent = await _classify_doc_upload_intent(
+            user_message=text_lower,
+            pet_name=pet_name,
+            prior_assistant_message=prior_assistant_msg,
+            current_step_purpose=(
+                "Optional step: user can share vaccination cards, vet prescriptions, "
+                "or lab reports (JPEG/PNG/PDF). They may also choose to skip."
+            ),
+            next_step_description=(
+                "Onboarding finalizes. The pet's care plan is built and the dashboard "
+                "link is sent over WhatsApp."
+            ),
+        )
+        if intent == "skip":
+            try:
+                from app.services.message_router import clear_upload_window_extended
+                clear_upload_window_extended(user.id)
+            except Exception:
+                pass
+            await _finalize_onboarding(db, user, send_fn)
+            return
+        if intent == "dashboard":
+            _set_onboarding_data(user, "awaiting_docs_last_reply_at", now_ts)
+            _set_onboarding_data(user, "awaiting_docs_last_reply_text", "building_status")
+            db.commit()
+            await send_fn(
+                db, mobile,
+                f"{pet_name}'s care plan is still being built 🐾 "
+                f"You'll receive the dashboard link as soon as it's ready. "
+                f"Reply *skip* if you don't want to upload any documents.",
+            )
+            return
+        if intent == "add_more":
+            try:
+                from app.services.message_router import mark_upload_window_extended
+                mark_upload_window_extended(user.id)
+            except Exception as e:
+                logger.warning("Failed to mark upload window extended: %s", str(e))
 
     # Avoid duplicate low-information prompts while the user is deciding
     # whether to upload records. This prevents repeated "Great! You can upload..."
