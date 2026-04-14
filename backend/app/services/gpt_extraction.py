@@ -35,7 +35,7 @@ import logging
 import os
 import re
 from contextlib import nullcontext
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -536,16 +536,47 @@ def _resolve_document_category(
     Prescription, PCR & Parasite Panel) authoritative over GPT's legacy "Diagnostic".
     """
     combined = f"{(document_name or '').lower()} {os.path.basename(file_path or '').lower()}"
+    # Normalize underscore/hyphen variants so "blood_report" matches "blood report",
+    # "x-ray" matches "x ray", "usg_film" keeps "usg" as a whole word, etc.
+    combined_norm = re.sub(r"[_\-]", " ", combined)
+    # Filename-only normalised string for word-boundary checks (standalone "blood").
+    filename_norm = re.sub(r"[_\-]", " ", os.path.basename(file_path or "").lower())
 
     # Lab-report keyword signals take precedence over structural prescription
     # heuristics.  A urine culture that extracts conditions (e.g. E. coli) must
     # still be classified as "Urine Report", not "Prescription".
-    if any(kw in combined for kw in ("urine culture", "urinalysis", "urine test", "urine report")):
+    if any(kw in combined_norm for kw in ("urine culture", "urinalysis", "urine test", "urine report")):
         return "Urine Report"
-    if any(kw in combined for kw in ("blood report", "cbc report", "hemogram report", "haematology report")):
+    if any(kw in combined_norm for kw in ("blood report", "blood test", "cbc report", "hemogram report",
+                                           "haematology report", "hematology report")):
         return "Blood Report"
-    if any(kw in combined for kw in ("pcr", "parasite panel", "parasite screen")):
+    # Standalone "blood" word in filename (e.g. "Blood_12_02_25_3.pdf") is a strong
+    # Blood Report signal even when the word "report" does not follow it.  Must be
+    # checked BEFORE the lab-report guard so a mislabelled GPT category (e.g.
+    # "PCR & Parasite Panel" triggered by anaplasma/ehrlichia in the blood panel)
+    # cannot survive past a clear blood-filename signal.
+    if re.search(r'\bblood\b', filename_norm):
+        return "Blood Report"
+    if any(kw in combined_norm for kw in ("pcr", "parasite panel", "parasite screen")):
         return "PCR & Parasite Panel"
+
+    # Filename "Prescription" / Imaging keywords override GPT and must come
+    # before the lab-report results guard so a wrong GPT category cannot survive
+    # past a clear filename signal (e.g. "usg_report.pdf", "x-ray_film.pdf").
+    if "prescription" in combined_norm or " rx " in combined_norm:
+        return "Prescription"
+    if any(kw in combined_norm for kw in ("ultrasound", "usg", "x ray", "xray", "radiograph")):
+        return "Imaging"
+
+    # clinical_exam is populated ONLY on prescriptions/vet-visit records — blood/urine
+    # reports NEVER contain clinical examination values (weight, temp, pulse, etc.).
+    # This check must come BEFORE the lab-report results guard so a prescription that
+    # orders blood tests (and may have some diagnostic_values set by GPT) is still
+    # correctly classified as "Prescription".
+    if isinstance(clinical_exam, dict) and any(
+        value not in (None, "", [], {}) for value in clinical_exam.values()
+    ):
+        return "Prescription"
 
     # Lab-report results guard: if the document has actual diagnostic test results
     # (parameter values + reference ranges) and GPT already returned a known lab
@@ -556,20 +587,10 @@ def _resolve_document_category(
     if diagnostic_values and raw_category in _LAB_REPORT_CATEGORIES:
         return raw_category
 
-    # Structural signals — clinical_exam is prompt-guaranteed prescription-only,
-    # and any extracted condition means a vet diagnosed + prescribed something.
-    if isinstance(clinical_exam, dict) and any(
-        value not in (None, "", [], {}) for value in clinical_exam.values()
-    ):
-        return "Prescription"
+    # Remaining structural signals — any extracted condition means a vet diagnosed
+    # + prescribed something.
     if conditions and any(isinstance(c, dict) for c in conditions):
         return "Prescription"
-
-    # Always trust strong keyword signals in filename / document name.
-    if "prescription" in combined or " rx " in combined:
-        return "Prescription"
-    if any(kw in combined for kw in ("ultrasound", "usg", "x-ray", "xray", " xray")):
-        return "Imaging"
 
     # Vet-origin signal: if a doctor or clinic name is identified, the document came from a
     # vet's office. Use this to rescue two failure modes:
@@ -854,19 +875,26 @@ EXTRACTION_SYSTEM_PROMPT = (
     '  - "document_category": one of "Blood Report", "Urine Report", "Imaging", '
     '"Prescription", "PCR & Parasite Panel", "Vaccination", "Other" --- '
     "pick the most specific match: "
-    "Blood Report for CBC/biochemistry/haematology/blood test reports, "
+    "Blood Report for CBC/biochemistry/haematology/blood test reports (even when tick-borne "
+    "disease markers such as Anaplasma, Ehrlichia, or Babesia are included as add-on parameters — "
+    "those are still Blood Reports, NOT PCR & Parasite Panel), "
     "Urine Report for urinalysis/urine culture/urine sensitivity reports, "
-    "Imaging for ultrasound/USG/X-ray/radiology reports, "
+    "Imaging for ultrasound/USG/X-ray/radiology/film reports (set this even when a clinical "
+    "impression or diagnosis is written at the end of the imaging report), "
     "Prescription for vet prescriptions/medication records, "
-    "PCR & Parasite Panel for PCR/parasite/tick-borne disease panels, "
+    "PCR & Parasite Panel ONLY for documents whose PRIMARY purpose is tick-borne disease or "
+    "parasite PCR screening (e.g. SNAP 4Dx, Vector-Borne Disease Panel, standalone parasite "
+    "panel) — a standard blood panel that also tests for tick-borne markers is NOT PCR & "
+    "Parasite Panel, it is Blood Report, "
     "Vaccination for vaccine certificates/immunisation records, "
     "Other for anything else\n"
     '  - "diagnostic_summary": string or null (for Diagnostic documents only --- '
     "provide a 1-2 sentence plain-language summary of key findings; null otherwise)\n"
     '  - "diagnostic_values": array (for Diagnostic reports), each with:\n'
-    '    - "test_type": "blood" | "urine" | "fecal" | "xray"\n'
+    '    - "test_type": "blood" | "urine" | "fecal" | "xray" | "ultrasound"\n'
     '    - "parameter_name": string (e.g., Hemoglobin, WBC, Creatinine, Urine pH; '
     "for xray: anatomical region like 'Hip Joint'; "
+    "for ultrasound: organ or region like 'Liver', 'Spleen', 'Left Kidney'; "
     "for fecal: parasite name like 'Roundworm')\n"
     '    - "value_numeric": number or null\n'
     '    - "value_text": string or null (use when numeric is not available; '
@@ -983,7 +1011,37 @@ EXTRACTION_SYSTEM_PROMPT = (
     "- Extract ONLY items that match the tracked preventive items above.\n"
     "- A blood test report counts as 'Preventive Blood Test' --- use the report date.\n"
     "- Do NOT provide medical advice or interpretation.\n"
-    "- Do NOT infer dates --- only extract what is explicitly stated.\n"
+    "- Do NOT infer dates --- only extract what is explicitly stated in the document.\n"
+    "- DATE EXTRACTION IS CRITICAL: Scan every part of the document — headers, stamps, "
+    "footers, date fields, signature areas, and printed/handwritten text — for explicit dates. "
+    "Indian documents commonly use DD/MM/YYYY, DD/MM/YY, DD-MM-YYYY, DD-MM-YY, or "
+    "'DD Month YYYY' formats. Extract ALL dates found and assign them correctly to the "
+    "relevant fields (last_done_date, observed_at, diagnosed_at, etc.). Never leave a date "
+    "field null if a date is visibly present anywhere on the document.\n"
+    "- PRESCRIPTION IDENTIFICATION: Set document_category to 'Prescription' whenever the "
+    "document is a vet-written record. Prescriptions always classify as 'Prescription' even "
+    "when they also contain blood tests to be done, general clinical information, or vaccine "
+    "advice. The following are ALL prescriptions:\n"
+    "  (a) ORDERED BLOOD/LAB TESTS: A prescription that says 'CBC advised', 'Do KFT/LFT', "
+    "'Blood collected - results awaited', 'Advised: CBC, UT, KFT, Blood electrolytes' is a "
+    "Prescription ordering tests — NOT a Blood Report. Do NOT populate diagnostic_values[] "
+    "for test names that are ordered but not yet resulted. Leave diagnostic_values: []. The "
+    "order itself may go in recommendations[] with type 'other' and the test name as "
+    "description. A Blood Report ONLY has actual numeric result values with reference ranges.\n"
+    "  (b) GENERAL CLINICAL INFORMATION: A prescription that contains clinical findings "
+    "(lump at elbow, LN swollen, multiple lipomas, owner complaint, history), examination "
+    "notes, or treatment advice alongside medications is ALWAYS a Prescription — even if no "
+    "formal Rx symbol is present. Extract clinical findings into clinical_exam.clinical_findings.\n"
+    "  (c) VACCINE ADVICE ON A PRESCRIPTION: If a vet prescription mentions 'vaccinate for "
+    "Rabies', 'Core vaccine due', or lists a vaccine as part of a treatment/preventive plan, "
+    "the document_category stays 'Prescription'. Extract the vaccine into items[] with the "
+    "appropriate item_name. Only set document_category to 'Vaccination' for a standalone "
+    "vaccine certificate or vaccination card with no prescription content.\n"
+    "  (d) HANDWRITTEN MEDICATION LIST: A handwritten page listing drug names with doses and "
+    "frequencies is ALWAYS a Prescription. Place medications in standalone_medications[] if "
+    "no condition is named, or in conditions[].medications[] if a diagnosis is written.\n"
+    "  In-clinic test values actually measured during the visit (blood glucose, PCV, SpO2, "
+    "quick BUN) belong in clinical_exam.in_clinic_test_values — never in diagnostic_values[].\n"
     "- Extract the pet's name EXACTLY as written in the document (if present).\n"
     "- For vaccination records, extract all available vaccine details without guessing.\n"
     "- For dog vaccination cards, include each administered vaccine row in items when a done date is present.\n"
@@ -991,7 +1049,19 @@ EXTRACTION_SYSTEM_PROMPT = (
     "- In vaccination documents, do not add Annual Checkup unless a separate checkup event is documented.\n"
     "- Capture next_due_date for each vaccine row whenever visible.\n"
     "- For X-ray reports: test_type 'xray', anatomical region as parameter_name, finding as value_text.\n"
+    "- For ultrasound/USG reports: test_type 'ultrasound', organ or anatomical region as parameter_name "
+    "(e.g. 'Liver', 'Spleen', 'Left Kidney', 'Urinary Bladder'), finding description as value_text. "
+    "Always set document_category to 'Imaging' for USG/ultrasound documents.\n"
     "- For fecal reports: test_type 'fecal', parasite name as parameter_name, result as value_text.\n"
+    "- Blood Report vs PCR & Parasite Panel: A standard haematology/biochemistry panel is ALWAYS "
+    "'Blood Report' even when tick-borne disease markers (Anaplasma, Ehrlichia, Babesia, Hepatozoon, "
+    "Leishmania) are included as additional parameters. Use 'PCR & Parasite Panel' ONLY when the "
+    "document's sole or primary purpose is tick-borne disease PCR / parasite screening "
+    "(e.g. SNAP 4Dx, Vector-Borne Disease Panel) with no standard CBC or biochemistry parameters.\n"
+    "- Imaging (X-ray, USG, ultrasound, radiology): Always set document_category to 'Imaging'. "
+    "Extract findings into diagnostic_values using appropriate test_type ('xray' or 'ultrasound'). "
+    "A clinical impression or diagnosis written at the end of an imaging report does NOT change "
+    "the category to 'Prescription' — it remains 'Imaging'.\n"
     "- For conditions: extract diagnosed diseases/disorders/syndromes with their medications and monitoring.\n"
     "- condition_name must be the DISEASE/DISORDER name only --- never a drug, supplement, or vaccine brand.\n"
     "- \"acute\" and \"episodic\" are interchangeable labels for condition_type. Use the term from the document; "
@@ -1343,7 +1413,7 @@ def _get_anthropic_extraction_client():
     return _anthropic_extraction_client
 
 
-async def _call_openai_extraction(document_text: str) -> dict:
+async def _call_openai_extraction(document_text: str, extra_system: str = "") -> dict:
     """
     Call Claude to extract structured data from document text using tool_use.
 
@@ -1354,6 +1424,8 @@ async def _call_openai_extraction(document_text: str) -> dict:
 
     Args:
         document_text: The text content of the uploaded document.
+        extra_system: Optional additional instructions appended to EXTRACTION_SYSTEM_PROMPT
+                      (used by the two-pass low-confidence retry).
 
     Returns:
         Validated dict matching EXTRACTION_TOOL_SCHEMA (tool_use .input).
@@ -1362,13 +1434,14 @@ async def _call_openai_extraction(document_text: str) -> dict:
         Exception: If all retry attempts fail (propagated from retry_openai_call).
     """
     client = _get_anthropic_extraction_client()
+    system_prompt = EXTRACTION_SYSTEM_PROMPT + ("\n" + extra_system if extra_system else "")
 
     async def _make_call() -> dict:
         response = await client.messages.create(
             model=OPENAI_EXTRACTION_MODEL,
             temperature=OPENAI_EXTRACTION_TEMPERATURE,
             max_tokens=OPENAI_EXTRACTION_MAX_TOKENS,
-            system=EXTRACTION_SYSTEM_PROMPT,
+            system=system_prompt,
             tools=[EXTRACTION_TOOL_SCHEMA],
             tool_choice={"type": "tool", "name": "extract_pet_health_data"},
             messages=[
@@ -1381,15 +1454,50 @@ async def _call_openai_extraction(document_text: str) -> dict:
     return await retry_openai_call(_make_call)
 
 
-async def _call_openai_extraction_vision(image_data_uri: str, extra_system: str = "") -> dict:
+def _parse_image_block(data_uri: str) -> dict:
     """
-    Call Claude vision API to extract data from an image using tool_use.
+    Convert a base64 data URI into an Anthropic image content block.
+
+    Args:
+        data_uri: Base64 data URI (data:image/jpeg;base64,...).
+
+    Returns:
+        Anthropic image content block dict.
+    """
+    media_type = "image/jpeg"
+    base64_data = data_uri
+    if data_uri.startswith("data:"):
+        header, _, base64_data = data_uri.partition(",")
+        mime_part = header.split(";")[0].replace("data:", "")
+        if mime_part:
+            media_type = mime_part
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": media_type,
+            "data": base64_data,
+        },
+    }
+
+
+async def _call_openai_extraction_vision(
+    image_data_uris: str | list[str],
+    extra_system: str = "",
+) -> dict:
+    """
+    Call Claude vision API to extract data from one or more images using tool_use.
+
+    Accepts either a single data URI string or a list of them.  Multi-image
+    input is used for multi-page imaging documents (USG film, X-ray) so that
+    findings spread across pages are captured in a single extraction pass.
 
     Uses tool_use with EXTRACTION_TOOL_SCHEMA so the API is forced to return
     schema-valid structured output — eliminates all JSON parse failures.
 
     Args:
-        image_data_uri: Base64 data URI (data:image/jpeg;base64,...).
+        image_data_uris: Base64 data URI string, or list of data URI strings
+                         (data:image/jpeg;base64,...).
         extra_system: Optional additional instructions appended to EXTRACTION_SYSTEM_PROMPT
                       (used by the two-pass low-confidence retry).
 
@@ -1401,18 +1509,20 @@ async def _call_openai_extraction_vision(image_data_uri: str, extra_system: str 
     """
     client = _get_anthropic_extraction_client()
 
-    # Strip the data URI prefix to get raw base64 data and media type.
-    # Anthropic expects: {"type": "base64", "media_type": "image/jpeg", "data": "<base64>"}
-    media_type = "image/jpeg"
-    base64_data = image_data_uri
-    if image_data_uri.startswith("data:"):
-        header, _, base64_data = image_data_uri.partition(",")
-        # Extract media type from "data:image/jpeg;base64"
-        mime_part = header.split(";")[0].replace("data:", "")
-        if mime_part:
-            media_type = mime_part
+    # Normalise to list so the rest of the function is uniform.
+    uris: list[str] = (
+        [image_data_uris] if isinstance(image_data_uris, str) else list(image_data_uris)
+    )
 
     system_prompt = EXTRACTION_SYSTEM_PROMPT + ("\n" + extra_system if extra_system else "")
+
+    # Build content: text instruction followed by one image block per page.
+    page_label = "this veterinary document image" if len(uris) == 1 else "these veterinary document images (multiple pages)"
+    content: list[dict] = [
+        {"type": "text", "text": f"Extract preventive health data from {page_label}."},
+    ]
+    for uri in uris:
+        content.append(_parse_image_block(uri))
 
     async def _make_call() -> dict:
         response = await client.messages.create(
@@ -1422,25 +1532,7 @@ async def _call_openai_extraction_vision(image_data_uri: str, extra_system: str 
             system=system_prompt,
             tools=[EXTRACTION_TOOL_SCHEMA],
             tool_choice={"type": "tool", "name": "extract_pet_health_data"},
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Extract preventive health data from this veterinary document image.",
-                        },
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": media_type,
-                                "data": base64_data,
-                            },
-                        },
-                    ],
-                },
-            ],
+            messages=[{"role": "user", "content": content}],
         )
         # tool_use response: content[0] is a ToolUseBlock with .input dict
         return response.content[0].input
@@ -2480,7 +2572,8 @@ async def extract_and_process_document(
         )
 
         # Keep vision data available for optional two-pass retry.
-        _vision_data_uri: str | None = None
+        _vision_data_uri: str | None = None          # single-image (JPEG/PNG or scanned non-imaging PDF)
+        _vision_pages: list[str] | None = None       # multi-page (imaging scanned PDF)
         _pdf_text_payload: str | None = None
 
         if file_bytes and document.mime_type in ("image/jpeg", "image/png"):
@@ -2503,11 +2596,30 @@ async def extract_and_process_document(
                     str(document_id),
                 )
                 from app.utils.file_reader import render_pdf_pages_as_images
-                page_images = render_pdf_pages_as_images(file_bytes, max_pages=3)
+                # Imaging documents (USG, X-ray) may spread findings across
+                # multiple pages, so render up to 5 pages and send them all.
+                # Text-only reports (CBC, urine) are reliably single-page, so
+                # cap at 3 and send only page 0 to keep token usage low.
+                # Check both document_name (set after extraction) and the raw
+                # file_path/filename (available immediately) so that imaging PDFs
+                # uploaded without a pre-set name are still detected correctly.
+                _doc_name_lower = (document.document_name or "").lower()
+                _file_name_lower = os.path.basename(document.file_path or "").lower()
+                _imaging_keywords = ("usg", "ultrasound", "x-ray", "xray", "x ray", "radiograph", "film")
+                _is_imaging = any(kw in _doc_name_lower for kw in _imaging_keywords) or any(
+                    kw in _file_name_lower for kw in _imaging_keywords
+                )
+                _max_pages = 5 if _is_imaging else 3
+                page_images = render_pdf_pages_as_images(file_bytes, max_pages=_max_pages)
                 if page_images:
-                    # Send the first page to vision API (most CBC reports are single-page).
-                    _vision_data_uri = page_images[0]
-                    extraction_result = await _call_openai_extraction_vision(_vision_data_uri)
+                    # For imaging: send all rendered pages so multi-page findings
+                    # are captured. For other scanned docs: send page 0 only.
+                    if _is_imaging:
+                        _vision_pages = page_images
+                        extraction_result = await _call_openai_extraction_vision(_vision_pages)
+                    else:
+                        _vision_data_uri = page_images[0]
+                        extraction_result = await _call_openai_extraction_vision(_vision_data_uri)
                 else:
                     # PyMuPDF not available or rendering failed — mark and skip.
                     logger.warning(
@@ -2555,13 +2667,19 @@ async def extract_and_process_document(
                 "(3) pet_name — check for any name near the top of the document."
             )
             try:
-                if _vision_data_uri:
+                if _vision_pages:
+                    # Multi-page imaging document — retry with all pages.
+                    extraction_result_2 = await _call_openai_extraction_vision(
+                        _vision_pages, extra_system=_SECOND_PASS_HINT
+                    )
+                elif _vision_data_uri:
                     extraction_result_2 = await _call_openai_extraction_vision(
                         _vision_data_uri, extra_system=_SECOND_PASS_HINT
                     )
                 elif _pdf_text_payload:
-                    # For text PDFs, append the hint to the payload text
-                    extraction_result_2 = await _call_openai_extraction(_pdf_text_payload)
+                    extraction_result_2 = await _call_openai_extraction(
+                        _pdf_text_payload, extra_system=_SECOND_PASS_HINT
+                    )
                 else:
                     extraction_result_2 = extraction_result  # no-op
 
@@ -2642,6 +2760,18 @@ async def extract_and_process_document(
         # For diagnostic-only documents (urine, blood panel with no tracked items),
         # fall back to observed_at from diagnostic_values, then filename date.
         # For prescriptions with no preventive items, also try diagnosed_at from conditions.
+        # Rule: if a date is parseable from the original filename, it is treated as
+        # authoritative — it overrides a conflicting GPT-extracted date.  This handles
+        # cases where the uploader named the file with the actual visit date
+        # (e.g. Prescription_Chavan_12_02_25.jpg → 2025-02-12).
+        filename_date: date | None = None
+        fn_date_str = _extract_date_from_filename(document.file_path)
+        if fn_date_str:
+            try:
+                filename_date = parse_date(fn_date_str)
+            except ValueError:
+                pass
+
         event_dates: list = []
         for item in extracted_items:
             raw_date = item.get("last_done_date")
@@ -2668,22 +2798,30 @@ async def extract_and_process_document(
                         event_dates.append(parse_date(str(diagnosed_at)))
                     except ValueError:
                         pass
-        if not event_dates:
-            # Last resort — extract date from the original filename.
-            # Log a warning so this fallback is visible in production logs.
-            fn_date = _extract_date_from_filename(document.file_path)
-            if fn_date:
+
+        if filename_date:
+            if not event_dates:
+                # No date found anywhere — use the filename date as fallback.
                 logger.warning(
                     "Using filename date fallback for event_date: "
                     "document_id=%s, file_path=%s, extracted_date=%s",
                     str(document_id),
                     document.file_path,
-                    fn_date,
+                    fn_date_str,
                 )
-                try:
-                    event_dates.append(parse_date(fn_date))
-                except ValueError:
-                    pass
+                event_dates.append(filename_date)
+            else:
+                extracted_date = max(event_dates)
+                if extracted_date != filename_date:
+                    # Filename date is an explicit human label — prefer it over GPT extraction.
+                    logger.info(
+                        "Filename date (%s) overrides GPT-extracted date (%s) for document_id=%s",
+                        fn_date_str,
+                        extracted_date.isoformat(),
+                        str(document_id),
+                    )
+                    event_dates = [filename_date]
+
         if event_dates:
             document.event_date = max(event_dates)
 

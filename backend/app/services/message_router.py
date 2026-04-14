@@ -1842,6 +1842,34 @@ async def run_extraction_batch(
                         bg_db.rollback()
                     except Exception:
                         pass
+
+            # If all batch docs were already extracted, notify the user so they
+            # know the upload was received (rather than getting no response at all).
+            if document_ids and from_number and pet:
+                try:
+                    duplicate_count = (
+                        bg_db.query(Document)
+                        .filter(
+                            Document.id.in_(document_ids),
+                            Document.extraction_status.in_(["success", "partially_extracted"]),
+                        )
+                        .count()
+                    )
+                    if duplicate_count > 0:
+                        pet_display = (pet.name if pet else None) or pet_name
+                        dashboard_link = _get_dashboard_link(bg_db, pet)
+                        msg = (
+                            f"These documents are already in {pet_display}'s records — "
+                            f"no changes needed."
+                        )
+                        if dashboard_link:
+                            msg += f"\n\nYou can view all records here:\n{dashboard_link}"
+                        await send_text_message(bg_db, from_number, msg)
+                except Exception as _dup_exc:
+                    logger.warning(
+                        "[extraction] Could not check duplicate count for pet=%s: %s",
+                        pet_key, _dup_exc,
+                    )
             return
 
         total = len(pending_docs)
@@ -2059,16 +2087,40 @@ async def _delayed_batch_extraction(
 
         if not pending_docs:
             # DB has no pending docs in this batch (already extracted or failed).
-            unsupported_count = _unsupported_format_count.pop(pet_key, 0)
-            if unsupported_count > 0:
-                await send_text_message(
-                    bg_db, from_number,
-                    f"Those {unsupported_count} file(s) couldn't be read as they're "
-                    f"in an unsupported format (like .docx). You can share these as "
-                    f"an image or PDF and I'll pick them up right away.",
+            # Check how many were already-processed duplicates so we can tell
+            # the user their documents are already on record.
+            duplicate_count = 0
+            if batched_doc_ids and from_number:
+                duplicate_count = (
+                    bg_db.query(Document)
+                    .filter(
+                        Document.id.in_(batched_doc_ids),
+                        Document.extraction_status.in_(["success", "partially_extracted"]),
+                    )
+                    .count()
                 )
+            unsupported_count = _unsupported_format_count.pop(pet_key, 0)
             _batch_document_ids.pop(pet_key, None)
             _batch_is_onboarding.pop(pet_key, None)
+            if from_number:
+                if duplicate_count > 0:
+                    pet_obj = bg_db.query(Pet).filter(Pet.id == pet_id).first()
+                    pet_display = (pet_obj.name if pet_obj else None) or pet_name
+                    dashboard_link = _get_dashboard_link(bg_db, pet_obj) if pet_obj else None
+                    msg = (
+                        f"These documents are already in {pet_display}'s records — "
+                        f"no changes needed."
+                    )
+                    if dashboard_link:
+                        msg += f"\n\nYou can view all records here:\n{dashboard_link}"
+                    await send_text_message(bg_db, from_number, msg)
+                elif unsupported_count > 0:
+                    await send_text_message(
+                        bg_db, from_number,
+                        f"Those {unsupported_count} file(s) couldn't be read as they're "
+                        f"in an unsupported format (like .docx). You can share these as "
+                        f"an image or PDF and I'll pick them up right away.",
+                    )
             return
 
         total = len(pending_docs)

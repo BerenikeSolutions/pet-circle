@@ -20,14 +20,16 @@ logger = logging.getLogger(__name__)
 
 
 _MAX_IMAGE_DIMENSION = 7900  # Anthropic API hard limit is 8000px per dimension
+_MAX_BASE64_BYTES = 4_800_000  # Anthropic API hard limit is 5MB base64; use 4.8MB headroom
 
 
 def encode_image_base64(file_bytes: bytes, mime_type: str) -> str:
     """
     Base64-encode image bytes for the Anthropic vision API.
 
-    Downscales the image if either dimension exceeds _MAX_IMAGE_DIMENSION (7900px)
-    to comply with the Anthropic API limit of 8000px per dimension.
+    Enforces two Anthropic API limits:
+      1. Max 8000px per dimension  → resizes down proportionally.
+      2. Max 5MB base64 payload    → reduces JPEG quality in steps until within limit.
 
     Args:
         file_bytes: Raw image bytes.
@@ -40,21 +42,41 @@ def encode_image_base64(file_bytes: bytes, mime_type: str) -> str:
         from PIL import Image
 
         img = Image.open(io.BytesIO(file_bytes))
-        w, h = img.size
-        if w > _MAX_IMAGE_DIMENSION or h > _MAX_IMAGE_DIMENSION:
-            scale = _MAX_IMAGE_DIMENSION / max(w, h)
-            new_w, new_h = int(w * scale), int(h * scale)
-            img = img.resize((new_w, new_h), Image.LANCZOS)
-            buf = io.BytesIO()
-            fmt = "JPEG" if mime_type == "image/jpeg" else "PNG"
-            img.save(buf, format=fmt, quality=92)
-            file_bytes = buf.getvalue()
+        orig_w, orig_h = img.size
+
+        # Step 1: pixel-dimension cap.
+        if orig_w > _MAX_IMAGE_DIMENSION or orig_h > _MAX_IMAGE_DIMENSION:
+            scale = _MAX_IMAGE_DIMENSION / max(orig_w, orig_h)
+            img = img.resize((int(orig_w * scale), int(orig_h * scale)), Image.LANCZOS)
             logger.debug(
-                "Resized image from %dx%d to %dx%d for Anthropic API limit",
-                w, h, new_w, new_h,
+                "Resized image from %dx%d to %dx%d for Anthropic API pixel limit",
+                orig_w, orig_h, img.width, img.height,
             )
+
+        # Step 2: base64 size cap — reduce JPEG quality until under limit.
+        fmt = "JPEG" if mime_type == "image/jpeg" else "PNG"
+        quality = 92
+        while True:
+            buf = io.BytesIO()
+            save_kwargs = {"format": fmt, "quality": quality} if fmt == "JPEG" else {"format": fmt}
+            img.save(buf, **save_kwargs)
+            file_bytes = buf.getvalue()
+            encoded_len = (len(file_bytes) * 4 + 2) // 3  # base64 output length
+            if encoded_len <= _MAX_BASE64_BYTES or fmt != "JPEG":
+                break
+            if quality > 60:
+                quality -= 10
+            else:
+                # Quality reduction alone isn't enough — halve dimensions.
+                img = img.resize((img.width // 2, img.height // 2), Image.LANCZOS)
+                quality = 85
+                logger.debug(
+                    "Further resized image to %dx%d to meet 5MB base64 limit",
+                    img.width, img.height,
+                )
+
     except Exception as e:
-        logger.warning("Image resize skipped (PIL unavailable or error): %s", e)
+        logger.warning("Image resize/compress skipped (PIL unavailable or error): %s", e)
 
     encoded = base64.b64encode(file_bytes).decode("utf-8")
     return f"data:{mime_type};base64,{encoded}"
@@ -134,8 +156,10 @@ def render_pdf_pages_as_images(file_bytes: bytes, max_pages: int = 3) -> list[st
                 matrix = fitz.Matrix(zoom, zoom)
                 pixmap = page.get_pixmap(matrix=matrix)
                 img_bytes = pixmap.tobytes("jpeg")
-                encoded = base64.b64encode(img_bytes).decode("utf-8")
-                data_uris.append(f"data:image/jpeg;base64,{encoded}")
+                # Apply the same dimension and base64-size caps as encode_image_base64
+                # so that large scanned films (USG, X-ray) don't exceed the API limits.
+                data_uri = encode_image_base64(img_bytes, "image/jpeg")
+                data_uris.append(data_uri)
             except Exception as e:
                 logger.warning(
                     "Failed to render PDF page %d as image: %s",
