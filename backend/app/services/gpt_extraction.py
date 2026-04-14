@@ -1,21 +1,21 @@
 """
-PetCircle Phase 1 — GPT Extraction Service (Module 7)
+PetCircle Phase 1 — Document Extraction Service (Module 7)
 
 Extracts structured preventive health data from uploaded pet documents
-using OpenAI GPT. This service processes documents after upload and
+using Claude (Anthropic). This service processes documents after upload and
 routes extracted data to the preventive engine (conflict detection
 or record creation).
 
 Extraction pipeline:
-    Document (pending) → GPT extraction → Validate JSON → Normalize dates
+    Document (pending) → Claude extraction → Validate JSON → Normalize dates
         → Pass to conflict engine or create preventive record
         → Update extraction_status
 
 Model configuration (all from constants — never hardcoded):
-    - Model: OPENAI_EXTRACTION_MODEL (gpt-4.1)
+    - Model: OPENAI_EXTRACTION_MODEL (claude-opus-4-6)
     - Temperature: OPENAI_EXTRACTION_TEMPERATURE (0)
-    - Max tokens: OPENAI_EXTRACTION_MAX_TOKENS (1500)
-    - Response format: JSON only
+    - Max tokens: OPENAI_EXTRACTION_MAX_TOKENS (6144)
+    - Response format: JSON only (tool_use)
 
 Retry policy:
     - Uses retry_openai_call() from utils/retry.py.

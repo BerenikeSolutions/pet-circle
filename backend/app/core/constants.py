@@ -170,11 +170,11 @@ MAX_MESSAGES_PER_MINUTE: int = 20
 # Rolling window duration in seconds for rate limiting.
 RATE_LIMIT_WINDOW_SECONDS: int = 60
 
-# --- OpenAI Model Configuration ---
-# Extraction model for parsing uploaded documents into structured health data.
+# --- Claude Model Configuration ---
+# Opus: document extraction (higher accuracy for complex parsing).
 OPENAI_EXTRACTION_MODEL: str = "claude-opus-4-6"
 
-# Query model for answering user questions grounded in pet records.
+# Sonnet: all other AI calls (query, onboarding, insights, nutrition, hygiene, etc.).
 OPENAI_QUERY_MODEL: str = "claude-sonnet-4-6"
 
 # Temperature for extraction — deterministic output required.
