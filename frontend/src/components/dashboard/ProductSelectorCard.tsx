@@ -125,7 +125,7 @@ export default function ProductSelectorCard({
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                   <span style={{ fontSize: 14, fontWeight: 700, color: "var(--t1)" }}>
-                    {p.brand_name}
+                    {displayName(p)}
                   </span>
                   {p.is_highlighted && (
                     <span
@@ -158,7 +158,7 @@ export default function ProductSelectorCard({
                 </div>
 
                 <div style={{ fontSize: 12, color: "var(--t2)", marginTop: 2 }}>
-                  {displayName(p)}
+                  {p.brand_name}
                 </div>
                 <div style={{ fontSize: 11, color: "var(--t3)", marginTop: 1 }}>
                   {p.pack_size}

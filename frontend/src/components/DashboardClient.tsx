@@ -171,6 +171,7 @@ function DashboardInner({ token }: { token: string }) {
     section: string,
     quantity = 1,
     medicine_type?: string,
+    sub?: string,
   ) => {
     setCart((prev) => {
       const existing = prev.find((entry) => entry.id === skuId);
@@ -180,7 +181,7 @@ function DashboardInner({ token }: { token: string }) {
         );
       }
       // Add the new item first
-      const newItem = { id: skuId, name, quantity, price, mrp: mrp > price ? mrp : undefined, icon, section, medicine_type };
+      const newItem = { id: skuId, name, sub, quantity, price, mrp: mrp > price ? mrp : undefined, icon, section, medicine_type };
       const updated = [...prev, newItem];
 
       // Combined-medicine overlap detection:

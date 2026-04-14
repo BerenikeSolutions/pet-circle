@@ -94,6 +94,8 @@ from app.services.diet_service import (
     get_diet_items,
     update_diet_item,
 )
+from app.services.precompute_service import _upsert_insight
+from app.services.ai_insights_service import generate_recognition_bullets
 from app.services.health_trends_service import get_health_trends as get_health_trends_v2
 from app.services.hygiene_service import (
     add_hygiene_item,
@@ -1707,6 +1709,27 @@ async def dashboard_diet_items(
         raise HTTPException(status_code=503, detail="Could not load diet items.")
 
 
+async def _refresh_recognition_bullets(pet_id) -> None:
+    """Recompute and cache recognition_bullets after a diet item change.
+
+    Opens its own DB session so it can safely run after the request session closes.
+    Pure-DB call — no GPT.
+    """
+    from app.database import SessionLocal
+    from uuid import UUID as _UUID
+    _db = SessionLocal()
+    try:
+        _pet = _db.query(Pet).filter(Pet.id == pet_id).first()
+        if not _pet:
+            return
+        bullets = await generate_recognition_bullets(_db, _pet)
+        _upsert_insight(_db, pet_id, "recognition_bullets", bullets)
+    except Exception as exc:
+        logger.warning("Failed to refresh recognition_bullets for pet=%s: %s", pet_id, exc)
+    finally:
+        _db.close()
+
+
 @router.post("/{token}/diet-items")
 async def dashboard_add_diet_item(
     token: str,
@@ -1716,7 +1739,9 @@ async def dashboard_add_diet_item(
     """Add a diet item."""
     try:
         dt = validate_dashboard_token(db, token)
-        return await add_diet_item(db, dt.pet_id, body.type, body.label, body.detail, body.icon)
+        result = await add_diet_item(db, dt.pet_id, body.type, body.label, body.detail, body.icon)
+        asyncio.create_task(_refresh_recognition_bullets(dt.pet_id))
+        return result
     except ValueError as e:
         if "already exists" in str(e).lower():
             raise HTTPException(status_code=409, detail=str(e))
@@ -1736,7 +1761,9 @@ async def dashboard_update_diet_item(
     """Update a diet item."""
     try:
         dt = validate_dashboard_token(db, token)
-        return await update_diet_item(db, item_id, dt.pet_id, body.label, body.detail)
+        result = await update_diet_item(db, item_id, dt.pet_id, body.label, body.detail)
+        asyncio.create_task(_refresh_recognition_bullets(dt.pet_id))
+        return result
     except ValueError:
         raise HTTPException(status_code=404, detail="Diet item not found.")
     except Exception as e:
@@ -1754,6 +1781,7 @@ async def dashboard_delete_diet_item(
     try:
         dt = validate_dashboard_token(db, token)
         await delete_diet_item(db, item_id, dt.pet_id)
+        asyncio.create_task(_refresh_recognition_bullets(dt.pet_id))
         return {"status": "deleted"}
     except ValueError:
         raise HTTPException(status_code=404, detail="Diet item not found.")
@@ -2752,6 +2780,7 @@ async def search_products_endpoint(
             "sku_id": p.sku_id,
             "category": "food",
             "brand_name": p.brand_name,
+            "product_name": p.product_line,
             "name": f"{p.brand_name} {p.product_line}".strip(),
             "pack_size": f"{float(p.pack_size_kg):g} kg",
             "mrp": int(p.mrp),
@@ -2763,6 +2792,7 @@ async def search_products_endpoint(
             "sku_id": p.sku_id,
             "category": "supplement",
             "brand_name": p.brand_name,
+            "product_name": p.product_name,
             "name": f"{p.brand_name} {p.product_name}".strip(),
             "pack_size": p.pack_size,
             "mrp": int(p.mrp),
@@ -2774,6 +2804,7 @@ async def search_products_endpoint(
             "sku_id": p.sku_id,
             "category": "medicine",
             "brand_name": p.brand_name,
+            "product_name": p.product_name,
             "name": f"{p.brand_name} {p.product_name}".strip(),
             "pack_size": p.pack_size or "",
             "mrp": p.mrp_paise // 100,
@@ -2821,8 +2852,8 @@ async def cart_add_endpoint(
         if not product:
             raise HTTPException(status_code=404, detail="Product not found.")
         price = int(product.discounted_price)
-        name = f"{product.brand_name} {product.product_name}".strip()
-        sub = product.pack_size or ""
+        name = product.product_name
+        sub = f"{product.brand_name} · {product.pack_size}" if product.pack_size else product.brand_name
         icon = "💊"
     elif sku_id.startswith("SKU-"):
         from app.models.product_medicines import ProductMedicines
@@ -2830,8 +2861,8 @@ async def cart_add_endpoint(
         if not product:
             raise HTTPException(status_code=404, detail="Product not found.")
         price = product.discounted_paise // 100
-        name = f"{product.brand_name} {product.product_name}".strip()
-        sub = product.pack_size or ""
+        name = product.product_name
+        sub = f"{product.brand_name} · {product.pack_size}" if product.pack_size else product.brand_name
         icon = "💊"
     else:
         raise HTTPException(status_code=404, detail="Product not found.")

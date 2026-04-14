@@ -128,7 +128,12 @@ export default function ReturningDashboardView({
       : (product?.product_name || product?.brand_name || skuId);
     const price = product?.discounted_price ?? 0;
     const mrp = product?.mrp ?? price;
-    onAddBySku(skuId, name, price, mrp, icon, pendingSectionTitle, quantity, product?.medicine_type);
+    const sub = product?.category === "food"
+      ? product?.pack_size
+      : (product?.brand_name && product?.pack_size
+          ? `${product.brand_name} · ${product.pack_size}`
+          : product?.pack_size);
+    onAddBySku(skuId, name, price, mrp, icon, pendingSectionTitle, quantity, product?.medicine_type, sub);
     setSelectorOpen(false);
 
     // Sync with backend in background (best-effort)

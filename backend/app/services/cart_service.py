@@ -65,7 +65,7 @@ def _food_display_name(product: ProductFood) -> str:
 
 
 def _supplement_display_name(product: ProductSupplement) -> str:
-    return f"{product.brand_name} {product.product_name}".strip()
+    return product.product_name
 
 
 def _food_sub(product: ProductFood) -> str:
@@ -73,7 +73,8 @@ def _food_sub(product: ProductFood) -> str:
 
 
 def _supplement_sub(product: ProductSupplement) -> str:
-    return f"{product.pack_size} • {product.type.replace('_', ' ')}"
+    base = f"{product.brand_name} · {product.pack_size}" if product.pack_size else product.brand_name
+    return f"{base} · {product.type.replace('_', ' ')}"
 
 
 def _category_icon(category: str) -> str:

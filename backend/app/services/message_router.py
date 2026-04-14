@@ -492,6 +492,46 @@ def _get_mobile(user) -> str:
     return getattr(user, "_plaintext_mobile", None) or decrypt_field(user.mobile_number)
 
 
+# Edit-intent trigger words. Conservative set — avoids intercepting legitimate
+# health questions that happen to use "change" or "update" in a sentence.
+_EDIT_EXACT = frozenset({
+    "update", "edit", "change", "modify", "fix", "correct",
+    "update details", "edit details", "change details",
+    "update profile", "edit profile", "update my profile", "edit my profile",
+    "update pet", "edit pet", "update my pet", "edit my pet",
+})
+
+_EDIT_STARTS_WITH = (
+    "update ", "edit ", "change my ", "fix my ", "correct my ",
+    "i want to update", "i want to change", "i want to edit",
+    "i need to update", "i need to change", "i need to edit",
+)
+
+_EDIT_WRONG_PHRASES = (
+    "wrong name", "wrong breed", "wrong weight", "wrong gender",
+    "wrong age", "wrong birthday", "wrong food", "wrong vaccine",
+    "wrong date", "wrong species",
+)
+
+
+def _is_edit_intent(text_lower: str) -> bool:
+    """
+    Return True when the user's text clearly signals intent to update pet or owner data.
+
+    Conservative: does NOT match open-ended questions like "how do I change my dog's diet?"
+    or "can I edit" — those still fall through to the query engine.
+    """
+    if text_lower in _EDIT_EXACT:
+        return True
+    for prefix in _EDIT_STARTS_WITH:
+        if text_lower.startswith(prefix):
+            return True
+    for phrase in _EDIT_WRONG_PHRASES:
+        if phrase in text_lower:
+            return True
+    return False
+
+
 def _build_error_dedup_token(message_data: dict) -> str:
     """Build a stable token to identify a specific inbound message retry."""
     message_id = message_data.get("message_id")
@@ -742,6 +782,14 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
     if reschedule_result:
         return
 
+    # --- Agentic edit flow (in-progress) ---
+    # Route all messages to the edit agent while user.edit_state is active.
+    # Checked before order routing so "cancel" inside an edit session is handled correctly.
+    if getattr(user, "edit_state", None) == "agentic_edit":
+        from app.services.agentic_edit import handle_agentic_edit_step
+        await handle_agentic_edit_step(db, user, message_data, send_text_message)
+        return
+
     # --- Agentic order flow — route all text to the agent ---
     if user.order_state == "agentic_order":
         if text_lower in ("cancel", "stop"):
@@ -878,6 +926,15 @@ async def _handle_text(db: Session, user, message_data: dict) -> None:
         else:
             from app.services.order_service import start_order_flow
             await start_order_flow(db, user)
+        return
+
+    # --- Edit intent detection ---
+    # Trigger the agentic edit flow when the user wants to update pet or owner details.
+    # Checked last so it doesn't intercept order/dashboard/help commands above.
+    # Does NOT fire when the user is in an active order flow.
+    if not user.order_state and _is_edit_intent(text_lower):
+        from app.services.agentic_edit import handle_agentic_edit_intent
+        await handle_agentic_edit_intent(db, user, message_data, send_text_message)
         return
 
     # General query — route to GPT query engine

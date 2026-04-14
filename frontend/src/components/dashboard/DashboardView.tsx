@@ -27,7 +27,7 @@ export interface DashboardViewProps {
   onGoToRecords: () => void;
   onGoToCart: () => void;
   onAddToCart: (item: CarePlanItem, sectionTitle: string) => void;
-  onAddBySku: (skuId: string, name: string, price: number, mrp: number, icon: string, section: string, quantity?: number, medicine_type?: string) => void;
+  onAddBySku: (skuId: string, name: string, price: number, mrp: number, icon: string, section: string, quantity?: number, medicine_type?: string, sub?: string) => void;
 }
 
 function cartItemId(item: CarePlanItem, sectionTitle: string): string {
@@ -147,7 +147,12 @@ export default function DashboardView({
       : (product?.product_name || product?.brand_name || skuId);
     const price = product?.discounted_price ?? 0;
     const mrp = product?.mrp ?? price;
-    onAddBySku(skuId, name, price, mrp, icon, pendingSectionTitle, quantity, product?.medicine_type);
+    const sub = product?.category === "food"
+      ? product?.pack_size
+      : (product?.brand_name && product?.pack_size
+          ? `${product.brand_name} · ${product.pack_size}`
+          : product?.pack_size);
+    onAddBySku(skuId, name, price, mrp, icon, pendingSectionTitle, quantity, product?.medicine_type, sub);
     setSelectorOpen(false);
 
     // Sync with backend in background (best-effort)

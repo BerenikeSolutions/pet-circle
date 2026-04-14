@@ -101,13 +101,15 @@ export function normalizeRecognitionBullets(data: DashboardData): RecognitionBul
     bullets.push({ icon: "💉", label: "0 preventive care items tracked" });
   }
 
-  // 3. Diet — use backend diet bullet if available, else generic
+  // 3. Diet — use backend diet bullet if available, else derive from diet_summary
   const dietBullet = backendBullets.find((b) => {
     const v = b.label.toLowerCase();
     return v.includes("diet") || v.includes("food") || v.includes("nutrition") || v.includes("kibble") || v.includes("cup") || v.includes("supplement") || v.includes("🍽️");
   });
   if (dietBullet) {
     bullets.push({ icon: dietBullet.icon || "🍽️", label: dietBullet.label });
+  } else if ((data.diet_summary?.macros?.length ?? 0) > 0) {
+    bullets.push({ icon: "🍽️", label: "Diet items tracked" });
   } else {
     bullets.push({ icon: "🍽️", label: "No diet entries recorded" });
   }

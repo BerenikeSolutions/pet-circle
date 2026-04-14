@@ -1244,6 +1244,7 @@ async def analyze_nutrition(db: Session, pet_id) -> dict:
         "diet_summary": diet_summary,
         "analysis_context": f"Analysis based on {breed_label} breed profile{condition_context}",
         "gap_count": gap_count,
+        "has_diet_items": bool(diet_items),
     }
 
 

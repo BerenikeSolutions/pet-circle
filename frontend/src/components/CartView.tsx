@@ -12,12 +12,13 @@ interface CartViewProps {
   onUpdateQuantity: (id: string, quantity: number) => void;
   onRemoveItem: (id: string) => void;
   onProceedToCheckout: () => void;
-  onAddBySku: (skuId: string, name: string, price: number, mrp: number, icon: string, section: string, quantity?: number, medicine_type?: string) => void;
+  onAddBySku: (skuId: string, name: string, price: number, mrp: number, icon: string, section: string, quantity?: number, medicine_type?: string, sub?: string) => void;
 }
 
 export interface CartItem {
   id: string;
   name: string;
+  sub?: string;
   price: number;
   mrp?: number;
   quantity: number;
@@ -31,6 +32,7 @@ interface SearchResult {
   sku_id: string;
   category: "food" | "supplement" | "medicine";
   brand_name: string;
+  product_name: string;
   name: string;
   pack_size: string;
   mrp: number;
@@ -102,25 +104,29 @@ export default function CartView({
     };
   }, [searchQuery, runSearch]);
 
-  // Group search results by brand_name — show one row per brand
+  // Group search results by product identity (brand + product_name) — one row per distinct product
   const groupedResults = useMemo(() => {
     const groups: Record<string, SearchResult[]> = {};
     for (const r of searchResults) {
-      if (!groups[r.brand_name]) groups[r.brand_name] = [];
-      groups[r.brand_name].push(r);
+      const key = `${r.brand_name}||${r.product_name}`;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(r);
     }
-    return Object.entries(groups).map(([brand, skus]) => ({ brand, skus }));
+    return Object.entries(groups).map(([key, skus]) => {
+      const [brand, productName] = key.split("||");
+      return { brand, productName, skus };
+    });
   }, [searchResults]);
 
-  // Open the variant picker for the chosen brand
+  // Open the variant picker for the chosen product group
   const handleSearchGroupAdd = useCallback((skus: SearchResult[]) => {
     const products: ResolvedProduct[] = skus.map((r) => ({
       sku_id: r.sku_id,
       category: r.category,
       brand_name: r.brand_name,
       // food uses product_line for display; supplement/medicine use product_name
-      product_line: r.category === "food" ? r.name : undefined,
-      product_name: r.category !== "food" ? r.name : undefined,
+      product_line: r.category === "food" ? r.product_name : undefined,
+      product_name: r.category !== "food" ? r.product_name : undefined,
       pack_size: r.pack_size,
       mrp: r.mrp,
       discounted_price: r.discounted_price,
@@ -147,7 +153,13 @@ export default function CartView({
       : (product?.product_name || product?.brand_name || skuId);
     const price = product?.discounted_price ?? 0;
     const mrp = product?.mrp ?? price;
-    onAddBySku(skuId, name, price, mrp, icon, "Search", quantity, product?.medicine_type);
+    // For supplements/medicines: sub = "Brand · pack_size"; for food sub = pack_size
+    const sub = product?.category === "food"
+      ? product?.pack_size
+      : (product?.brand_name && product?.pack_size
+          ? `${product.brand_name} · ${product.pack_size}`
+          : product?.pack_size);
+    onAddBySku(skuId, name, price, mrp, icon, "Search", quantity, product?.medicine_type, sub);
     setSelectorOpen(false);
     setSearchQuery("");
     setSearchResults([]);
@@ -265,10 +277,10 @@ export default function CartView({
             </div>
           )}
 
-          {/* Show one row per brand — clicking Add opens the variant popup */}
+          {/* Show one row per product — clicking Add opens the variant popup */}
           {groupedResults.length > 0 && (
             <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
-              {groupedResults.map(({ brand, skus }) => {
+              {groupedResults.map(({ brand, productName, skus }) => {
                 const firstSku = skus[0];
                 const allOutOfStock = skus.every((s) => !s.in_stock);
                 const alreadyInCart = skus.some((s) => cartSkuIds.has(s.sku_id));
@@ -277,7 +289,7 @@ export default function CartView({
                 const hasDiscount = maxMrp > minPrice;
                 return (
                   <div
-                    key={brand}
+                    key={`${brand}||${productName}`}
                     style={{
                       display: "flex",
                       alignItems: "center",
@@ -287,9 +299,16 @@ export default function CartView({
                     }}
                   >
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--t1)" }}>{brand}</div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--t1)" }}>{productName || brand}</div>
                       <div style={{ fontSize: 11, color: "var(--t3)" }}>
-                        {(() => { const available = skus.filter(s => s.in_stock).length; return skus.length === 1 ? firstSku.pack_size : available === 1 ? `1 option available` : `${available} options available`; })()}
+                        {brand}
+                        {(() => {
+                          const available = skus.filter(s => s.in_stock).length;
+                          const optionText = skus.length === 1
+                            ? firstSku.pack_size
+                            : available === 1 ? `1 option` : `${available} options`;
+                          return ` · ${optionText}`;
+                        })()}
                       </div>
                       <div style={{ display: "flex", alignItems: "baseline", gap: 5, marginTop: 2 }}>
                         {hasDiscount && (
@@ -340,6 +359,11 @@ export default function CartView({
               <div className="cart-row" key={item.id}>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 14, fontWeight: 700, color: "var(--t1)" }}>{item.name}</div>
+                  {item.sub && (
+                    <div style={{ fontSize: 11, color: "var(--t3)", marginTop: 1 }}>
+                      {item.sub}
+                    </div>
+                  )}
                   {item.note && (
                     <div style={{ fontSize: 11, color: "#E65100", marginTop: 2, fontStyle: "italic", lineHeight: 1.4 }}>
                       ⚠ {item.note}

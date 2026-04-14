@@ -31,6 +31,7 @@ interface NutritionAnalysis {
   vitamins: NutritionNutrient[];
   minerals: NutritionNutrient[];
   others: NutritionNutrient[];
+  has_diet_items?: boolean;
 }
 
 const NOTE_COLOR: Record<"green" | "amber" | "red", string> = {
@@ -117,18 +118,12 @@ export default function DietAnalysisCard({ token, compact = false }: DietAnalysi
     .sort((a, b) => (PRIORITY_RANK[a.priority] ?? 3) - (PRIORITY_RANK[b.priority] ?? 3))
     .slice(0, 3);
 
-  if (loading) {
-    return (
-      <div className={compact ? undefined : "card"}>
-        <div className="sec-lbl">Diet Analysis</div>
-        <div style={{ color: "var(--t3)", fontSize: 13, padding: "12px 0" }}>Analysing diet...</div>
-      </div>
-    );
-  }
-
   const hasAnyMacroValue = macros.some((m) => m.pct > 0);
 
+  if (loading) return null;
+
   if (!nutrition || !hasAnyMacroValue) {
+    const hasDietItems = nutrition?.has_diet_items ?? false;
     return (
       <div className={compact ? undefined : "card"}>
         <div className="sec-lbl">Diet Analysis</div>
@@ -140,8 +135,9 @@ export default function DietAnalysisCard({ token, compact = false }: DietAnalysi
             lineHeight: 1.5,
           }}
         >
-          Not enough diet information yet. Log meals and portion sizes to see
-          the breakdown across calories, protein, fat and fibre.
+          {hasDietItems
+            ? "Add portion sizes to your food items to see the calorie and macro breakdown."
+            : "Not enough diet information yet. Log meals and portion sizes to see the breakdown across calories, protein, fat and fibre."}
         </div>
       </div>
     );
