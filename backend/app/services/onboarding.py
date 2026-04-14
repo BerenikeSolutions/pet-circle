@@ -61,8 +61,7 @@ from app.models.preventive_master import PreventiveMaster
 from app.models.preventive_record import PreventiveRecord
 from app.models.reminder import Reminder
 from app.models.user import User
-from app.services.diet_service import HOMEMADE_KW, add_diet_item, split_diet_items_by_type
-from app.services.nutrition_service import get_diet_summary
+from app.services.diet_service import HOMEMADE_KW, add_diet_item
 from app.services.preventive_seeder import seed_preventive_master
 from app.utils.breed_normalizer import normalize_breed, normalize_breed_with_ai
 from app.utils.date_utils import (
@@ -4911,304 +4910,38 @@ async def _finalize_onboarding(db, user, send_fn, declined_documents: bool = Fal
     await send_fn(db, mobile, care_plan_msg)
 
 
-async def _ai_supplement_recommendation(
-    pet,
-    diet_items: list | None,
-    conditions: list | None,
-) -> str | None:
-    """
-    Generate a personalised supplement recommendation via GPT.
-
-    Returns a single conversational sentence (no bullet points, no headers)
-    or None on failure so the caller can use a deterministic fallback.
-    """
-    try:
-        client = _get_openai_onboarding_client()
-
-        # Build compact context from available data.
-        name = pet.name
-        species = (pet.species or "dog").lower()
-        breed = pet.breed or "unknown breed"
-        age = pet.age_text or (str(pet.dob) if pet.dob else "unknown age")
-        gender = getattr(pet, "gender", None) or "unknown"
-        weight = getattr(pet, "weight_kg", None)
-        weight_line = f"{weight} kg" if weight else "unknown"
-
-        split_items = split_diet_items_by_type(diet_items or [])
-        food_labels = split_items["foods"] + split_items["other"]
-        existing_supplements = split_items["supplements"]
-        food_summary = ", ".join(food_labels) if food_labels else "not provided"
-        supplements_summary = ", ".join(existing_supplements) if existing_supplements else "none"
-
-        active_conditions = [c for c in (conditions or []) if getattr(c, "name", None)]
-        condition_names = ", ".join(c.name for c in active_conditions) if active_conditions else "none"
-
-        already_taking_clause = ""
-        if existing_supplements:
-            already_taking_clause = (
-                f"IMPORTANT: The pet is ALREADY taking these supplements: {supplements_summary}. "
-                f"Do NOT recommend any supplement the pet is already taking. "
-                f"Only recommend supplements they are NOT currently on. "
-            )
-
-        prompt = (
-            f"STRICT RULE: Never mention any supplement brand or product name "
-            f"(e.g. do NOT say 'Nordic Naturals', 'Zesty Paws', 'Nutramax', or any brand). "
-            f"Only use the micronutrient name (e.g. Omega-3, Vitamin D3, probiotics).\n\n"
-            f"Pet profile:\n"
-            f"Name: {name}\n"
-            f"Species: {species}\n"
-            f"Breed: {breed}\n"
-            f"Age: {age}\n"
-            f"Gender: {gender}\n"
-            f"Weight: {weight_line}\n"
-            f"Current diet/food: {food_summary}\n"
-            f"Current supplements: {supplements_summary}\n"
-            f"Health conditions: {condition_names}\n\n"
-            f"{already_taking_clause}"
-            f"Write ONE short, warm WhatsApp message sentence (max 30 words) "
-            f"identifying 1-2 micronutrients that are likely missing from this pet's diet "
-            f"based on their breed, age, and health conditions, and briefly explain why those "
-            f"micronutrients matter for this specific pet. "
-            f"No bullet points. No headers. No asterisks. No markdown. "
-            f"Start with 'We'd suggest' or 'Based on [name]'s profile, we'd recommend'."
-        )
-
-        async def _call() -> str:
-            response = await client.messages.create(
-                model=OPENAI_QUERY_MODEL,
-                temperature=0.4,
-                max_tokens=80,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return (response.content[0].text or "").strip()
-
-        result = await retry_openai_call(_call)
-        return result or None
-    except Exception as e:
-        logger.warning("AI supplement recommendation failed: %s", str(e))
-        return None
-
-
 async def _generate_care_plan_message(
-    pet, diet_count: int, supplement_count: int,
-    record_count: int, docs_uploaded: int,
+    pet, diet_count: int = 0, supplement_count: int = 0,
+    record_count: int = 0, docs_uploaded: int = 0,
     vaccine_count: int = 0,
     other_preventive_count: int = 0,
-    conditions: list[Condition] | None = None,
+    conditions: list | None = None,
     diet_items: list | None = None,
     db: Session | None = None,
 ) -> str:
-    """
-    Generate the "care plan ready" message.
-
-    Supplement recommendation is derived from the same diet-summary
-    micronutrient gaps used by the dashboard quick fixes. Falls back to
-    AI generation, then deterministic rules if needed.
-
-    Follows flow.txt prompt rules:
-    - Open with "[pet name]'s care plan is ready! 🐾"
-    - Reference only the information that was shared
-    - Always make supplement recommendations based on available data
-    - For anything not shared, add a one-line nudge
-    - No health judgements, no headers, no bullet points
-    - Warm, conversational, WhatsApp-friendly tone
-    """
-    # Build flags for deterministic variation selection.
-    split_items = split_diet_items_by_type(diet_items or [])
-    # "What's Found" (WhatsApp) references ALL food items — both packaged and homemade.
-    # Note: care plan dashboard only shows packaged items (handled by care_plan_engine).
-    has_food = bool(split_items["foods"])  # includes both packaged and homemade
-    has_preventive = record_count > 0
-    has_breed = bool(pet.breed)
-    has_age = bool(pet.age_text or pet.dob)
-
-    # Build "x vaccines and y preventive care items" label for care plan message.
+    """Generate the unified "care plan ready" message."""
     if vaccine_count > 0 and other_preventive_count > 0:
-        _preventive_label = (
-            f"{vaccine_count} vaccine{'s' if vaccine_count != 1 else ''} & "
+        preventive_label = (
+            f"{vaccine_count} vaccine{'s' if vaccine_count != 1 else ''} and "
             f"{other_preventive_count} preventive care item"
             f"{'s' if other_preventive_count != 1 else ''}"
         )
     elif vaccine_count > 0:
-        _preventive_label = f"{vaccine_count} vaccine{'s' if vaccine_count != 1 else ''}"
+        preventive_label = f"{vaccine_count} vaccine{'s' if vaccine_count != 1 else ''}"
     else:
-        _preventive_label = (
+        preventive_label = (
             f"{record_count} preventive care item{'s' if record_count != 1 else ''}"
         )
-    active_conditions = [c for c in (conditions or []) if getattr(c, "name", None)]
-    has_conditions = len(active_conditions) > 0
-    condition_names = ", ".join(c.name for c in active_conditions[:3])
-    condition_count = len(active_conditions)
+
     name = pet.name
-
-    # Build condition summary line.
-    if has_conditions:
-        condition_line = (
-            f"We noted {condition_count} health condition{'s' if condition_count != 1 else ''}"
-            f" — {condition_names}. We've included some questions worth raising with your vet."
-        )
-    else:
-        condition_line = "No active health conditions flagged."
-
-    # Keep chat supplement recommendations aligned with dashboard quick fixes
-    # by deriving from the same missing_micros payload first.
-    supplement_rec = None
-    if has_food and db is not None:
-        try:
-            diet_summary = await get_diet_summary(db, pet)
-        except Exception as e:
-            logger.warning("Diet summary lookup failed for care-plan message: %s", str(e))
-            diet_summary = {"missing_micros": []}
-
-        missing_micros = (diet_summary or {}).get("missing_micros") or []
-        existing_supp_labels = {
-            label.lower() for label in split_items["supplements"] if label
-        }
-
-        micro_aliases = {
-            "omega-3": ("omega", "fish oil", "omega 3", "salmon oil"),
-            "probiotics": ("probiotic", "gut", "lactobacillus", "fortiflora"),
-            "glucosamine": ("glucosamine", "chondroitin", "joint"),
-            "vitamin d3": ("vitamin d3", "d3", "calcitriol"),
-            "vitamin e": ("vitamin e", "tocopherol"),
-        }
-
-        def _already_covered_by_existing_supplements(micro_name: str) -> bool:
-            aliases = micro_aliases.get(micro_name.lower(), (micro_name.lower(),))
-            return any(
-                any(alias in existing for alias in aliases)
-                for existing in existing_supp_labels
-            )
-
-        top_micros = [
-            m for m in missing_micros
-            if m.get("name") and not _already_covered_by_existing_supplements(str(m.get("name", "")).strip())
-        ][:2]
-        top_names = [str(m.get("name", "")).strip() for m in top_micros]
-        if top_names:
-            age_basis = f"{name}'s age & conditions" if has_conditions else f"{name}'s age"
-            if len(top_names) == 1:
-                supplement_rec = (
-                    f"{name}'s current diet is wholesome. Based on {age_basis}, "
-                    f"{top_names[0]} may be missing."
-                )
-            else:
-                supplement_rec = (
-                    f"{name}'s current diet is wholesome. Based on {age_basis}, "
-                    f"{top_names[0]} and {top_names[1]} may be missing."
-                )
-        elif missing_micros and existing_supp_labels:
-            supplement_rec = (
-                f"{name} is already on a strong supplement routine, so we don't suggest "
-                f"adding anything new right now."
-            )
-
-    # If dashboard-driven gaps are unavailable, fall back to AI then deterministic rules.
-    if not supplement_rec:
-        supplement_rec = await _ai_supplement_recommendation(pet, diet_items, conditions)
-    if not supplement_rec:
-        # Check which supplements the user is already giving to avoid
-        # recommending something they already take.
-        existing_supp_labels = {
-            label.lower() for label in split_items["supplements"] if label
-        }
-
-        fallback_candidates = [
-            ("Omega-3", ("omega", "fish oil", "omega 3")),
-            ("a probiotic", ("probiotic", "gut", "lactobacillus")),
-            ("calcium", ("calcium",)),
-            ("a joint supplement", ("glucosamine", "chondroitin", "joint")),
-        ]
-
-        missing_candidates: list[str] = []
-        for display_name, aliases in fallback_candidates:
-            if any(any(alias in existing for alias in aliases) for existing in existing_supp_labels):
-                continue
-            missing_candidates.append(display_name)
-
-        if not missing_candidates:
-            supplement_rec = (
-                f"{name} is already on a strong supplement routine, so we don't suggest "
-                f"adding anything new right now."
-            )
-        elif len(missing_candidates) == 1:
-            fallback_supp = missing_candidates[0]
-            if has_food:
-                supplement_rec = (
-                    f"{name}'s current diet is wholesome, based on {name}'s "
-                    f"age & conditions we recommend adding {fallback_supp}"
-                )
-            else:
-                supplement_rec = (
-                    f"We'd suggest adding {fallback_supp} based on {name}'s "
-                    f"age and breed for coat health, joint support, and overall immunity."
-                )
-        else:
-            fallback_supp = f"{missing_candidates[0]} & {missing_candidates[1]}"
-            if has_food:
-                supplement_rec = (
-                    f"{name}'s current diet is wholesome, based on {name}'s "
-                    f"age & conditions we recommend adding {fallback_supp}"
-                )
-            else:
-                supplement_rec = (
-                    f"We'd suggest adding {fallback_supp} based on {name}'s "
-                    f"age and breed for coat health, joint support, and overall immunity."
-                )
-
-    if has_conditions and has_food and has_preventive:
-        # Variation 1: Conditions + food + preventive shared.
-        return (
-            f"{name}'s care plan is ready! 🐾 Based on {name}'s health analysis, life stage and current diet.\n\n"
-            f"{condition_line}\n\n"
-            f"We've logged {_preventive_label} for {name}.\n\n"
-            f"{supplement_rec}"
-        )
-    elif has_food and has_preventive:
-        # Variation 2: No conditions, food and preventive shared.
-        return (
-            f"{name}'s care plan is ready! 🐾 Based on {name}'s health analysis, "
-            f"life stage and current diet.\n\n"
-            f"{condition_line}\n\n"
-            f"We've logged {_preventive_label} for {name}.\n\n"
-            f"{supplement_rec}"
-        )
-    elif has_food and not has_preventive:
-        # Variation 3: Food shared, preventive not shared.
-        return (
-            f"{name}'s care plan is ready! 🐾\n\n"
-            f"{condition_line}\n\n"
-            f"We don't have {name}'s preventive care details yet — adding these "
-            f"would give us a more complete health picture.\n\n"
-            f"{supplement_rec}"
-        )
-    elif has_breed and has_age:
-        # Variation 4: No food, no preventive, but age and breed available.
-        return (
-            f"{name}'s care plan is ready! 🐾\n\n"
-            f"{condition_line}\n\n"
-            f"{supplement_rec}\n\n"
-            f"To make this analysis even more personalised, sharing {name}'s current "
-            f"diet and preventive care routine would give us a much fuller picture."
-        )
-    elif not has_food and not has_preventive:
-        # Variation 5: Minimal data — no supplement rec since we have too little context.
-        return (
-            f"{name}'s care plan is ready! 🐾\n\n"
-            f"{condition_line}\n\n"
-            f"To give you a fuller picture, we'd love to know more about {name}'s "
-            f"current diet and preventive care routine — adding these would help us "
-            f"make the analysis much more personalised for {name}."
-        )
-    else:
-        # Generic fallback.
-        return (
-            f"{name}'s care plan is ready! 🐾\n\n"
-            f"We've set up {name}'s health profile based on the information shared. "
-            f"The more details you add over time — diet, preventive care, health records "
-            f"— the more personalised the care plan becomes."
-        )
+    return (
+        f"{name}'s care plan is ready! 🐾\n"
+        f"Based on {name}'s health, life stage and current diet we've put together "
+        f"a personalised care plan.\n\n"
+        f"We've logged {preventive_label} for {name}.\n\n"
+        f"We've also added recommendations on diet and nutrition, along with health "
+        f"insights and guidance on what to ask your vet."
+    )
 
 
 async def _ai_check_weight(

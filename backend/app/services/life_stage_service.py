@@ -30,17 +30,20 @@ from app.utils.retry import retry_openai_call
 logger = logging.getLogger(__name__)
 
 _ALLOWED_TRAIT_COLORS = {"green", "yellow", "red", "neutral"}
-_MAX_TRAITS = 5
+_MAX_TRAITS = 3
 _MAX_ESSENTIAL_CARE_ITEMS = 2
 _GENERIC_TRAIT_TOKENS = {
     "energetic", "active", "playful", "friendly", "loyal", "curious", "social",
     "calm", "happy", "alert",
+    "metabolism", "appetite", "vision decline", "slower",
+    "supplement", "supplements", "nutrition", "diet", "portion", "kibble", "feed",
 }
 _STAGE_SPECIFIC_TOKENS = {
-    "joint", "mobility", "dental", "weight", "bcs", "metabolism", "muscle",
+    "joint", "mobility", "dental", "weight", "bcs", "muscle",
     "digestion", "stool", "coat", "heart", "kidney", "immunity", "mature",
     "senior", "puppy", "junior", "adult", "hormone", "stiff", "recovery",
-    "supplement", "nutrition", "portion",
+    "screening", "screen", "panel", "cardiac", "thyroid", "hip", "elbow",
+    "patella", "ocular", "respiratory", "gait", "lameness",
 }
 _openai_client = None
 
@@ -121,17 +124,30 @@ async def _generate_life_stage_traits_gpt(
     safe_breed = (breed or "mixed breed").strip()
 
     system_prompt = (
-        "Generate age-and-stage-specific traits for a pet in the provided life stage. "
-        "Respond with ONLY valid JSON object with keys: "
-        "traits and essential_care. "
-        "Rules: traits must be a list of up to 5 items and each item must have "
-        "{label, color}. color must be one of: green, yellow, red, neutral. "
-        "Do not return generic traits like energetic/playful/friendly unless tied to "
-        "an age-linked physiological or clinical signal. "
-        "Use non-alarming language that explains body/behavior changes and what to watch. "
-        "essential_care must be a list of up to 2 items and each item must have "
-        "{icon, title, detail}. Keep detail to one concise line. "
-        "Every essential_care detail MUST explicitly reference one documented risk fact provided by the user prompt."
+        "You generate up to 3 breed- and life-stage-specific watch-outs for a pet.\n"
+        "Return ONLY a valid JSON object with keys: traits, essential_care.\n\n"
+        "traits: list of up to 3 items. Each item {label, color}. "
+        "color must be one of: green, yellow, red, neutral.\n\n"
+        "Each trait MUST be either:\n"
+        "  (A) a HOME WATCH-OUT — something the parent can observe at home that may "
+        "signal a breed- or stage-linked issue (e.g., gait change, breathing pattern "
+        "shift, localized weight change, behavioural change). Frame as what to look "
+        "for and what it might signal.\n"
+        "  (B) a VET SCREENING — a clinical check this breed is predisposed to at "
+        "this life stage and cannot be observed at home (cardiac check, thyroid "
+        "panel, eye screening, hip/elbow imaging, etc.). Frame as what to screen "
+        "for and why it matters now for this breed.\n\n"
+        "Mix (A) and (B) based on breed predispositions. Do NOT label items as "
+        "\"home\" or \"vet\" — write each as a single clean watch-out statement.\n\n"
+        "DO NOT include:\n"
+        "  - Normal aging observations (energy, metabolism, appetite, vision decline)\n"
+        "  - Supplement, diet, or nutrition recommendations\n"
+        "  - Generic advice applicable to all dogs/cats\n"
+        "  - Traits like energetic / playful / friendly / loyal\n\n"
+        "Language: calm, specific, non-generic, non-alarming.\n\n"
+        "essential_care: list of up to 2 items {icon, title, detail}; one concise "
+        "line per detail; each detail MUST explicitly reference one documented risk "
+        "fact from the user prompt."
     )
 
     user_prompt = (
