@@ -6,6 +6,8 @@ No other file should hardcode these values.
 Import from this module to ensure single source of truth.
 """
 
+import os
+
 # --- Application Branding ---
 APP_BRAND_NAME: str = "PetCircle"
 APP_BRAND_SLUG: str = "petcircle"
@@ -174,7 +176,7 @@ RATE_LIMIT_WINDOW_SECONDS: int = 60
 # AI MODEL SWITCH — change only AI_PROVIDER to swap provider/tier everywhere.
 # Valid values: "claude" | "openai"
 # =============================================================================
-AI_PROVIDER: str = "claude"
+AI_PROVIDER: str = os.getenv("AI_PROVIDER", "claude")
 
 # --- Claude model IDs (Anthropic) ---
 _CLAUDE_EXTRACTION_MODEL: str = "claude-opus-4-6"    # Opus: complex document parsing

@@ -139,6 +139,13 @@ class Settings(BaseSettings):
     # Optional — only used by /admin/chat-link. App runs without it.
     WHATSAPP_BUSINESS_PHONE: str | None = None
 
+    # --- AI Provider ---
+    # Controls which AI backend is used across all services.
+    # "claude" → Anthropic (claude-opus-4-6 / claude-sonnet-4-6)
+    # "openai" → OpenAI (gpt-4.1)
+    # Must match the AI_PROVIDER value in constants.py (both read the same env var).
+    AI_PROVIDER: str = "claude"
+
     # --- Feature Flags ---
     # Set to 'true' to enable AI-driven conversational order flow.
     # Requires ANTHROPIC_API_KEY. Falls back to deterministic state machine if either
