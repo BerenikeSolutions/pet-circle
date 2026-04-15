@@ -406,12 +406,16 @@ def _fetch_diagnostic_results_for_documents(
 
 
 def _fetch_documents(db: Session, pet_id: Any) -> list[Document]:
-    """Load successful documents for one pet, newest event first."""
+    """Load successful and partially-extracted documents for one pet, newest event first.
+
+    'partially_extracted' documents have metadata (category, date, name) but no
+    preventive items — they still appear in the records view.
+    """
     return (
         db.query(Document)
         .filter(
             Document.pet_id == pet_id,
-            Document.extraction_status == "success",
+            Document.extraction_status.in_(("success", "partially_extracted")),
         )
         .order_by(Document.event_date.desc().nullslast())
         .all()
@@ -419,12 +423,16 @@ def _fetch_documents(db: Session, pet_id: Any) -> list[Document]:
 
 
 def _fetch_failed_documents(db: Session, pet_id: Any) -> list[Document]:
-    """Load failed documents for one pet, most recently uploaded first."""
+    """Load failed and rejected documents for one pet, most recently uploaded first.
+
+    'rejected' documents (not pet-related, or pet name mismatch) are surfaced here
+    alongside failed ones so the user can see why a document was not accepted.
+    """
     return (
         db.query(Document)
         .filter(
             Document.pet_id == pet_id,
-            Document.extraction_status == "failed",
+            Document.extraction_status.in_(("failed", "rejected")),
         )
         .order_by(Document.created_at.desc())
         .all()
@@ -594,6 +602,8 @@ async def get_records(db: Session, pet: Pet) -> dict[str, Any]:
             "id": str(doc.id),
             "title": doc.document_name or doc.file_path.split("/")[-1],
             "uploaded_at": doc.created_at.isoformat() if doc.created_at else None,
+            "status": doc.extraction_status,
+            "rejection_reason": doc.rejection_reason,
         }
         for doc in failed_documents
     ]

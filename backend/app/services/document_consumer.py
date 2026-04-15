@@ -49,6 +49,7 @@ _MAX_ATTEMPTS = 3
 _RETRY_DELAY_SECONDS = 5
 
 _stop_event: Optional[asyncio.Event] = None
+_consumer_task: Optional[asyncio.Task] = None
 
 
 def _prefetch_count() -> int:
@@ -193,6 +194,7 @@ async def start_consuming() -> None:
     _stop_event = asyncio.Event()
     prefetch = _prefetch_count()
 
+    connection = None
     try:
         # Separate connection from the publisher so QoS settings are isolated.
         connection = await aio_pika.connect_robust(url)
@@ -226,6 +228,17 @@ async def start_consuming() -> None:
         logger.info("[consumer] Shutdown signal received — closing consumer connection.")
         await connection.close()
 
+    except asyncio.CancelledError:
+        # Task was cancelled during shutdown (e.g. Render redeploy).
+        # Close the connection if it was established before yielding cancellation.
+        logger.info("[consumer] Consumer task cancelled — shutting down gracefully.")
+        if connection and not connection.is_closed:
+            try:
+                await connection.close()
+            except Exception:
+                pass
+        raise
+
     except Exception as exc:
         logger.error("[consumer] Consumer crashed: %s", exc, exc_info=True)
 
@@ -235,9 +248,12 @@ def stop() -> None:
     Signal the consumer to stop cleanly.
 
     Called during FastAPI shutdown (lifespan shutdown hook).
-    The in-flight message handler is allowed to finish before the
-    connection closes.
+    Sets the stop event (for a running consumer) and cancels the task
+    (handles the case where the consumer is still connecting).
     """
     if _stop_event and not _stop_event.is_set():
         _stop_event.set()
         logger.info("[consumer] Stop signal sent.")
+    if _consumer_task and not _consumer_task.done():
+        _consumer_task.cancel()
+        logger.info("[consumer] Consumer task cancelled.")

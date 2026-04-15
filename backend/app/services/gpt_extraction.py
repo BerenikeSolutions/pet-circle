@@ -521,6 +521,10 @@ def _resolve_document_category(
     """Prefer inferred category when GPT returned blank, Other, or a coarse legacy value.
 
     Rules (in priority order):
+    0. If GPT explicitly returned "Prescription", trust it unless it contradicts
+       a VERY strong lab-report signal (like "urine culture" in the name, which
+       is a diagnostic test, not a prescription). This protects prescriptions
+       that mention blood/lab tests from being misclassified.
     1. Structural prescription signals (clinical_exam populated, or any condition
        extracted) force "Prescription" — these are prescription-only per the
        extraction prompt and beat any GPT category, including "Blood Report"
@@ -541,6 +545,16 @@ def _resolve_document_category(
     combined_norm = re.sub(r"[_\-]", " ", combined)
     # Filename-only normalised string for word-boundary checks (standalone "blood").
     filename_norm = re.sub(r"[_\-]", " ", os.path.basename(file_path or "").lower())
+
+    # Rule 0: If GPT explicitly said "Prescription", protect it from most overrides.
+    # Only allow DIAGNOSTIC TESTS (not "blood" which could be an ordered test) to override.
+    if raw_category == "Prescription":
+        # Urine culture / urinalysis are diagnostic TEST RESULTS, not prescription orders.
+        # These override prescription classification.
+        if any(kw in combined_norm for kw in ("urine culture", "urinalysis", "urine test", "urine report")):
+            return "Urine Report"
+        # Otherwise keep the explicit "Prescription" classification from GPT.
+        return "Prescription"
 
     # Lab-report keyword signals take precedence over structural prescription
     # heuristics.  A urine culture that extracts conditions (e.g. E. coli) must
@@ -2714,7 +2728,6 @@ async def extract_and_process_document(
         # --- Step 2: Validate and normalize ---
         extracted_items, document_name, extracted_pet_name, metadata = _validate_extraction_dict(extraction_result, file_path=document.file_path)
         results["document_type"] = metadata["document_type"]
-        results["document_category"] = metadata["document_category"]
         results["diagnostic_summary"] = metadata["diagnostic_summary"]
         results["diagnostic_values"] = metadata.get("diagnostic_values", [])
         results["doctor_name"] = metadata["doctor_name"]
@@ -2740,6 +2753,8 @@ async def extract_and_process_document(
             clinic_name=metadata.get("clinic_name"),
             diagnostic_values=metadata.get("diagnostic_values"),
         )
+        # Set results["document_category"] to the RESOLVED category, not the raw GPT output.
+        # This ensures WhatsApp message and DB state stay in sync.
         results["document_category"] = document_category
 
         extracted_items = _derive_blood_test_fallback_items(
@@ -2790,14 +2805,27 @@ async def extract_and_process_document(
                     except ValueError:
                         pass
         if not event_dates and document_category == "Prescription":
-            # Prescription with no preventive items — try diagnosed_at from conditions.
+            # Prescription with no preventive items — try diagnosed_at and episode_dates from conditions.
+            # Note: GPT often puts the prescription date in episode_dates (as "date condition mentioned/treated")
+            # rather than in diagnosed_at (explicit diagnosis date).
             for cond in (metadata.get("conditions") or []):
+                # First try diagnosed_at (explicit diagnosis date)
                 diagnosed_at = cond.get("diagnosed_at") if isinstance(cond, dict) else None
                 if diagnosed_at:
                     try:
                         event_dates.append(parse_date(str(diagnosed_at)))
+                        continue  # Found a date, skip episode_dates for this condition
                     except ValueError:
                         pass
+                # Fallback to episode_dates if no diagnosed_at found
+                if not event_dates and isinstance(cond, dict):
+                    for episode_date_str in (cond.get("episode_dates") or []):
+                        if episode_date_str:
+                            try:
+                                event_dates.append(parse_date(str(episode_date_str)))
+                                break  # Found a date, move to next condition
+                            except ValueError:
+                                pass
 
         if filename_date:
             if not event_dates:

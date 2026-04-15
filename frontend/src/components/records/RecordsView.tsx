@@ -335,50 +335,82 @@ export default function RecordsView({ token, petName, onBack }: RecordsViewProps
           {renderContent()}
         </div>
 
-        {!loading && (data?.failed_documents?.length ?? 0) > 0 && (
-          <div style={{ marginTop: 20 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--t3)", letterSpacing: "0.5px", textTransform: "uppercase", marginBottom: 8 }}>
-              Failed to process ({data!.failed_documents.length})
-            </div>
-            {data!.failed_documents.map((doc: FailedDocument) => (
-              <div
-                key={doc.id}
-                className="card"
-                style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}
-              >
-                <span style={{ fontSize: 18, flexShrink: 0 }}>⚠️</span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: "var(--t1)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {doc.title}
+        {!loading && (data?.failed_documents?.length ?? 0) > 0 && (() => {
+          const failedOnly = data!.failed_documents.filter((d) => d.status !== "rejected");
+          const rejectedOnly = data!.failed_documents.filter((d) => d.status === "rejected");
+          return (
+            <div style={{ marginTop: 20 }}>
+              {rejectedOnly.length > 0 && (
+                <>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "var(--t3)", letterSpacing: "0.5px", textTransform: "uppercase", marginBottom: 8 }}>
+                    Not accepted ({rejectedOnly.length})
                   </div>
-                  <div style={{ fontSize: 11, color: "var(--t3)", marginTop: 2 }}>Couldn&apos;t be processed</div>
-                </div>
-              </div>
-            ))}
-            {retryMsg && (
-              <div style={{ fontSize: 13, color: "var(--t2)", padding: "8px 0", textAlign: "center" }}>{retryMsg}</div>
-            )}
-            <button
-              type="button"
-              onClick={handleRetryAll}
-              disabled={retrying}
-              style={{
-                width: "100%",
-                marginTop: 4,
-                padding: "10px",
-                borderRadius: 10,
-                border: "1px solid var(--border)",
-                background: retrying ? "var(--bg-app)" : "var(--white)",
-                color: retrying ? "var(--t3)" : "var(--brand)",
-                fontWeight: 700,
-                fontSize: 14,
-                cursor: retrying ? "default" : "pointer",
-              }}
-            >
-              {retrying ? "Retrying…" : "Retry processing"}
-            </button>
-          </div>
-        )}
+                  {rejectedOnly.map((doc: FailedDocument) => (
+                    <div
+                      key={doc.id}
+                      className="card"
+                      style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}
+                    >
+                      <span style={{ fontSize: 18, flexShrink: 0 }}>🚫</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: "var(--t1)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {doc.title}
+                        </div>
+                        <div style={{ fontSize: 11, color: "var(--t3)", marginTop: 2 }}>
+                          {doc.rejection_reason ?? "Document was not accepted"}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </>
+              )}
+              {failedOnly.length > 0 && (
+                <>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "var(--t3)", letterSpacing: "0.5px", textTransform: "uppercase", marginBottom: 8, marginTop: rejectedOnly.length > 0 ? 16 : 0 }}>
+                    Failed to process ({failedOnly.length})
+                  </div>
+                  {failedOnly.map((doc: FailedDocument) => (
+                    <div
+                      key={doc.id}
+                      className="card"
+                      style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}
+                    >
+                      <span style={{ fontSize: 18, flexShrink: 0 }}>⚠️</span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: "var(--t1)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {doc.title}
+                        </div>
+                        <div style={{ fontSize: 11, color: "var(--t3)", marginTop: 2 }}>Couldn&apos;t be processed</div>
+                      </div>
+                    </div>
+                  ))}
+                  {retryMsg && (
+                    <div style={{ fontSize: 13, color: "var(--t2)", padding: "8px 0", textAlign: "center" }}>{retryMsg}</div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleRetryAll}
+                    disabled={retrying}
+                    style={{
+                      width: "100%",
+                      marginTop: 4,
+                      padding: "10px",
+                      borderRadius: 10,
+                      border: "1px solid var(--border)",
+                      background: retrying ? "var(--bg-app)" : "var(--white)",
+                      color: retrying ? "var(--t3)" : "var(--brand)",
+                      fontWeight: 700,
+                      fontSize: 14,
+                      cursor: retrying ? "default" : "pointer",
+                    }}
+                  >
+                    {retrying ? "Retrying…" : "Retry processing"}
+                  </button>
+                </>
+              )}
+            </div>
+          );
+        })()}
 
         <button className="floater fl-home" onClick={onBack} type="button" aria-label="Go to dashboard" title="Go to dashboard">
           🏠

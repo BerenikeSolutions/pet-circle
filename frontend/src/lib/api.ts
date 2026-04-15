@@ -547,6 +547,8 @@ export interface FailedDocument {
   id: string;
   title: string;
   uploaded_at: string | null;
+  status?: "failed" | "rejected";
+  rejection_reason?: string | null;
 }
 
 export interface RecordsV2 {

@@ -82,8 +82,11 @@ async def _start_background_reconciliation() -> None:
     await queue_service.connect()
     # Start the in-process consumer as a background asyncio task.
     # Consumes document.extract and dashboard.precompute queues.
+    # Store the task reference so stop() can cancel it on shutdown.
     import asyncio
-    asyncio.create_task(document_consumer.start_consuming())
+    document_consumer._consumer_task = asyncio.create_task(
+        document_consumer.start_consuming()
+    )
 
 
 @app.on_event("shutdown")
