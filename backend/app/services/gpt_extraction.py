@@ -936,6 +936,7 @@ EXTRACTION_SYSTEM_PROMPT = (
     '      encounter or treatment dates found in the document for this condition. [] if none found.\n'
     '    - "medications": array of objects ([] if none) --- drugs/products prescribed TO TREAT this condition, each with:\n'
     '      - "name": string (medication/drug name)\n'
+    '      - "item_type": "medicine" | "supplement" --- classify as "medicine" if it is a pharmaceutical drug used to treat a condition (e.g., antibiotics, antifungals, steroids, antihistamines); classify as "supplement" if it is nutritional or supportive (e.g., omega-3, coat supplements, probiotics, vitamins, joint supplements). Use product knowledge if needed (e.g., Fur+, Nutricoat Advance+ → supplement).\n'
     '      - "dose": string or null\n'
     '      - "frequency": string or null (e.g., "Once daily", "Twice daily")\n'
     '      - "route": string or null (e.g., "oral", "topical", "injection")\n'
@@ -954,6 +955,7 @@ EXTRACTION_SYSTEM_PROMPT = (
     '    prescription whose clinical indication is not stated, enabling future linkage when more context is available.\n'
     '    Each with:\n'
     '    - "name": string (medication/drug name as written)\n'
+    '    - "item_type": "medicine" | "supplement" --- classify as "medicine" if it is a pharmaceutical drug used to treat a condition (e.g., antibiotics, antifungals, steroids, antihistamines); classify as "supplement" if it is nutritional or supportive (e.g., omega-3, coat supplements, probiotics, vitamins, joint supplements). Use product knowledge if needed (e.g., Fur+, Nutricoat Advance+ → supplement).\n'
     '    - "dose": string or null\n'
     '    - "frequency": string or null\n'
     '    - "route": string or null\n'
@@ -971,6 +973,7 @@ EXTRACTION_SYSTEM_PROMPT = (
     '  - "preventive_medications": array of objects ([] if none) --- preventive medicines used for '
     "deworming and/or flea/tick control even when no diagnosis is present, each with:\n"
     '    - "name": string (medicine/product name as written)\n'
+    '    - "item_type": "medicine" | "supplement" --- classify as "medicine" if it is a pharmaceutical drug (e.g., antiparasitic, antihelmintic medications); classify as "supplement" if it is nutritional or supportive. Use product knowledge if needed.\n'
     '    - "start_date": date string or null\n'
     '    - "prevention_targets": array containing one or both of "deworming", "flea_tick"\n'
     '    - "dose": string or null\n'
@@ -1103,6 +1106,10 @@ EXTRACTION_SYSTEM_PROMPT = (
     "- Drugs prescribed to treat a condition belong in that condition's medications[] array, not standalone_medications[].\n"
     "- Prescribed non-preventive medications (antibiotics, analgesics, antacids, etc.) must NEVER go into "
     "preventive_medications[]. They belong in conditions[].medications[] or standalone_medications[].\n"
+    "- MEDICATION/SUPPLEMENT CLASSIFICATION: Every prescribed medication must be classified as either \"medicine\" or \"supplement\" using the item_type field:\n"
+    "    * \"medicine\" → pharmaceutical drugs used to treat a condition (e.g., antibiotics, antifungals, steroids, antihistamines, antiparasitic medications, antihelmintic drugs, antipyretics, analgesics, antacids, etc.)\n"
+    "    * \"supplement\" → nutritional or supportive products (e.g., omega-3, coat supplements, probiotics, vitamins, joint supplements, bone supplements, calcium supplements, etc.). Use product knowledge if needed (e.g., Fur+, Nutricoat Advance+ → supplement).\n"
+    "  Always apply this classification to medications[] in conditions, standalone_medications[], and preventive_medications[].\n"
     "- For contacts: extract vet/specialist contact details when explicitly present.\n"
     "- Document category for vet-written documents: If the document is on a veterinary clinic's "
     "letterhead, has a doctor signature/stamp, contains Rx or Tr. markings, records clinical "
@@ -1596,6 +1603,8 @@ def _validate_extraction_dict(
         "extra_vaccines": [],
         "conditions": [],
         "preventive_medications": [],
+        "standalone_medications": [],
+        "recommendations": [],
         "contacts": [],
         "clinical_exam": None,
         "vet_diet_recommendations": [],
@@ -1623,6 +1632,12 @@ def _validate_extraction_dict(
         raw_preventive_medications = parsed.get("preventive_medications")
         if isinstance(raw_preventive_medications, list):
             metadata["preventive_medications"] = raw_preventive_medications
+        raw_standalone_meds = parsed.get("standalone_medications")
+        if isinstance(raw_standalone_meds, list):
+            metadata["standalone_medications"] = raw_standalone_meds
+        raw_recommendations = parsed.get("recommendations")
+        if isinstance(raw_recommendations, list):
+            metadata["recommendations"] = raw_recommendations
         raw_contacts = parsed.get("contacts")
         if isinstance(raw_contacts, list):
             metadata["contacts"] = raw_contacts
@@ -2288,6 +2303,56 @@ def _coerce_float(value) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+async def _save_supplement_as_diet_item(
+    db: Session,
+    pet: Pet,
+    document: Document,
+    medication: dict,
+    linked_condition: str | None = None,
+) -> None:
+    """
+    Route a supplement-classified medication to DietItem instead of ConditionMedication.
+
+    Converts a medication dict (with item_type="supplement") to a DietItem record
+    by delegating to the existing _save_vet_diet_items function.
+
+    Args:
+        db: SQLAlchemy session
+        pet: Pet object
+        document: Document object
+        medication: Medication dict with name, dose, frequency, etc.
+        linked_condition: Optional condition name if the supplement is for a specific condition
+    """
+    name = str(medication.get("name") or "").strip()[:200]
+    if not name:
+        return
+
+    # Build detail from dose, frequency, and notes
+    parts = []
+    if medication.get("dose"):
+        parts.append(str(medication["dose"]))
+    if medication.get("frequency"):
+        parts.append(str(medication["frequency"]))
+    if linked_condition:
+        parts.append(f"for {linked_condition}")
+    if medication.get("notes"):
+        parts.append(str(medication["notes"]))
+
+    detail = " · ".join(parts) if parts else ""
+
+    # Delegate to existing diet item saving function
+    await _save_vet_diet_items(
+        db=db,
+        pet=pet,
+        document=document,
+        vet_diet_recommendations=[{
+            "food_label": name,
+            "food_type": "supplement",
+            "detail": detail,
+        }],
+    )
 
 
 async def _save_vet_diet_items(
@@ -3151,6 +3216,24 @@ async def extract_and_process_document(
                     med_name = str(med.get("name") or "").strip()
                     if not med_name:
                         continue
+
+                    # Classify medication as medicine or supplement.
+                    item_type = str(med.get("item_type") or "medicine").strip().lower()
+                    if item_type not in ("medicine", "supplement"):
+                        item_type = "medicine"
+
+                    if item_type == "supplement":
+                        # Route supplements to DietItem instead of ConditionMedication
+                        try:
+                            await _save_supplement_as_diet_item(db, pet, document, med, condition_name)
+                        except Exception as exc:
+                            logger.warning(
+                                "Failed to save supplement '%s' as diet item for condition '%s': %s",
+                                med_name, condition_name, exc
+                            )
+                        continue  # Skip ConditionMedication for supplements
+
+                    # Medicines → condition_medications (existing path)
                     existing_med = (
                         db.query(ConditionMedication)
                         .filter(ConditionMedication.condition_id == condition_obj.id, ConditionMedication.name == med_name)
@@ -3215,6 +3298,91 @@ async def extract_and_process_document(
                     "Error storing extracted condition '%s': %s. document_id=%s",
                     condition_name, str(e), str(document_id),
                 )
+
+        # --- Store standalone medications ---
+        # Medications with no linked condition from the prescription.
+        # Supplements → diet_items. Medicines → condition_medications under a placeholder condition.
+        try:
+            raw_standalone_meds = metadata.get("standalone_medications") or []
+            if raw_standalone_meds:
+                # Upsert placeholder condition for medicines that have no named diagnosis.
+                # Per-pet upsert (not per-document) due to unique constraint (pet_id, name).
+                STANDALONE_CONDITION_NAME = "Prescription Medications"
+                standalone_condition = (
+                    db.query(Condition)
+                    .filter(Condition.pet_id == pet.id, Condition.name == STANDALONE_CONDITION_NAME)
+                    .first()
+                )
+                if not standalone_condition:
+                    standalone_condition = Condition(
+                        pet_id=pet.id,
+                        document_id=document.id,
+                        name=STANDALONE_CONDITION_NAME,
+                        diagnosis="Medications prescribed without a named diagnosis",
+                        condition_type="episodic",
+                        source="extraction",
+                    )
+                    db.add(standalone_condition)
+                    db.flush()
+
+                for med in raw_standalone_meds:
+                    if not isinstance(med, dict):
+                        continue
+                    med_name = str(med.get("name") or "").strip()
+                    if not med_name:
+                        continue
+                    item_type = str(med.get("item_type") or "medicine").strip().lower()
+                    if item_type not in ("medicine", "supplement"):
+                        item_type = "medicine"
+
+                    if item_type == "supplement":
+                        # Supplements → diet_items
+                        try:
+                            await _save_supplement_as_diet_item(db, pet, document, med, linked_condition=None)
+                        except Exception as exc:
+                            logger.warning("Failed to save standalone supplement '%s': %s", med_name, exc)
+                    else:
+                        # Medicines → condition_medications under placeholder condition
+                        try:
+                            existing = (
+                                db.query(ConditionMedication)
+                                .filter(
+                                    ConditionMedication.condition_id == standalone_condition.id,
+                                    ConditionMedication.name == med_name
+                                )
+                                .first()
+                            )
+                            med_end_date = None
+                            if med.get("end_date"):
+                                try:
+                                    _med_end = parse_date(str(med["end_date"]))
+                                    if _med_end.year >= 2015:
+                                        med_end_date = _med_end
+                                except Exception:
+                                    pass
+                            if not existing:
+                                db.add(ConditionMedication(
+                                    condition_id=standalone_condition.id,
+                                    name=med_name[:200],
+                                    dose=(str(med.get("dose"))[:100] if med.get("dose") else None),
+                                    frequency=(str(med.get("frequency"))[:100] if med.get("frequency") else None),
+                                    route=(str(med.get("route"))[:50] if med.get("route") else None),
+                                    end_date=med_end_date,
+                                    notes=(str(med.get("notes"))[:500] if med.get("notes") else None),
+                                ))
+                            elif med_end_date and not existing.end_date:
+                                existing.end_date = med_end_date
+                        except Exception as exc:
+                            logger.warning(
+                                "Error storing standalone medicine '%s' under placeholder condition: %s. document_id=%s",
+                                med_name, str(exc), str(document_id),
+                            )
+        except Exception as e:
+            db.rollback()
+            logger.warning(
+                "Error storing extracted standalone medications: %s. document_id=%s",
+                str(e), str(document_id),
+            )
 
         # --- Store extracted contacts (deduplicated) ---
         # Only process contacts from clinical documents. Lab/diagnostic reports
@@ -3424,6 +3592,8 @@ async def extract_and_process_document(
                 metadata.get("conditions")
                 or metadata.get("diagnostic_values")
                 or metadata.get("vaccination_details")
+                or metadata.get("standalone_medications")
+                or metadata.get("recommendations")
             )
             if has_metadata:
                 logger.warning(
