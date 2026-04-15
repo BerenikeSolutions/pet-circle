@@ -99,14 +99,19 @@ async def precompute_dashboard_enrichments(pet_id_str: str) -> None:
     # never share session state.
     # ------------------------------------------------------------------
 
-    async def _run_diet_summary() -> dict:
+    async def _run_diet_summary(analysis: dict) -> dict:
+        """Reformat a pre-computed nutrition analysis into the diet_summary shape.
+
+        Accepts the already-computed analysis dict from _run_nutrition_analysis so
+        analyze_nutrition() is not called a second time.
+        """
         db: Session = SessionLocal()
         try:
             pet = db.query(Pet).filter(Pet.id == pet_id).first()
             if not pet:
                 return {"macros": [], "missing_micros": []}
             from app.services.nutrition_service import get_diet_summary
-            result = await get_diet_summary(db, pet)
+            result = await get_diet_summary(db, pet, analysis=analysis)
             _upsert_insight(db, pet_id, "diet_summary", result)
             logger.info("precompute: diet_summary cached for pet=%s", pet_id_str)
             return result
@@ -131,15 +136,18 @@ async def precompute_dashboard_enrichments(pet_id_str: str) -> None:
         finally:
             db.close()
 
-    async def _run_nutrition_analysis() -> None:
+    async def _run_nutrition_analysis() -> dict:
+        """Compute and cache nutrition_analysis; returns the analysis for reuse by _run_diet_summary."""
         db: Session = SessionLocal()
         try:
             from app.services.nutrition_service import analyze_nutrition
             analysis = await analyze_nutrition(db, pet_id)
             _upsert_insight(db, pet_id, "nutrition_analysis", analysis)
             logger.info("precompute: nutrition_analysis cached for pet=%s", pet_id_str)
+            return analysis
         except Exception as exc:
             logger.warning("precompute: nutrition_analysis failed for pet=%s: %s", pet_id_str, exc)
+            return {}
         finally:
             db.close()
 
@@ -305,18 +313,21 @@ async def precompute_dashboard_enrichments(pet_id_str: str) -> None:
             db.close()
 
     try:
-        # Phase 1: run all independent enrichments in parallel.
-        # diet_summary result is needed by care_plan_reasons, so capture it.
-        diet_summary, *_ = await asyncio.gather(
-            _run_diet_summary(),
-            _run_recognition_bullets(),
+        # Phase 1: run all independent AI enrichments in parallel.
+        # _run_nutrition_analysis returns the analysis dict so Phase 2 can reuse it
+        # without a second analyze_nutrition() call.
+        analysis, *_ = await asyncio.gather(
             _run_nutrition_analysis(),
+            _run_recognition_bullets(),
             _run_life_stage(),
             _run_health_conditions_v2(),
             _run_vet_questions(),
         )
 
-        # Phase 2: care_plan_reasons depends on diet_summary — run after phase 1.
+        # Phase 2: diet_summary reformats the already-computed analysis (no AI call).
+        diet_summary = await _run_diet_summary(analysis)
+
+        # Phase 3: care_plan_reasons depends on diet_summary.
         await _run_care_plan_reasons(diet_summary)
 
         logger.info("precompute_dashboard_enrichments: completed for pet=%s", pet_id_str)

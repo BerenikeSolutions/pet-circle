@@ -1409,6 +1409,20 @@ async def _handle_conflict_button(db: Session, user, payload: str) -> None:
             await send_text_message(db, from_number, "Updated to the new date.")
         else:
             await send_text_message(db, from_number, "Kept the existing date.")
+        # Preventive record date changed — refresh dashboard cache.
+        try:
+            from app.services.precompute_service import precompute_dashboard_enrichments
+            pet_for_conflict = (
+                db.query(Pet)
+                .join(PreventiveRecord, Pet.id == PreventiveRecord.pet_id)
+                .join(ConflictFlag, ConflictFlag.preventive_record_id == PreventiveRecord.id)
+                .filter(ConflictFlag.id == conflict.id)
+                .first()
+            )
+            if pet_for_conflict:
+                asyncio.create_task(precompute_dashboard_enrichments(str(pet_for_conflict.id)))
+        except Exception as _pre_exc:
+            logger.warning("conflict resolve: failed to schedule precompute: %s", _pre_exc)
     except ValueError as e:
         await send_text_message(db, from_number, str(e))
 

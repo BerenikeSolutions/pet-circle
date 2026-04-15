@@ -1365,16 +1365,15 @@ def _diet_summary_threshold(macro_name: str, pct_of_need: float) -> tuple[str, s
     return "green", "On track"
 
 
-async def get_diet_summary(db: Session, pet) -> dict:
+async def get_diet_summary(db: Session, pet, analysis: dict | None = None) -> dict:
     """
     Format existing nutrition analysis as donut summaries with guardrail thresholds.
 
-    Calls the full analyze_nutrition pipeline, then re-formats the result into
-    4 donut-chart macro segments (Calories, Protein, Fat, Fibre) plus up to 3
-    missing micronutrients for the dashboard card.
+    Re-formats the result into 4 donut-chart macro segments (Calories, Protein,
+    Fat, Fibre) plus up to 3 missing micronutrients for the dashboard card.
 
-    The 4 macros map directly to the new prompt output fields:
-    calories_per_day, protein_pct, fat_pct, fibre_pct.
+    If ``analysis`` is provided (pre-computed by the caller), it is used directly
+    and no AI call is made. Otherwise, analyze_nutrition() is called internally.
 
     Returns:
         {
@@ -1391,7 +1390,8 @@ async def get_diet_summary(db: Session, pet) -> dict:
     Falls back to empty lists if the analysis pipeline raises an exception.
     """
     try:
-        analysis = await analyze_nutrition(db, pet.id)
+        if analysis is None:
+            analysis = await analyze_nutrition(db, pet.id)
     except Exception as e:
         logger.error("get_diet_summary: analyze_nutrition failed for pet %s: %s", pet.id, e)
         return {"macros": [], "missing_micros": []}

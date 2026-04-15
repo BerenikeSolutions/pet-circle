@@ -15,8 +15,6 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.constants import OPENAI_QUERY_MODEL
-from app.models.condition import Condition
-from app.models.diet_item import DietItem
 from app.models.pet import Pet
 from app.models.pet_life_stage_trait import PetLifeStageTrait
 from app.services.care_plan_engine import (
@@ -31,19 +29,6 @@ logger = logging.getLogger(__name__)
 
 _ALLOWED_TRAIT_COLORS = {"orange", "green", "neutral"}
 _MAX_TRAITS = 3
-_GENERIC_TRAIT_TOKENS = {
-    "energetic", "active", "playful", "friendly", "loyal", "curious", "social",
-    "calm", "happy", "alert",
-    "metabolism", "appetite", "vision decline", "slower",
-    "supplement", "supplements", "nutrition", "diet", "portion", "kibble", "feed",
-}
-_STAGE_SPECIFIC_TOKENS = {
-    "joint", "mobility", "dental", "weight", "bcs", "muscle",
-    "digestion", "stool", "coat", "heart", "kidney", "immunity", "mature",
-    "senior", "puppy", "junior", "adult", "hormone", "stiff", "recovery",
-    "screening", "screen", "panel", "cardiac", "thyroid", "hip", "elbow",
-    "patella", "ocular", "respiratory", "gait", "lameness",
-}
 _openai_client = None
 
 
@@ -111,7 +96,6 @@ async def _generate_life_stage_traits_gpt(
     breed: str,
     age_months: int,
     stage: str,
-    documented_risks: list[str],
 ) -> _LifeStageTraitsPayload:
     """Generate stage-specific traits from GPT and normalize the response."""
     client = _get_openai_client()
@@ -120,13 +104,22 @@ async def _generate_life_stage_traits_gpt(
     system_prompt = (
         "You generate breed- and life-stage-specific health insights for a pet dashboard.\n"
         "Return ONLY a valid JSON object matching this exact schema:\n"
-        '{"lifeStage": {"insights": [{\"text\": \"...\", \"color\": \"orange\"|\"green\"|\"neutral\"}]}}\n\n'
+        '{"lifeStage": {"insights": [{"text": "...", "color": "orange"|"green"|"neutral"}]}}\n\n'
         "LIFE STAGE DETERMINATION:\n"
         "Before determining life stage, estimate age-to-life-stage mapping using "
         "breed-specific thresholds — large and giant breeds are considered senior "
         "earlier (6–7 years) than small breeds (10–11 years).\n\n"
-        "INSIGHT RULES:\n"
-        "Include only breed- and life-stage-specific watch-outs and vet screenings.\n\n"
+        "STRICT INPUT CONSTRAINT:\n"
+        "Use ONLY the following inputs:\n"
+        "  - Breed\n"
+        "  - Age (or derived life stage)\n"
+        "Do NOT use or infer:\n"
+        "  - Existing health conditions\n"
+        "  - Symptoms\n"
+        "  - Weight or activity level\n"
+        "  - Medical history\n"
+        "  - Any external or assumed data beyond breed and age\n"
+        "All insights must be derived purely from typical life stage progression for this breed.\n\n"
         "DO NOT include:\n"
         "  - Normal aging observations (energy, metabolism, appetite, vision decline)\n"
         "  - Supplement or nutrition recommendations (handled separately)\n"
@@ -138,29 +131,40 @@ async def _generate_life_stage_traits_gpt(
         "  (B) VET SCREENINGS — for conditions not observable at home but this breed "
         "is predisposed to: cardiac checks, thyroid panels, eye screenings etc. "
         "Frame as: what to screen for and why it's relevant at this age/breed.\n\n"
-        "RANKING & SELECTION:\n"
-        "Rank all candidate insights by clinical importance to this specific breed at "
-        "this specific age. Select ONLY the top 3 — do not pad if fewer than 3 genuine "
-        "issues exist. If two insights are of equal clinical weight, prefer the one more "
-        "specific to the breed over the generic one.\n"
-        "Mix home watch-outs and vet screenings based on what is most clinically "
-        "relevant — do not force a fixed ratio.\n\n"
+        "ORDERING RULE (MANDATORY):\n"
+        "Do NOT rank purely by clinical importance.\n"
+        "Structure insights in this exact order:\n"
+        "  1. First insight: A positive or reassuring life-stage observation (green)\n"
+        "  2. Second insight: A mild or early watch-out (orange or neutral)\n"
+        "  3. Third insight: A more serious or long-term risk (orange)\n"
+        "This ordering must always be followed, even if clinical importance differs.\n"
+        "If two insights are of equal clinical weight, prefer the one more specific to the breed.\n"
+        "Mix home watch-outs and vet screenings based on what is most relevant — do not force a fixed ratio.\n\n"
+        "FRAMING:\n"
+        "Avoid naming specific diseases unless absolutely necessary. "
+        "Prefer observable patterns or functional changes over diagnostic labels. "
+        "Keep language calm, specific, and non-generic. "
+        "Frame insights as part of a natural life-stage progression, not isolated risks. "
+        "Avoid alarmist or clinical tone. "
+        "Do not label insights as 'home' or 'vet' in the output.\n\n"
         "FORMAT:\n"
         "Each text is ONE complete sentence, maximum 12 words. "
-        "Keep language calm, specific, and non-generic. "
-        "Do not label insights as 'home' or 'vet' in the output.\n\n"
+        "No markdown, no explanation, no preamble.\n\n"
         "COLOR ASSIGNMENT:\n"
         "  orange — watch-out or early warning the parent should actively monitor\n"
         "  green  — positive milestone or condition being managed well at this stage\n"
-        "  neutral — vet screening indicated but not urgent\n"
+        "  neutral — vet screening indicated but not urgent\n\n"
+        "RULES:\n"
+        "  - Maximum 3 insights — prioritise ruthlessly\n"
+        "  - Every insight must be breed- and age-specific\n"
+        "  - Each text is one complete sentence, maximum 12 words\n"
+        "  - No supplements or diet recommendations\n"
     )
 
     user_prompt = (
         f"Breed: {safe_breed}\n"
         f"Age months: {age_months}\n"
         f"Life stage: {stage}\n"
-        "Documented risks (use only these as evidence for essential care):\n"
-        f"- " + "\n- ".join(documented_risks)
     )
 
     async def _call() -> str:
@@ -189,50 +193,6 @@ async def _generate_life_stage_traits_gpt(
     return _coerce_traits_payload(parsed)
 
 
-def _is_stage_specific_trait(label: str) -> bool:
-    """Return True when trait text carries age/stage-specific value."""
-    value = (label or "").strip().lower()
-    if not value:
-        return False
-    if any(token in value for token in _STAGE_SPECIFIC_TOKENS):
-        return True
-    return not any(token in value for token in _GENERIC_TRAIT_TOKENS)
-
-
-
-def _collect_documented_risks(db: Session, pet: Pet) -> list[str]:
-    """Collect deterministic risk facts from pet profile and current records."""
-    risks: list[str] = []
-
-    if bool(getattr(pet, "weight_flagged", False)):
-        risks.append("Body condition concern: weight flagged during onboarding")
-
-    try:
-        active_conditions = (
-            db.query(Condition)
-            .filter(Condition.pet_id == pet.id, Condition.is_active == True)
-            .order_by(Condition.created_at.desc())
-            .all()
-        )
-        for cond in active_conditions[:2]:
-            if getattr(cond, "name", None):
-                risks.append(f"Active condition: {cond.name}")
-    except Exception:
-        logger.warning("Could not fetch active conditions for life-stage risks", exc_info=True)
-
-    try:
-        diet_items = db.query(DietItem).filter(DietItem.pet_id == pet.id).all()
-        has_packaged_food = any((getattr(item, "type", "") or "").lower() == "packaged" for item in diet_items)
-        has_supplement = any((getattr(item, "type", "") or "").lower() == "supplement" for item in diet_items)
-        if has_packaged_food and not has_supplement:
-            risks.append("Diet risk: packaged/kibble-heavy diet without supplement support")
-    except Exception:
-        logger.warning("Could not fetch diet items for life-stage risks", exc_info=True)
-
-    if not risks:
-        risks.append("Life-stage transition risk: preventive and nutrition needs shift with age")
-
-    return risks[:4]
 
 
 async def get_life_stage_data(db: Session, pet: Pet) -> LifeStageData:
@@ -246,7 +206,6 @@ async def get_life_stage_data(db: Session, pet: Pet) -> LifeStageData:
     breed_size = _get_breed_size(weight_kg, pet.breed)
     stage = _get_life_stage(age_months, breed_size)
     boundaries = BREED_SIZE_BOUNDARIES[breed_size]
-    documented_risks = _collect_documented_risks(db, pet)
 
     existing_rows = db.query(PetLifeStageTrait).filter_by(pet_id=pet.id).all()
     exact_row = next(
@@ -307,7 +266,6 @@ async def get_life_stage_data(db: Session, pet: Pet) -> LifeStageData:
             pet.breed or "mixed breed",
             age_months,
             stage.value,
-            documented_risks,
         )
     except Exception as exc:
         logger.warning("Life stage insight generation failed for pet=%s: %s", pet.id, exc)
