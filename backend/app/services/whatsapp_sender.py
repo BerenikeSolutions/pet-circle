@@ -638,10 +638,11 @@ async def download_whatsapp_media(media_id: str) -> tuple[bytes, str] | None:
     for attempt in range(max_retries + 1):
         try:
             # Step 1: Get media URL
+            # Meta's API can be slow; 20s timeout provides headroom for CDN latency.
             media_url_response = await client.get(
                 f"https://graph.facebook.com/v21.0/{media_id}",
                 headers={"Authorization": f"Bearer {settings.WHATSAPP_TOKEN}"},
-                timeout=15.0,
+                timeout=20.0,
             )
             media_url_response.raise_for_status()
             media_info = media_url_response.json()

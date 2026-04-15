@@ -1659,10 +1659,14 @@ async def _step_supplements_v2(db, user, text, send_fn):
             )
             return
 
-        items = await _parse_diet_input(text)
-        for entry in items:
-            label = entry[0]
-            detail = entry[1] if len(entry) > 1 else ""
+        # Use supplement-specific extractor instead of food parser
+        supplements = await _extract_meal_supplement_items(text)
+        # If supplement extractor returns no items (e.g., "omega" not recognized),
+        # fall back to treating the input as a supplement label directly.
+        if not supplements and text_lower and text_lower not in _SKIP_INPUTS:
+            supplements = [(text.strip(), "")]
+
+        for label, detail in supplements:
             try:
                 await add_diet_item(db, pet.id, "supplement", label, detail or None)
             except Exception as e:
