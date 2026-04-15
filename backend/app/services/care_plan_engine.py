@@ -23,7 +23,7 @@ from enum import StrEnum
 from typing import NotRequired, TypedDict
 from uuid import UUID
 
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.models.condition import Condition
 from app.models.condition_medication import ConditionMedication
@@ -337,6 +337,9 @@ class _Prescription:
 
     due_date: date
     medicine_name: str
+    condition_name: str | None = None
+    dose: str | None = None
+    notes: str | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1067,6 +1070,7 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
         active_meds = (
             db.query(ConditionMedication)
             .join(Condition, ConditionMedication.condition_id == Condition.id)
+            .options(joinedload(ConditionMedication.condition))
             .filter(
                 Condition.pet_id == pet.id,
                 ConditionMedication.status == "active",
@@ -1086,9 +1090,13 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
             # Last prescription per key wins (more recent takes precedence).
             existing = prescriptions_by_key.get(item_key)
             if existing is None or med.refill_due_date > existing.due_date:
+                condition_name = med.condition.name if med.condition else None
                 prescriptions_by_key[item_key] = _Prescription(
                     due_date=med.refill_due_date,
                     medicine_name=med.name,
+                    condition_name=condition_name,
+                    dose=(med.dose or None),
+                    notes=(med.notes or None),
                 )
 
         # ── Determine full set of item_keys to classify ──────────────────────
@@ -1272,6 +1280,16 @@ def compute_care_plan(db: Session, pet: Pet) -> CarePlanV2:
 
             if classification == Classification.PRESCRIPTION_ACTIVE:
                 # Attend To — active prescription with no post-Rx report.
+                # Build a reason string so the pet parent understands context.
+                if prescription is not None:
+                    reason_parts = []
+                    if prescription.condition_name:
+                        reason_parts.append(f"Prescribed for {prescription.condition_name}")
+                    if prescription.dose:
+                        reason_parts.append(prescription.dose)
+                    if prescription.notes:
+                        reason_parts.append(prescription.notes)
+                    item["reason"] = " · ".join(reason_parts) if reason_parts else None
                 attend_items[item_key] = item
                 continue_items.pop(item_key, None)
                 add_items.pop(item_key, None)

@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import Column, Date, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 
 from app.database import Base
@@ -82,6 +82,13 @@ class PreventiveRecord(Base):
     # Relevant for medicine-dependent items (Deworming, Tick/Flea, Supplements).
     # Used to calculate AI-based next due date based on specific product + species.
     medicine_name = Column(String(200), nullable=True)
+
+    # Rich vaccine metadata extracted by GPT from vaccination certificates.
+    # Populated for vaccine-type preventive records only. Stores fields that
+    # have no dedicated column: dose, dose_unit, route, manufacturer,
+    # batch_number, administered_by, notes, vaccine_name_raw.
+    # Null for non-vaccine preventive items and pre-migration records.
+    vaccination_metadata = Column(JSONB, nullable=True)
 
     # Timestamps managed by PostgreSQL DEFAULT NOW().
     created_at = Column(DateTime, default=datetime.utcnow)

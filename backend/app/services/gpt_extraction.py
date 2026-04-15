@@ -2794,6 +2794,9 @@ async def extract_and_process_document(
         extracted_items, document_name, extracted_pet_name, metadata = _validate_extraction_dict(extraction_result, file_path=document.file_path)
         results["document_type"] = metadata["document_type"]
         results["diagnostic_summary"] = metadata["diagnostic_summary"]
+        # Persist GPT-generated diagnostic summary on the document row.
+        if metadata.get("diagnostic_summary"):
+            document.diagnostic_summary = str(metadata["diagnostic_summary"])[:2000]
         results["diagnostic_values"] = metadata.get("diagnostic_values", [])
         results["doctor_name"] = metadata["doctor_name"]
         results["clinic_name"] = metadata["clinic_name"]
@@ -3070,6 +3073,18 @@ async def extract_and_process_document(
                     "Failed to save vet diet recommendations for pet=%s document=%s: %s",
                     pet.id, document_id, exc,
                 )
+
+        # --- Store non-diet recommendations on the document ---
+        # activity / rest / follow_up / other recs have no separate table;
+        # persist them as JSONB on the document row so the dashboard can
+        # surface follow-up instructions and activity restrictions.
+        # Exclude null/empty type to avoid storing malformed GPT output.
+        non_diet_recs = [
+            rec for rec in raw_recommendations
+            if isinstance(rec, dict) and rec.get("type") not in (None, "", "diet")
+        ]
+        if non_diet_recs:
+            document.non_diet_recommendations = non_diet_recs
 
         # --- Store extracted conditions ---
         extracted_conditions = metadata.get("conditions") or []
@@ -3608,6 +3623,13 @@ async def extract_and_process_document(
                     str(document_id),
                 )
                 document.extraction_status = "success"
+            # Re-apply document-level metadata fields before committing
+            # (conditions/contacts loops above may have called db.rollback(),
+            # expiring the document object and losing earlier assignments).
+            if metadata.get("diagnostic_summary"):
+                document.diagnostic_summary = str(metadata["diagnostic_summary"])[:2000]
+            if non_diet_recs:
+                document.non_diet_recommendations = non_diet_recs
             db.commit()
             return results
 
@@ -3615,6 +3637,20 @@ async def extract_and_process_document(
         # Pre-load all preventive masters for this species once
         # to avoid per-item DB queries (N+1 prevention).
         species_masters = _load_species_masters(db, pet.species)
+
+        # Build a lookup from tracked item_name → vaccination_detail dict so
+        # that we can attach rich metadata (dose, manufacturer, batch, etc.)
+        # to the preventive record after it is created.
+        # Mapping direction: vaccine_name from detail → item_name via
+        # _VACCINE_DETAIL_TO_ITEM, then invert so we can look up by item_name.
+        _vacc_meta_by_item: dict[str, dict] = {}
+        for _vd in metadata.get("vaccination_details", []):
+            if not isinstance(_vd, dict):
+                continue
+            _vn = str(_vd.get("vaccine_name") or _vd.get("vaccine_name_raw") or "").strip().lower()
+            for _keyword, _mapped_item in _VACCINE_DETAIL_TO_ITEM.items():
+                if _keyword in _vn and _mapped_item not in _vacc_meta_by_item:
+                    _vacc_meta_by_item[_mapped_item] = _vd
         species_masters = _filter_non_applicable_puppy_series(
             species_masters,
             include_puppy_series=_should_include_puppy_series_for_pet(pet),
@@ -3667,12 +3703,31 @@ async def extract_and_process_document(
                 else:
                     # No conflict — create or update preventive record.
                     # compute_next_due_date uses master.recurrence_days from DB.
-                    create_preventive_record(
+                    record = create_preventive_record(
                         db=db,
                         pet_id=pet.id,
                         preventive_master_id=master.id,
                         last_done_date=last_done_date,
                     )
+
+                    # Attach vaccination metadata when available.
+                    # Prefer the matched vaccination_detail; fall back to
+                    # item-level batch_number / dose fields from the items array.
+                    _vacc_detail = _vacc_meta_by_item.get(item_name)
+                    _meta: dict = {}
+                    if _vacc_detail:
+                        # Strip fields already stored elsewhere (date, next_due_date)
+                        # and null values to keep the JSONB compact.
+                        _skip = {"vaccine_name", "next_due_date", "date", "administered_date", "last_done_date"}
+                        _meta = {k: v for k, v in _vacc_detail.items() if k not in _skip and v is not None}
+                    # Merge item-level fields not already captured from the detail.
+                    if item.get("batch_number") and not _meta.get("batch_number"):
+                        _meta["batch_number"] = item["batch_number"]
+                    if item.get("dose") and not _meta.get("dose"):
+                        _meta["dose"] = item["dose"]
+                    if _meta:
+                        record.vaccination_metadata = _meta
+                        db.flush()
 
                     logger.info(
                         "Preventive record created for %s: pet_id=%s, "
@@ -3712,6 +3767,18 @@ async def extract_and_process_document(
                 results["errors"].extend(save_errors)
 
         # --- Step 5: Update extraction status ---
+        # Re-apply document-level metadata fields here (in addition to the
+        # earlier assignments) to guard against SQLAlchemy object expiry.
+        # Conditions / contacts / items loops each call db.rollback() on
+        # individual failures, which expires all session-tracked objects
+        # including `document`. Any attributes set before those rollbacks
+        # are cleared from the in-memory dirty state and would be silently
+        # dropped on the final commit. Re-applying them here ensures they
+        # are always written, regardless of how many per-item rollbacks fired.
+        if metadata.get("diagnostic_summary"):
+            document.diagnostic_summary = str(metadata["diagnostic_summary"])[:2000]
+        if non_diet_recs:
+            document.non_diet_recommendations = non_diet_recs
         document.extraction_status = "success"
         db.commit()
 

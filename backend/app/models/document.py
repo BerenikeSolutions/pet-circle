@@ -14,8 +14,8 @@ Constraints:
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Column, Date, DateTime, Float, ForeignKey, Integer, String
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Column, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import relationship
 
 from app.database import Base
@@ -113,6 +113,18 @@ class Document(Base):
     # Model-rated confidence for the extraction result (0.0–1.0).
     # Values below EXTRACTION_LOW_CONFIDENCE_THRESHOLD trigger a second-pass retry.
     extraction_confidence = Column(Float, nullable=True)
+
+    # 1–2 sentence plain-language summary of key findings, populated by GPT
+    # for Diagnostic documents (blood panels, imaging, etc.). Null for all
+    # other document categories.
+    diagnostic_summary = Column(Text, nullable=True)
+
+    # Vet recommendations that are NOT diet instructions (type: activity, rest,
+    # follow_up, other). Stored as a JSONB array so they can be surfaced on
+    # the dashboard without a separate table. Each entry mirrors the GPT schema:
+    # {type, description, linked_condition, duration, notes}.
+    # Null when no non-diet recommendations were extracted.
+    non_diet_recommendations = Column(JSONB, nullable=True)
 
     # --- Relationships ---
 
