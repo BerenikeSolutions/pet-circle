@@ -689,9 +689,12 @@ async def download_whatsapp_media(media_id: str) -> tuple[bytes, str] | None:
             return file_bytes, mime_type
 
         except Exception as e:
+            error_type = type(e).__name__
+            error_msg = str(e) if str(e) else f"{error_type} (no message)"
             logger.error(
-                "Failed to download media: media_id=%s, attempt=%d/%d, error=%s",
-                media_id, attempt + 1, max_retries + 1, str(e),
+                "Failed to download media: media_id=%s, attempt=%d/%d, error_type=%s, error=%s",
+                media_id, attempt + 1, max_retries + 1, error_type, error_msg,
+                exc_info=True,  # Include full traceback
             )
             if attempt < max_retries:
                 backoff = _BACKOFFS[attempt] + _random.uniform(0, 0.5)
