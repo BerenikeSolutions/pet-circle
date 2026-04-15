@@ -39,11 +39,11 @@ _openai_weight_client = None
 
 
 def _get_openai_weight_client():
-    """Return a cached AsyncAnthropic client for weight lookups (created on first call)."""
+    """Return a cached AI client for weight lookups (provider-agnostic, created on first call)."""
     global _openai_weight_client
     if _openai_weight_client is None:
-        from anthropic import AsyncAnthropic
-        _openai_weight_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        from app.utils.ai_client import get_ai_client  # noqa: PLC0415
+        _openai_weight_client = get_ai_client()
     return _openai_weight_client
 
 

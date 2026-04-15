@@ -50,16 +50,22 @@ def _get_claude_semaphore() -> asyncio.Semaphore:
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
-    """Return True if *exc* is a Claude/Anthropic 429 rate-limit error."""
+    """Return True if *exc* is a 429 rate-limit error from Anthropic or OpenAI."""
     try:
         from anthropic import RateLimitError as AnthropicRateLimitError  # noqa: PLC0415
         if isinstance(exc, AnthropicRateLimitError):
             return True
     except ImportError:
         pass
-    # Fallback: match the error type string included in the Anthropic SDK message.
+    try:
+        from openai import RateLimitError as OpenAIRateLimitError  # noqa: PLC0415
+        if isinstance(exc, OpenAIRateLimitError):
+            return True
+    except ImportError:
+        pass
+    # Fallback: match status code or error type string.
     err_str = str(exc)
-    return "rate_limit_error" in err_str
+    return "rate_limit_error" in err_str or "429" in err_str
 
 
 async def retry_openai_call(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:

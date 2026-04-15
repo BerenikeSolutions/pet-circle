@@ -12,13 +12,12 @@ import logging
 import re
 from datetime import date, datetime, timedelta
 
-from anthropic import AsyncAnthropic
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.core.constants import OPENAI_QUERY_MODEL
 from app.models.hygiene_preference import HygienePreference
 from app.models.hygiene_tip_cache import HygieneTipCache
+from app.utils.ai_client import get_ai_client
 from app.utils.retry import retry_openai_call
 
 logger = logging.getLogger(__name__)
@@ -36,15 +35,15 @@ DEFAULT_HYGIENE = {
 # Cache staleness — regenerate tips after this many days
 HYGIENE_TIP_CACHE_DAYS = 365
 
-# Lazy-initialised Anthropic client
+# Lazy-initialised AI client
 _openai_client = None
 
 
 def _get_openai_client():
-    """Lazy-init Anthropic client."""
+    """Lazy-init AI client (provider-agnostic)."""
     global _openai_client
     if _openai_client is None:
-        _openai_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        _openai_client = get_ai_client()
     return _openai_client
 
 

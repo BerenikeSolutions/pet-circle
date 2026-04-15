@@ -1405,11 +1405,11 @@ _anthropic_extraction_client = None
 
 
 def _get_anthropic_extraction_client():
-    """Return a cached AsyncAnthropic client for extraction (created on first call)."""
+    """Return a cached AI client for extraction (provider-agnostic, created on first call)."""
     global _anthropic_extraction_client
     if _anthropic_extraction_client is None:
-        from anthropic import AsyncAnthropic
-        _anthropic_extraction_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        from app.utils.ai_client import get_ai_client  # noqa: PLC0415
+        _anthropic_extraction_client = get_ai_client()
     return _anthropic_extraction_client
 
 

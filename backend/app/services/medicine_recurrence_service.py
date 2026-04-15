@@ -28,11 +28,11 @@ _openai_medicine_client = None
 
 
 def _get_openai_client():
-    """Return a cached Anthropic client (created on first call)."""
+    """Return a cached sync AI client (provider-agnostic, created on first call)."""
     global _openai_medicine_client
     if _openai_medicine_client is None:
-        import anthropic
-        _openai_medicine_client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        from app.utils.ai_client import get_sync_ai_client  # noqa: PLC0415
+        _openai_medicine_client = get_sync_ai_client()
     return _openai_medicine_client
 
 

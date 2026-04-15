@@ -813,8 +813,8 @@ def _get_or_generate_nudge_insight(db: Session, user: User, pet: Pet) -> str | N
     )
 
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        from app.utils.ai_client import get_sync_ai_client  # noqa: PLC0415
+        client = get_sync_ai_client()
         resp = client.messages.create(
             model=OPENAI_QUERY_MODEL,
             messages=[{"role": "user", "content": prompt}],

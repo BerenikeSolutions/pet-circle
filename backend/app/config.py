@@ -44,8 +44,10 @@ class Settings(BaseSettings):
     # --- Environment ---
     APP_ENV: str = APP_ENV
 
-    # --- Anthropic ---
-    ANTHROPIC_API_KEY: str
+    # --- AI Providers ---
+    # At least one key must be set depending on AI_PROVIDER.
+    ANTHROPIC_API_KEY: str | None = None
+    OPENAI_API_KEY: str | None = None
 
     # --- Supabase ---
     SUPABASE_URL: str

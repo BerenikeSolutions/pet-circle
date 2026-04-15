@@ -244,11 +244,11 @@ def _format_found_diet_summary(food_items: list[DietItem], supplement_items: lis
 
 
 def _get_openai_client():
-    """Lazy-initialise AsyncAnthropic client (avoids import-time errors)."""
+    """Lazy-initialise AI client (provider-agnostic, avoids import-time errors)."""
     global _openai_client
     if _openai_client is None:
-        from anthropic import AsyncAnthropic
-        _openai_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        from app.utils.ai_client import get_ai_client  # noqa: PLC0415
+        _openai_client = get_ai_client()
     return _openai_client
 
 

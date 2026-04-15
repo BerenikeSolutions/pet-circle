@@ -32,7 +32,6 @@ import secrets
 from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
-from anthropic import AsyncAnthropic
 from sqlalchemy import case, func, or_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -71,17 +70,18 @@ from app.utils.date_utils import (
     parse_date_with_ai,
 )
 from app.utils.file_reader import encode_image_base64
+from app.utils.ai_client import get_ai_client
 from app.utils.retry import retry_openai_call
 
 logger = logging.getLogger(__name__)
 
 _openai_onboarding_client = None
 
-def _get_openai_onboarding_client() -> AsyncAnthropic:
-    """Return a cached AsyncAnthropic client for onboarding checks."""
+def _get_openai_onboarding_client():
+    """Return a cached AI client for onboarding checks (provider-agnostic)."""
     global _openai_onboarding_client
     if _openai_onboarding_client is None:
-        _openai_onboarding_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        _openai_onboarding_client = get_ai_client()
     return _openai_onboarding_client
 
 def is_doc_upload_deadline_expired(deadline: datetime | None) -> bool:

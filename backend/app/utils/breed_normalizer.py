@@ -292,15 +292,13 @@ async def normalize_breed_with_ai(breed: str, species: str | None = None) -> str
     """
     import logging
 
-    from anthropic import AsyncAnthropic
-
-    from app.config import settings
     from app.core.constants import OPENAI_QUERY_MODEL
+    from app.utils.ai_client import get_ai_client
 
     logger = logging.getLogger(__name__)
 
     animal = species or "pet"
-    client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+    client = get_ai_client()
 
     try:
         response = await client.messages.create(

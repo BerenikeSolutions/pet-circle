@@ -66,12 +66,11 @@ class _LifeStageTraitsPayload:
 
 
 def _get_openai_client():
-    """Lazy-initialise AsyncAnthropic client."""
+    """Lazy-initialise AI client (provider-agnostic)."""
     global _openai_client
     if _openai_client is None:
-        from anthropic import AsyncAnthropic
-
-        _openai_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        from app.utils.ai_client import get_ai_client  # noqa: PLC0415
+        _openai_client = get_ai_client()
     return _openai_client
 
 

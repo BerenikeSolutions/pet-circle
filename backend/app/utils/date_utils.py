@@ -127,12 +127,10 @@ async def parse_date_with_ai(raw_date: str) -> date:
     Raises:
         ValueError: If AI also cannot parse the date.
     """
-    from anthropic import AsyncAnthropic
-
-    from app.config import settings
     from app.core.constants import OPENAI_QUERY_MODEL
+    from app.utils.ai_client import get_ai_client
 
-    client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+    client = get_ai_client()
 
     today_str = date.today().isoformat()
     try:

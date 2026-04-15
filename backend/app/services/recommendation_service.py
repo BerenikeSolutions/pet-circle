@@ -48,11 +48,11 @@ _openai_recommendation_client = None
 
 
 def _get_openai_client():
-    """Return a cached AsyncAnthropic client for recommendations."""
+    """Return a cached AI client for recommendations (provider-agnostic)."""
     global _openai_recommendation_client
     if _openai_recommendation_client is None:
-        from anthropic import AsyncAnthropic
-        _openai_recommendation_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        from app.utils.ai_client import get_ai_client  # noqa: PLC0415
+        _openai_recommendation_client = get_ai_client()
     return _openai_recommendation_client
 
 

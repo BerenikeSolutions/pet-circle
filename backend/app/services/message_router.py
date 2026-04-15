@@ -62,6 +62,7 @@ from app.core.constants import (
 )
 from app.core.constants import (
     REMINDER_PAYLOADS as _REMINDER_PAYLOADS_CONST,
+    AI_QUERY_MODEL,
 )
 from app.core.encryption import decrypt_field
 from app.core.log_sanitizer import mask_phone
@@ -623,13 +624,13 @@ async def _extract_vet_diet_from_chat(text: str) -> list[dict]:
     Returns [] on parse failure or if nothing vet-prescribed is detected.
     """
     import json
-    from anthropic import AsyncAnthropic
     from app.services.nutrition_service import _parse_json_from_response
+    from app.utils.ai_client import get_ai_client
 
     try:
-        client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        client = get_ai_client()
         response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",   # fast + cheap for extraction
+            model=AI_QUERY_MODEL,
             temperature=0.0,
             max_tokens=400,
             system=_VET_DIET_EXTRACT_SYSTEM_PROMPT,
