@@ -170,12 +170,31 @@ MAX_MESSAGES_PER_MINUTE: int = 20
 # Rolling window duration in seconds for rate limiting.
 RATE_LIMIT_WINDOW_SECONDS: int = 60
 
-# --- Claude Model Configuration ---
-# Opus: document extraction (higher accuracy for complex parsing).
-OPENAI_EXTRACTION_MODEL: str = "claude-opus-4-6"
+# =============================================================================
+# AI MODEL SWITCH — change only AI_PROVIDER to swap provider/tier everywhere.
+# Valid values: "claude" | "openai"
+# =============================================================================
+AI_PROVIDER: str = "claude"
 
-# Sonnet: all other AI calls (query, onboarding, insights, nutrition, hygiene, etc.).
-OPENAI_QUERY_MODEL: str = "claude-sonnet-4-6"
+# --- Claude model IDs (Anthropic) ---
+_CLAUDE_EXTRACTION_MODEL: str = "claude-opus-4-6"    # Opus: complex document parsing
+_CLAUDE_QUERY_MODEL: str = "claude-sonnet-4-6"       # Sonnet: all other AI calls
+
+# --- OpenAI model IDs ---
+_OPENAI_EXTRACTION_MODEL: str = "gpt-4.1"            # GPT-4.1: document extraction
+_OPENAI_QUERY_MODEL: str = "gpt-4.1"                 # GPT-4.1: queries / insights
+
+# --- Active models — resolved from AI_PROVIDER (do not edit below this line) ---
+AI_EXTRACTION_MODEL: str = (
+    _CLAUDE_EXTRACTION_MODEL if AI_PROVIDER == "claude" else _OPENAI_EXTRACTION_MODEL
+)
+AI_QUERY_MODEL: str = (
+    _CLAUDE_QUERY_MODEL if AI_PROVIDER == "claude" else _OPENAI_QUERY_MODEL
+)
+
+# Backward-compatible aliases — all existing imports continue to work unchanged.
+OPENAI_EXTRACTION_MODEL: str = AI_EXTRACTION_MODEL
+OPENAI_QUERY_MODEL: str = AI_QUERY_MODEL
 
 # Temperature for extraction — deterministic output required.
 OPENAI_EXTRACTION_TEMPERATURE: float = 0.0
@@ -185,17 +204,16 @@ OPENAI_EXTRACTION_TEMPERATURE: float = 0.0
 # With conditions/contacts/fecal/xray extraction, output can reach ~5000 tokens.
 OPENAI_EXTRACTION_MAX_TOKENS: int = 6144
 
-# Query-specific OpenAI settings — separated from extraction to allow
-# independent tuning (e.g., slightly higher temperature for natural responses).
+# Query-specific settings — separated from extraction to allow independent tuning.
 OPENAI_QUERY_TEMPERATURE: float = 0.0
 OPENAI_QUERY_MAX_TOKENS: int = 1500
 
 # --- Retry Configuration ---
-# OpenAI retry backoff intervals in seconds (transient errors).
+# Retry backoff intervals in seconds (transient errors).
 OPENAI_RETRY_BACKOFFS: list[float] = [1.0, 2.0]
-# Rate-limit (429) specific backoffs — much longer to allow TPM window recovery.
+# Rate-limit (429) specific backoffs — longer to allow TPM window recovery.
 OPENAI_RATE_LIMIT_BACKOFFS: list[float] = [10.0, 20.0]
-# Max concurrent Claude/Anthropic API calls across the whole process.
+# Max concurrent AI API calls across the whole process.
 CLAUDE_API_CONCURRENCY: int = 5
 
 # --- Extraction Hardening ---
@@ -209,7 +227,7 @@ EXTRACTION_MAX_AUTO_RETRIES: int = 3
 EXTRACTION_LOW_CONFIDENCE_THRESHOLD: float = 0.65
 
 # --- Weight Lookup (AI-powered ideal weight range) ---
-OPENAI_WEIGHT_LOOKUP_MODEL: str = OPENAI_QUERY_MODEL  # claude-sonnet-4-6
+OPENAI_WEIGHT_LOOKUP_MODEL: str = AI_QUERY_MODEL  # resolves from AI_PROVIDER
 OPENAI_WEIGHT_LOOKUP_TEMPERATURE: float = 0.0
 OPENAI_WEIGHT_LOOKUP_MAX_TOKENS: int = 200
 WEIGHT_CACHE_STALENESS_DAYS: int = 365
