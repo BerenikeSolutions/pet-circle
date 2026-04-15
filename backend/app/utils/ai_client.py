@@ -55,10 +55,11 @@ class _ToolUseContent:
 
 class _FakeResponse:
     """Anthropic-shaped response wrapper for OpenAI replies."""
-    __slots__ = ("content",)
+    __slots__ = ("content", "stop_reason")
 
-    def __init__(self, content_items: list) -> None:
+    def __init__(self, content_items: list, stop_reason: str = "end_turn") -> None:
         self.content = content_items
+        self.stop_reason = stop_reason
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +169,8 @@ class _AsyncMessagesProxy:
             )
             tool_call = response.choices[0].message.tool_calls[0]
             input_dict = json.loads(tool_call.function.arguments)
-            return _FakeResponse([_ToolUseContent(input_dict)])
+            stop_reason = response.choices[0].finish_reason or "end_turn"
+            return _FakeResponse([_ToolUseContent(input_dict)], stop_reason=stop_reason)
 
         response = await client.chat.completions.create(
             model=model,
@@ -177,7 +179,8 @@ class _AsyncMessagesProxy:
             max_tokens=max_tokens,
         )
         text = response.choices[0].message.content or ""
-        return _FakeResponse([_TextContent(text)])
+        stop_reason = response.choices[0].finish_reason or "end_turn"
+        return _FakeResponse([_TextContent(text)], stop_reason=stop_reason)
 
 
 class _OpenAIAdapter:
@@ -226,7 +229,8 @@ class _SyncMessagesProxy:
             )
             tool_call = response.choices[0].message.tool_calls[0]
             input_dict = json.loads(tool_call.function.arguments)
-            return _FakeResponse([_ToolUseContent(input_dict)])
+            stop_reason = response.choices[0].finish_reason or "end_turn"
+            return _FakeResponse([_ToolUseContent(input_dict)], stop_reason=stop_reason)
 
         response = client.chat.completions.create(
             model=model,
@@ -235,7 +239,8 @@ class _SyncMessagesProxy:
             max_tokens=max_tokens,
         )
         text = response.choices[0].message.content or ""
-        return _FakeResponse([_TextContent(text)])
+        stop_reason = response.choices[0].finish_reason or "end_turn"
+        return _FakeResponse([_TextContent(text)], stop_reason=stop_reason)
 
 
 class _SyncOpenAIAdapter:

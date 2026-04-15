@@ -3805,6 +3805,8 @@ async def _parse_breed_age(text: str) -> dict:
         "If the user provides a date of birth (like '11/11/2021', '11 Nov 21', etc.), "
         "convert it to ISO format (YYYY-MM-DD) in the 'dob' field AND compute age_years "
         "from today's date. Use the 2-digit year rule: 00-30 = 2000s, 31-99 = 1900s. "
+        "If the user gives only an age in years or months (e.g. '2 years', '6 months') "
+        "without an explicit birth date, set dob to null — do NOT compute a dob from the age. "
         "If no age is given, set age_years, age_text, and dob to null.\n\n"
         f"User message: {text}"
     )
