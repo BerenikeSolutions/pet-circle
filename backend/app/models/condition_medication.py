@@ -28,6 +28,10 @@ class ConditionMedication(Base):
     condition_id = Column(UUID(as_uuid=True), ForeignKey("conditions.id", ondelete="CASCADE"), index=True, nullable=False)
 
     name = Column(String(200), nullable=False)
+    # "medicine" = pharmaceutical drug; "supplement" = nutritional/supportive.
+    # Supplements are routed to diet_items at extraction time; this column
+    # stores the GPT classification for the medicines that land here.
+    item_type = Column(String(20), nullable=False, default="medicine")
     dose = Column(String(100), nullable=True)
     frequency = Column(String(100), nullable=True)
     route = Column(String(50), nullable=True)

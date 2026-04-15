@@ -3267,6 +3267,7 @@ async def extract_and_process_document(
                         db.add(ConditionMedication(
                             condition_id=condition_obj.id,
                             name=med_name[:200],
+                            item_type="medicine",
                             dose=(str(med.get("dose"))[:100] if med.get("dose") else None),
                             frequency=(str(med.get("frequency"))[:100] if med.get("frequency") else None),
                             route=(str(med.get("route"))[:50] if med.get("route") else None),
@@ -3379,6 +3380,7 @@ async def extract_and_process_document(
                                 db.add(ConditionMedication(
                                     condition_id=standalone_condition.id,
                                     name=med_name[:200],
+                                    item_type="medicine",
                                     dose=(str(med.get("dose"))[:100] if med.get("dose") else None),
                                     frequency=(str(med.get("frequency"))[:100] if med.get("frequency") else None),
                                     route=(str(med.get("route"))[:50] if med.get("route") else None),

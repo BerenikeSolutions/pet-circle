@@ -23,3 +23,10 @@ ALTER TABLE documents
 
 ALTER TABLE preventive_records
   ADD COLUMN IF NOT EXISTS vaccination_metadata JSONB;
+
+-- Gap 4: condition_medications.item_type
+--   GPT classifies every medication as "medicine" or "supplement" via item_type.
+--   Supplements are routed to diet_items; medicines land in condition_medications.
+--   The classification was extracted but never stored — this column preserves it.
+ALTER TABLE condition_medications
+  ADD COLUMN IF NOT EXISTS item_type VARCHAR(20) NOT NULL DEFAULT 'medicine';
