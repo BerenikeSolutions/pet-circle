@@ -76,5 +76,8 @@ dashboard/
 !frontend/src/components/dashboard/*.ts
 !frontend/src/components/dashboard/*.tsx
 
+# === Claude Code (personal workflow — not for client) ===
+.claude/
+
 # === Other project ideas (not part of this repo) ===
 other projects/

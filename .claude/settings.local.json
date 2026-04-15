@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python -c \"import ast; ast.parse\\(open\\('backend/app/services/onboarding.py'\\).read\\(\\)\\); print\\('onboarding.py OK'\\)\")",
-      "Bash(python -c \"import ast; ast.parse\\(open\\('backend/app/services/nudge_scheduler.py'\\).read\\(\\)\\); print\\('nudge_scheduler.py OK'\\)\")",
-      "Bash(python -m pytest tests/unit/ -v --timeout=30)"
-    ]
-  }
-}
